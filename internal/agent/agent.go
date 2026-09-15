@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/openai/openai-go/v3"
@@ -13,7 +14,7 @@ type Agent struct {
 	Model llm.Model
 }
 
-func (a *Agent) AgentLoop(ctx context.Context, prompt string) {
+func (a *Agent) AgentLoop(ctx context.Context, msg llm.AgentContext) {
 	client := openai.NewClient()
 
 	// 1.组装上下文与工具
@@ -38,9 +39,8 @@ func (a *Agent) AgentLoop(ctx context.Context, prompt string) {
 			Parameters:  emptyParams,
 		}},
 	}
-	input := responses.ResponseNewParamsInputUnion{
-		OfString: openai.String(prompt),
-	}
+
+	input := a.BuildInput(msg)
 
 	// 2.开始正式loop
 	var resp responses.Response
@@ -105,4 +105,81 @@ func (a *Agent) AgentLoop(ctx context.Context, prompt string) {
 		}
 		input = responses.ResponseNewParamsInputUnion{OfInputItemList: toolCall}
 	}
+}
+
+func (a *Agent) BuildInput(msg llm.AgentContext) responses.ResponseNewParamsInputUnion {
+	var items responses.ResponseInputParam
+
+	// 1.System Prompt
+	if msg.SystemPrompt != "" {
+		items = append(items, responses.ResponseInputItemParamOfMessage(
+			msg.SystemPrompt,
+			responses.EasyInputMessageRoleSystem,
+		))
+	}
+
+	// 2.Messages -> 根据Role进行初步分类 -> 再根据 Text/Image/ToolCall，拼接起来
+	for _, m := range msg.Messages {
+		switch m.Role() {
+		case "user", "assistant":
+			role := responses.EasyInputMessageRoleUser
+			if m.Role() == "assistant" {
+				role = responses.EasyInputMessageRoleAssistant
+			}
+			var contents responses.ResponseInputMessageContentListParam
+			flush := func() {
+				if len(contents) == 0 {
+					return
+				}
+				items = append(items, responses.ResponseInputItemParamOfMessage(contents, role))
+				contents = nil
+			}
+			for _, c := range m.GetContent() {
+				switch v := c.(type) {
+				case llm.TextContent:
+					contents = append(contents, responses.ResponseInputContentUnionParam{
+						OfInputText: &responses.ResponseInputTextParam{Text: v.Text},
+					})
+				case llm.ImageContent:
+					contents = append(contents, responses.ResponseInputContentUnionParam{
+						OfInputImage: &responses.ResponseInputImageParam{
+							Detail:   responses.ResponseInputImageDetailAuto,
+							ImageURL: openai.String("data:" + v.MIMEType + ";base64," + v.Data),
+						},
+					})
+				case llm.ToolCall:
+					flush()
+					args, _ := json.Marshal(v.Arguments)
+					items = append(items, responses.ResponseInputItemParamOfFunctionCall(
+						string(args), v.ToolCallID, v.ToolName,
+					))
+				}
+			}
+			flush()
+		case "tool_result":
+			callID := ""
+			switch t := m.(type) {
+			case llm.ToolResultMessage:
+				callID = t.ToolCallID
+			case *llm.ToolResultMessage:
+				callID = t.ToolCallID
+			}
+			var text string
+			for _, c := range m.GetContent() {
+				if v, ok := c.(llm.TextContent); ok {
+					text += v.Text
+				}
+			}
+			items = append(items, responses.ResponseInputItemUnionParam{
+				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
+					CallID: openai.String(callID),
+					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
+						OfString: openai.String(text),
+					},
+				},
+			})
+		}
+	}
+
+	return responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 }

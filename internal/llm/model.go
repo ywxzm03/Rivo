@@ -1,5 +1,8 @@
 package llm
 
 type Model struct {
-	Name string
+	ID       string
+	Name     string
+	Provider string
+	BaseURL  string
 }
