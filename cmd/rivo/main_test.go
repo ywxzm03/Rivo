@@ -26,12 +26,11 @@ func TestRunDelegatesToCLI(t *testing.T) {
 	}
 }
 
-// TestRivoHelperProcess 在子进程中调用 main，验证真实退出码
 func TestRivoHelperProcess(t *testing.T) {
 	if os.Getenv("Rivo_HELPER_PROCESS") != "1" {
 		return
 	}
-	// 丢弃测试框架参数，使 main 接收无参数调用
+
 	os.Args = []string{"Rivo"}
 	main()
 }

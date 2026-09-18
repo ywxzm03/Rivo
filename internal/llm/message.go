@@ -1,39 +1,59 @@
 package llm
 
+type Role string
+
+const (
+	RoleUser       Role = "user"
+	RoleAssistant  Role = "assistant"
+	RoleToolResult Role = "toolResult"
+)
+
 type Message interface {
-	Message()
-	Role() string
-	GetContent() []content
+	Role() Role
+	message()
 }
 
 type UserMessage struct {
-	Content []content
+	Content []Content
 }
 
-func (UserMessage) Message()                {}
-func (UserMessage) Role() string            { return "user" }
-func (u UserMessage) GetContent() []content { return u.Content }
+func (UserMessage) Role() Role { return RoleUser }
+func (UserMessage) message()   {}
 
 type AssistantMessage struct {
-	Content []content
+	Content    []Content
+	StopReason StopReason
+	Usage      Usage
 }
 
-func (AssistantMessage) Message()                {}
-func (AssistantMessage) Role() string            { return "assistant" }
-func (a AssistantMessage) GetContent() []content { return a.Content }
+func (AssistantMessage) Role() Role { return RoleAssistant }
+func (AssistantMessage) message()   {}
 
 type ToolResultMessage struct {
 	ToolCallID string
 	ToolName   string
-	Content    []content
+	Content    []Content
 }
 
-func (ToolResultMessage) Message()                {}
-func (ToolResultMessage) Role() string            { return "tool_result" }
-func (a ToolResultMessage) GetContent() []content { return a.Content }
+func (ToolResultMessage) Role() Role { return RoleToolResult }
+func (ToolResultMessage) message()   {}
+
+type StopReason string
+
+const (
+	StopReasonStop    StopReason = "stop"
+	StopReasonToolUse StopReason = "toolUse"
+	StopReasonLength  StopReason = "length"
+	StopReasonError   StopReason = "error"
+)
+
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+}
 
 var (
-	_ Message = &UserMessage{}
-	_ Message = &AssistantMessage{}
-	_ Message = &ToolResultMessage{}
+	_ Message = UserMessage{}
+	_ Message = AssistantMessage{}
+	_ Message = ToolResultMessage{}
 )

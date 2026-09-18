@@ -1,6 +1,15 @@
 package llm
 
-type content interface {
+type ContentType string
+
+const (
+	ContentText     ContentType = "text"
+	ContentImage    ContentType = "image"
+	ContentToolCall ContentType = "toolCall"
+)
+
+type Content interface {
+	Type() ContentType
 	content()
 }
 
@@ -8,34 +17,28 @@ type TextContent struct {
 	Text string
 }
 
+func (TextContent) Type() ContentType { return ContentText }
 func (TextContent) content()          {}
-func (t TextContent) GetText() string { return t.Text }
 
 type ImageContent struct {
 	Data     string
 	MIMEType string
 }
 
-func (ImageContent) content()              {}
-func (i ImageContent) GetData() string     { return i.Data }
-func (i ImageContent) GetMIMEType() string { return i.MIMEType }
+func (ImageContent) Type() ContentType { return ContentImage }
+func (ImageContent) content()          {}
 
 type ToolCall struct {
-	ToolCallID string
-	ToolName   string
-	Arguments  map[string]any
+	ID        string
+	Name      string
+	Arguments map[string]any
 }
 
-func (ToolCall) content() {}
-func (t ToolCall) GetToolCallID() string {
-	return t.ToolCallID
-}
-func (t ToolCall) GetToolName() string {
-	return t.ToolName
-}
+func (ToolCall) Type() ContentType { return ContentToolCall }
+func (ToolCall) content()          {}
 
 var (
-	_ content = &ToolCall{}
-	_ content = &ImageContent{}
-	_ content = &TextContent{}
+	_ Content = TextContent{}
+	_ Content = ImageContent{}
+	_ Content = ToolCall{}
 )
