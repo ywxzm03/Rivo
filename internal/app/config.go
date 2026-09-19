@@ -6,16 +6,7 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
-	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
-
-const (
-	apiKeyEnv  = "OPENAI_API_KEY"
-	baseURLEnv = "OPENAI_BASE_URL"
-	modelEnv   = "OPENAI_MODEL"
-)
-
-const defaultModel = "gpt-5.6-sol"
 
 type Config struct {
 	ProviderID string
@@ -25,9 +16,13 @@ type Config struct {
 }
 
 func ConfigFromEnv() (Config, error) {
-	err := godotenv.Load(".env")
+	if err := godotenv.Load(".env"); err != nil {
+		return Config{}, fmt.Errorf("加载 .env 失败: %w", err)
+	}
+
+	spec, err := lookupProvider(os.Getenv(providerEnv))
 	if err != nil {
-		return Config{}, fmt.Errorf("Error loading .env file: %w", err)
+		return Config{}, err
 	}
 
 	apiKey := strings.TrimSpace(os.Getenv(apiKeyEnv))
@@ -37,11 +32,11 @@ func ConfigFromEnv() (Config, error) {
 
 	modelID := strings.TrimSpace(os.Getenv(modelEnv))
 	if modelID == "" {
-		modelID = defaultModel
+		modelID = spec.defaultModel
 	}
 
 	return Config{
-		ProviderID: openai.ProviderID,
+		ProviderID: spec.id,
 		ModelID:    modelID,
 		APIKey:     apiKey,
 		BaseURL:    strings.TrimSpace(os.Getenv(baseURLEnv)),

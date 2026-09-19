@@ -1,4 +1,4 @@
-package openai
+package responses
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 
 	sdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 

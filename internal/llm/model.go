@@ -2,10 +2,7 @@ package llm
 
 type API string
 
-const (
-	APIOpenAIResponses   API = "openai-responses"
-	APIOpenAICompletions API = "openai-completions"
-)
+const APIOpenAIResponses API = "openai-responses"
 
 type Model struct {
 	ID       string

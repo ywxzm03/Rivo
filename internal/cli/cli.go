@@ -89,7 +89,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			continue
 		}
 
-		fmt.Fprintln(stderr, "Rivo: 不支持的参数 %q", arg)
+		fmt.Fprintf(stderr, "Rivo: 不支持的参数 %q\n", arg)
 		fmt.Fprintln(stderr, "请运行 'Rivo --help' 查看用法。")
 		return 2
 	}

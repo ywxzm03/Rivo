@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	openaiapi "github.com/ywxzm03/Rivo/internal/llm/api/openai"
+	"github.com/ywxzm03/Rivo/internal/llm/api/openai/responses"
 )
 
 const ProviderID = "openai"
@@ -15,18 +15,16 @@ type Config struct {
 }
 
 type Provider struct {
-	client *openaiapi.Client
+	client *responses.Client
 	models []llm.Model
 }
 
 func New(cfg Config) *Provider {
 	return &Provider{
-		client: openaiapi.NewClient(cfg.APIKey, cfg.BaseURL),
+		client: responses.NewClient(cfg.APIKey, cfg.BaseURL),
 		models: builtinModels(),
 	}
 }
-
-func (p *Provider) ID() string { return ProviderID }
 
 func (p *Provider) Models() []llm.Model { return p.models }
 

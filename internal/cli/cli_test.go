@@ -2,15 +2,31 @@ package cli_test
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/cli"
 )
 
+// useEnvFile 造一个空的 .env 并把工作目录切过去
+// ConfigFromEnv 要求 .env 必须存在，而 go test 的工作目录是包目录
+func useEnvFile(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+}
+
 func TestRun(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "test-key")
-	t.Setenv("RIVO_MODEL", "gpt-5.6-sol")
+	useEnvFile(t)
+	for _, key := range []string{"PROVIDER", "BASE_URL", "MODEL"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("API_KEY", "test-key")
 
 	tests := []struct {
 		name       string
@@ -90,7 +106,8 @@ func TestRun(t *testing.T) {
 }
 
 func TestRunMissingAPIKey(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
+	useEnvFile(t)
+	t.Setenv("API_KEY", "")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -102,7 +119,7 @@ func TestRunMissingAPIKey(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Errorf("Run() stdout = %q, want empty", got)
 	}
-	if got := stderr.String(); got != "Rivo: OPENAI_API_KEY 未设置\n" {
+	if got := stderr.String(); got != "Rivo: API_KEY 未设置\n" {
 		t.Errorf("Run() stderr = %q, want missing-key diagnostic", got)
 	}
 }

@@ -1,4 +1,4 @@
-package openai
+package responses
 
 import (
 	"encoding/json"
@@ -6,10 +6,10 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
-
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
+// assertWire 断言 v 序列化后的 JSON 与 want 深度相等，键序无关
 func assertWire(t *testing.T, v any, want string) {
 	t.Helper()
 	b, err := json.Marshal(v)

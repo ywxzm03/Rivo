@@ -5,7 +5,6 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
 
 type App struct {
@@ -13,19 +12,13 @@ type App struct {
 }
 
 func New(cfg Config, onEvent func(llm.Event)) (*App, error) {
-	provider := openai.New(openai.Config{
-		APIKey:  cfg.APIKey,
-		BaseURL: cfg.BaseURL,
-	})
-
-	models := llm.NewModels()
-	models.Register(provider)
-
-	model, err := models.GetModel(cfg.ProviderID, cfg.ModelID)
+	spec, err := lookupProvider(cfg.ProviderID)
 	if err != nil {
 		return nil, err
 	}
-	streamFn, err := models.StreamFn(cfg.ProviderID, cfg.ModelID)
+
+	models, streamFn := spec.new(cfg.APIKey, cfg.BaseURL)
+	model, err := findModel(spec.id, models, cfg.ModelID)
 	if err != nil {
 		return nil, err
 	}
