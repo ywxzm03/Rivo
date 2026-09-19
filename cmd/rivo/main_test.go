@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -13,7 +14,7 @@ func TestRunDelegatesToCLI(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := run([]string{"--help"}, &stdout, &stderr)
+	code := run([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("run() code = %d, want 0", code)
@@ -31,11 +32,11 @@ func TestRivoHelperProcess(t *testing.T) {
 		return
 	}
 
-	os.Args = []string{"Rivo"}
+	os.Args = []string{"Rivo", "--help"}
 	main()
 }
 
-func TestMainWithoutArgumentsExitsWithDiagnostic(t *testing.T) {
+func TestRivoProcessHelpExitsSuccessfully(t *testing.T) {
 	t.Parallel()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRivoHelperProcess$")
@@ -46,17 +47,17 @@ func TestMainWithoutArgumentsExitsWithDiagnostic(t *testing.T) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("Rivo process error = %v, want exit code 2", err)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("Rivo process exit code = %d, want 0", exitErr.ExitCode())
+		}
+		t.Fatalf("Rivo process error = %v", err)
 	}
-	if got := exitErr.ExitCode(); got != 2 {
-		t.Fatalf("Rivo process exit code = %d, want 2", got)
+	if got := stdout.String(); got == "" {
+		t.Error("Rivo process stdout is empty")
 	}
-	if got := stdout.String(); got != "" {
-		t.Errorf("Rivo process stdout = %q, want empty", got)
-	}
-	if got := stderr.String(); got != "Rivo: 交互模式尚未实现\n" {
-		t.Errorf("Rivo process stderr = %q, want unimplemented diagnostic", got)
+	if got := stderr.String(); got != "" {
+		t.Errorf("Rivo process stderr = %q, want empty", got)
 	}
 }

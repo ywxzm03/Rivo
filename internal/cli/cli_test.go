@@ -2,17 +2,20 @@ package cli_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/cli"
 )
 
 func TestRun(t *testing.T) {
-	t.Parallel()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("RIVO_MODEL", "gpt-5.6-sol")
 
 	tests := []struct {
 		name       string
 		args       []string
+		input      string
 		wantCode   int
 		wantStdout string
 		wantStderr string
@@ -30,9 +33,10 @@ func TestRun(t *testing.T) {
 			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help  Show this help\n",
 		},
 		{
-			name:       "no arguments",
-			wantCode:   2,
-			wantStderr: "Rivo: 交互模式尚未实现\n",
+			name:       "repl exits",
+			input:      "/exit\n",
+			wantCode:   0,
+			wantStdout: "> ",
 		},
 		{
 			name:       "unknown long option",
@@ -68,11 +72,9 @@ func TestRun(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			code := cli.Run(tt.args, &stdout, &stderr)
+			code := cli.Run(tt.args, strings.NewReader(tt.input), &stdout, &stderr)
 
 			if code != tt.wantCode {
 				t.Errorf("Run() code = %d, want %d", code, tt.wantCode)
@@ -84,5 +86,23 @@ func TestRun(t *testing.T) {
 				t.Errorf("Run() stderr = %q, want %q", got, tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestRunMissingAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := cli.Run(nil, strings.NewReader("/exit\n"), &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if got := stdout.String(); got != "" {
+		t.Errorf("Run() stdout = %q, want empty", got)
+	}
+	if got := stderr.String(); got != "Rivo: OPENAI_API_KEY 未设置\n" {
+		t.Errorf("Run() stderr = %q, want missing-key diagnostic", got)
 	}
 }

@@ -38,12 +38,12 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			c.SystemPrompt, responses.EasyInputMessageRoleSystem,
 		))
 	}
-	for _, m := range c.Messages {
+	for i, m := range c.Messages {
 		switch msg := m.(type) {
 		case llm.UserMessage:
 			items = append(items, userMessageItem(msg))
 		case llm.AssistantMessage:
-			assistantItems, err := assistantMessageItems(msg)
+			assistantItems, err := assistantMessageItems(i, msg)
 			if err != nil {
 				return nil, err
 			}
@@ -70,22 +70,24 @@ func userMessageItem(m llm.UserMessage) responses.ResponseInputItemUnionParam {
 	return responses.ResponseInputItemParamOfMessage(contents, responses.EasyInputMessageRoleUser)
 }
 
-func assistantMessageItems(m llm.AssistantMessage) ([]responses.ResponseInputItemUnionParam, error) {
+func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.ResponseInputItemUnionParam, error) {
 	var items []responses.ResponseInputItemUnionParam
-	var contents responses.ResponseInputMessageContentListParam
+	var contents []responses.ResponseOutputMessageContentUnionParam
+	textIndex := 0
 	flush := func() {
 		if len(contents) == 0 {
 			return
 		}
-		items = append(items, responses.ResponseInputItemParamOfMessage(
-			contents, responses.EasyInputMessageRoleAssistant,
+		items = append(items, responses.ResponseInputItemParamOfOutputMessage(
+			contents, assistantMessageID(msgIndex, textIndex), responses.ResponseOutputMessageStatusCompleted,
 		))
+		textIndex++
 		contents = nil
 	}
 	for _, c := range m.Content {
 		switch v := c.(type) {
 		case llm.TextContent:
-			contents = append(contents, textContent(v.Text))
+			contents = append(contents, outputTextContent(v.Text))
 		case llm.ToolCall:
 			flush()
 			args, err := json.Marshal(v.Arguments)
@@ -99,6 +101,13 @@ func assistantMessageItems(m llm.AssistantMessage) ([]responses.ResponseInputIte
 	}
 	flush()
 	return items, nil
+}
+
+func assistantMessageID(msgIndex, textIndex int) string {
+	if textIndex == 0 {
+		return fmt.Sprintf("msg_rivo_%d", msgIndex)
+	}
+	return fmt.Sprintf("msg_rivo_%d_%d", msgIndex, textIndex)
 }
 
 func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionParam {
@@ -121,6 +130,15 @@ func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionPar
 func textContent(s string) responses.ResponseInputContentUnionParam {
 	return responses.ResponseInputContentUnionParam{
 		OfInputText: &responses.ResponseInputTextParam{Text: s},
+	}
+}
+
+func outputTextContent(s string) responses.ResponseOutputMessageContentUnionParam {
+	return responses.ResponseOutputMessageContentUnionParam{
+		OfOutputText: &responses.ResponseOutputTextParam{
+			Text:        s,
+			Annotations: []responses.ResponseOutputTextAnnotationUnionParam{},
+		},
 	}
 }
 

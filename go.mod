@@ -3,6 +3,7 @@ module github.com/ywxzm03/Rivo
 go 1.27
 
 require (
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/openai/openai-go/v3 v3.59.0 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

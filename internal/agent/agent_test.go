@@ -36,6 +36,7 @@ func TestAgentRunToolLoop(t *testing.T) {
 			executed = append(executed, name)
 			return "pong", nil
 		},
+		nil,
 	)
 
 	reply, err := a.Run(context.Background(), "hi")
@@ -69,7 +70,7 @@ func TestAgentRunStreamError(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil, nil)
 	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
 		t.Errorf("err = %v, want boom", err)
 	}

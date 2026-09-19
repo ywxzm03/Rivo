@@ -75,7 +75,8 @@ func TestBuildParams(t *testing.T) {
 		}
 		assertWire(t, params,
 			`{"model":"gpt-5","input":[`+
-				`{"role":"assistant","content":[{"type":"input_text","text":"我来试试"}]},`+
+				`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
+				`"content":[{"type":"output_text","text":"我来试试","annotations":[]}]},`+
 				`{"type":"function_call","arguments":"{}","call_id":"call_1","name":"ping"}]}`)
 	})
 
@@ -100,6 +101,24 @@ func TestBuildParams(t *testing.T) {
 		}
 		assertWire(t, params,
 			`{"model":"gpt-5","tools":[{"type":"function","name":"ping","description":"Return pong","parameters":{"properties":{},"type":"object"}}]}`)
+	})
+
+	t.Run("多轮对话中助手消息按序号取 id", func(t *testing.T) {
+		c := llm.Context{Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "pi"}}},
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "3.14159"}}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "你好"}}},
+		}}
+		params, err := BuildParams(testModel(), c, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params,
+			`{"model":"gpt-5","input":[`+
+				`{"role":"user","content":[{"type":"input_text","text":"pi"}]},`+
+				`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_1",`+
+				`"content":[{"type":"output_text","text":"3.14159","annotations":[]}]},`+
+				`{"role":"user","content":[{"type":"input_text","text":"你好"}]}]}`)
 	})
 }
 
@@ -186,4 +205,28 @@ func TestBuildAssistantMessage(t *testing.T) {
 			t.Error("期望非法 JSON 报错")
 		}
 	})
+}
+
+func TestAssistantMessageReplayRoundTrip(t *testing.T) {
+	resp := responseFromJSON(t, `{
+		"id":"resp_1","created_at":0,"status":"completed",
+		"output":[{"type":"message","id":"msg_abc","role":"assistant","status":"completed",
+			"content":[{"type":"output_text","text":"π 约等于 3.14159"}]}],
+		"usage":{"input_tokens":3,"output_tokens":9,"total_tokens":12}
+	}`)
+
+	msg, _, err := BuildAssistantMessage(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	params, err := BuildParams(testModel(), llm.Context{Messages: []llm.Message{*msg}}, llm.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertWire(t, params,
+		`{"model":"gpt-5","input":[`+
+			`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
+			`"content":[{"type":"output_text","text":"π 约等于 3.14159","annotations":[]}]}]}`)
 }

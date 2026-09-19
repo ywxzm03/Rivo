@@ -15,14 +15,16 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	Execute      ExecuteFunc
+	OnEvent      func(llm.Event)
 }
 
-func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, execute ExecuteFunc) *Agent {
+func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, execute ExecuteFunc, onEvent func(event llm.Event)) *Agent {
 	return &Agent{
 		AgentConfig:  cfg,
 		AgentContext: agentCtx,
 		StreamFn:     streamFn,
 		Execute:      execute,
+		OnEvent:      onEvent,
 	}
 }
 
@@ -39,9 +41,10 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 
 		var final *llm.AssistantMessage
 		for ev := range events {
+			if a.OnEvent != nil {
+				a.OnEvent(ev)
+			}
 			switch ev.Type {
-			case llm.EventTextDelta:
-				fmt.Print(ev.Delta)
 			case llm.EventDone:
 				final = ev.Message
 			case llm.EventError:
@@ -70,7 +73,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			})
 		}
 		if len(toolResults) == 0 {
-			fmt.Println()
 			return final, nil
 		}
 		for _, tr := range toolResults {
