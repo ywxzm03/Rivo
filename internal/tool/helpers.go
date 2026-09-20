@@ -48,6 +48,18 @@ func resolvePath(path string) (string, error) {
 	return path, nil
 }
 
+func truncationNote(shown, reason, next string) string {
+	note := shown
+	if reason != "" {
+		note += " (" + reason + ")"
+	}
+	note += "."
+	if next != "" {
+		note += " Use " + next + " to continue."
+	}
+	return "\n\n[" + note + "]"
+}
+
 const (
 	defaultMaxLines = 2000
 	defaultMaxBytes = 50 * 1024

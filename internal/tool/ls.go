@@ -58,7 +58,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 		limit = lsDefaultLimit
 	}
 
-	// 2.解析路径并确认是目录，两种失败各给一句话
+	// 2.解析路径并确认是目录
 	absPath, err := resolvePath(path)
 	if err != nil {
 		return nil, err
@@ -87,7 +87,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 		return cmp.Compare(strings.ToLower(a), strings.ToLower(b))
 	})
 
-	// 4.逐条判断是否目录并加后缀；stat 失败的条目静默跳过（断链也在内）
+	// 4.逐条判断是否目录并加后缀
 	lines := make([]string, 0, len(names))
 	limitReached := false
 	for _, name := range names {
@@ -109,18 +109,23 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 		return textContents("(empty directory)"), nil
 	}
 
-	// 5.只看字节上限，行数上限关掉；两类提示用 ". " 连接
+	// 5.只看字节上限
 	truncation := truncateHead(strings.Join(lines, "\n"), math.MaxInt, defaultMaxBytes)
 	output := truncation.Content
-	var notices []string
-	if limitReached {
-		notices = append(notices, fmt.Sprintf("%d entries limit reached. Use limit=%d for more", limit, limit*2))
-	}
-	if truncation.Truncated {
-		notices = append(notices, formatSize(defaultMaxBytes)+" limit reached")
-	}
-	if len(notices) > 0 {
-		output += "\n\n[" + strings.Join(notices, ". ") + "]"
+
+	byteLimited := truncation.Truncated
+	entryLimited := limitReached && !byteLimited
+	if byteLimited || entryLimited {
+		reason := ""
+		next := ""
+		if byteLimited {
+			reason = formatSize(defaultMaxBytes) + " limit"
+		} else {
+			next = fmt.Sprintf("limit=%d", limit*2)
+		}
+		output += truncationNote(
+			fmt.Sprintf("Showing %d of %d entries", truncation.OutputLines, len(names)),
+			reason, next)
 	}
 	return textContents(output), nil
 }

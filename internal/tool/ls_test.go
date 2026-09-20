@@ -137,7 +137,7 @@ func TestLsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "f00\nf01\nf02\n\n[3 entries limit reached. Use limit=6 for more]"
+	want := "f00\nf01\nf02\n\n[Showing 3 of 10 entries. Use limit=6 to continue.]"
 	if out != want {
 		t.Errorf("输出 = %q, want %q", out, want)
 	}
@@ -171,8 +171,17 @@ func TestLsTruncatesByBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(out, "[50.0KB limit reached]") {
-		t.Errorf("输出结尾 = %q, want 含 50.0KB limit reached", tail(out))
+
+	// 截断了也要把已经读到的条目带回来
+	if !strings.HasPrefix(out, "000"+long+"\n") {
+		t.Errorf("输出开头不是第一个条目，内容没带回来: %q", head(out))
+	}
+	if !strings.Contains(out, "entries (50.0KB limit).]") {
+		t.Errorf("缺截断提示: %q", tail(out))
+	}
+	// 字节上限卡住时调大 limit 也装不下，不该给这个建议
+	if strings.Contains(out, "to continue.") {
+		t.Error("字节上限卡住时不该建议继续——调大 limit 也没用")
 	}
 	if len(out) > defaultMaxBytes+200 {
 		t.Errorf("输出 %d 字节，超过上限 %d", len(out), defaultMaxBytes)

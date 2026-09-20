@@ -139,12 +139,15 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content,
 			startLineDisplay+1)), nil
 	case truncation.Truncated || (hasLimit && startLine+userLimitedLines < totalFileLines):
 		endLineDisplay := startLineDisplay + truncation.OutputLines - 1
-		limitNote := ""
+		reason := ""
 		if truncation.TruncatedBy == truncatedByBytes {
-			limitNote = fmt.Sprintf(" (%s limit)", formatSize(defaultMaxBytes))
+			reason = formatSize(defaultMaxBytes) + " limit"
 		}
-		return textContents(fmt.Sprintf("%s\n\n[Showing lines %d-%d of %d%s. Use offset=%d to continue.]",
-			truncation.Content, startLineDisplay, endLineDisplay, totalFileLines, limitNote, endLineDisplay+1)), nil
+		return textContents(truncation.Content + truncationNote(
+			fmt.Sprintf("Showing lines %d-%d of %d", startLineDisplay, endLineDisplay, totalFileLines),
+			reason,
+			fmt.Sprintf("offset=%d", endLineDisplay+1),
+		)), nil
 	default:
 		return textContents(truncation.Content), nil
 	}
