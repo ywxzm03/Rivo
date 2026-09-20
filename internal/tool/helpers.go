@@ -1,9 +1,52 @@
 package tool
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
+
+// textContents 把一段文本包成工具结果的内容
+func textContents(text string) []llm.Content {
+	return []llm.Content{llm.TextContent{Text: text}}
+}
+
+// argInt 读取可选的整数参数，JSON 里的数字解出来是 float64
+func argInt(args map[string]any, key string) (int, bool) {
+	v, ok := args[key]
+	if !ok {
+		return 0, false
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对当前工作目录
+func resolvePath(path string) (string, error) {
+	// 1.~ 与 ~/ 展开成用户主目录
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+	}
+	// 2.相对路径按当前工作目录解析
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(cwd, path)
+	}
+	return path, nil
+}
 
 const (
 	defaultMaxLines = 2000

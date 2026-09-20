@@ -9,7 +9,6 @@ import (
 	"image"
 	"image/png"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/disintegration/imaging"
@@ -73,7 +72,7 @@ func (r *Read) Parameters() map[string]any {
 }
 
 // Execute 读取文件：图片返回文字说明加图片附件，文本按行截断并附上续读提示
-func (r *Read) Execute(_ context.Context, args map[string]any) ([]llm.Content, error) {
+func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
 	// 1.取参数，JSON 解出来的数字都是 float64
 	path, _ := args["path"].(string)
 	if path == "" {
@@ -170,11 +169,6 @@ func (r *Read) readImage(mimeType string, data []byte) []llm.Content {
 		llm.TextContent{Text: note},
 		llm.ImageContent{Data: result.Data, MIMEType: result.MIMEType},
 	}
-}
-
-// textContents 把一段文本包成工具结果的内容
-func textContents(text string) []llm.Content {
-	return []llm.Content{llm.TextContent{Text: text}}
 }
 
 // sniffImage 只看开头的魔数，返回 image/jpeg、image/png、image/webp 或空串
@@ -327,38 +321,4 @@ func dimensionNote(result imageResult) string {
 	scale := float64(result.OriginalWidth) / float64(result.Width)
 	return fmt.Sprintf("[Image: original %dx%d, displayed at %dx%d. Multiply coordinates by %.2f to map to original image.]",
 		result.OriginalWidth, result.OriginalHeight, result.Width, result.Height, scale)
-}
-
-// argInt 读取可选的整数参数，JSON 里的数字解出来是 float64
-func argInt(args map[string]any, key string) (int, bool) {
-	v, ok := args[key]
-	if !ok {
-		return 0, false
-	}
-	f, ok := v.(float64)
-	if !ok {
-		return 0, false
-	}
-	return int(f), true
-}
-
-// resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对当前工作目录
-func resolvePath(path string) (string, error) {
-	// 1.~ 与 ~/ 展开成用户主目录
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
-	}
-	// 2.相对路径按当前工作目录解析
-	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(cwd, path)
-	}
-	return path, nil
 }
