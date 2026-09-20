@@ -58,14 +58,14 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			if !ok {
 				continue
 			}
-			res, err := a.execute(ctx, tc.Name, tc.Arguments)
+			content, err := a.execute(ctx, tc.Name, tc.Arguments)
 			if err != nil {
-				res = "tool error: " + err.Error()
+				content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
 			}
 			toolResults = append(toolResults, llm.ToolResultMessage{
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
-				Content:    []llm.Content{llm.TextContent{Text: res}},
+				Content:    content,
 			})
 		}
 		if len(toolResults) == 0 {
@@ -86,10 +86,10 @@ func (a *Agent) findTool(name string) llm.Tool {
 	return nil
 }
 
-func (a *Agent) execute(ctx context.Context, name string, args map[string]any) (string, error) {
+func (a *Agent) execute(ctx context.Context, name string, args map[string]any) ([]llm.Content, error) {
 	t := a.findTool(name)
 	if t == nil {
-		return "", fmt.Errorf("agent: no tool named %q", name)
+		return nil, fmt.Errorf("agent: no tool named %q", name)
 	}
 	return t.Execute(ctx, args)
 }

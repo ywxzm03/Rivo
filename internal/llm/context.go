@@ -6,7 +6,7 @@ type Tool interface {
 	Name() string
 	Description() string
 	Parameters() map[string]any
-	Execute(ctx context.Context, args map[string]any) (string, error)
+	Execute(ctx context.Context, args map[string]any) ([]Content, error)
 }
 
 type Context struct {

@@ -1,18 +1,37 @@
 package tool
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// exec 跑一次 read 工具
+// exec 跑一次 read 工具，把返回内容里的文本拼起来（纯文本用例用它）
 func exec(t *testing.T, args map[string]any) (string, error) {
 	t.Helper()
-	return (&Read{}).Execute(context.Background(), args)
+	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), args)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, c := range content {
+		if v, ok := c.(llm.TextContent); ok {
+			b.WriteString(v.Text)
+		}
+	}
+	return b.String(), nil
 }
 
 // numberedLines 造 "Line 1" 到 "Line n"
@@ -270,8 +289,11 @@ func TestReadDefinition(t *testing.T) {
 	if !strings.Contains(r.Description(), "truncated to 2000 lines or 50KB") {
 		t.Errorf("Description() = %q, want 含截断上限", r.Description())
 	}
-	if strings.Contains(r.Description(), "image") {
-		t.Error("Description() 不该提图片 —— 本工具不处理图片")
+	if !strings.Contains(r.Description(), "images (jpg, png, webp)") {
+		t.Errorf("Description() = %q, want 含支持的图片格式", r.Description())
+	}
+	if strings.Contains(r.Description(), "gif") || strings.Contains(r.Description(), "bmp") {
+		t.Error("Description() 不该提 gif/bmp —— 本工具不支持这两种")
 	}
 
 	params := r.Parameters()
@@ -291,6 +313,240 @@ func TestReadDefinition(t *testing.T) {
 			t.Errorf("parameters.properties 缺 %q", key)
 		}
 	}
+}
+
+// makePNG 现场生成一张纯色 PNG
+func makePNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// makeJPEG 现场生成一张纯色 JPEG
+func makeJPEG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// makeNoisePNG 生成一张随机噪点 PNG，它压不动，用来逼出逐轮缩小
+func makeNoisePNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	rng := rand.New(rand.NewSource(1))
+	for i := range img.Pix {
+		img.Pix[i] = uint8(rng.Intn(256))
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func writeTempBytes(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestSniffImage(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"png", makePNG(t, 2, 2), "image/png"},
+		{"jpeg", makeJPEG(t, 2, 2), "image/jpeg"},
+		{"webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp"},
+		{"纯文本", []byte("hello world"), ""},
+		{"空文件", nil, ""},
+		{"jpeg-ls 不是 jpeg", []byte{0xff, 0xd8, 0xff, 0xf7}, ""},
+		{"riff 但不是 webp", []byte("RIFF\x00\x00\x00\x00WAVEfmt "), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sniffImage(tt.data); got != tt.want {
+				t.Errorf("sniffImage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadImageAsAttachment(t *testing.T) {
+	data := makePNG(t, 4, 4)
+	path := writeTempBytes(t, "pic.png", data)
+
+	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != 2 {
+		t.Fatalf("content 有 %d 项, want 2（文字 + 图片）", len(content))
+	}
+
+	text, ok := content[0].(llm.TextContent)
+	if !ok || text.Text != "Read image file [image/png]" {
+		t.Errorf("content[0] = %+v, want 图片说明", content[0])
+	}
+	img, ok := content[1].(llm.ImageContent)
+	if !ok {
+		t.Fatalf("content[1] = %T, want ImageContent", content[1])
+	}
+	if img.MIMEType != "image/png" {
+		t.Errorf("MIMEType = %q, want image/png", img.MIMEType)
+	}
+	// 小图应当原样返回，不重新编码
+	if want := base64.StdEncoding.EncodeToString(data); img.Data != want {
+		t.Error("小图的 base64 应与原始字节一致（不该被重新编码）")
+	}
+}
+
+func TestReadImageWithoutVisionSupport(t *testing.T) {
+	path := writeTempBytes(t, "pic.png", makePNG(t, 7, 5))
+
+	content, err := (&Read{}).Execute(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != 1 {
+		t.Fatalf("content 有 %d 项, want 1（模型不收图，只给文字）", len(content))
+	}
+	text, _ := content[0].(llm.TextContent)
+	want := "Read image file [image/png]\n" + noVisionNote
+	if text.Text != want {
+		t.Errorf("文本 = %q, want %q（模型看不到图，尺寸之类的信息没有用处）", text.Text, want)
+	}
+}
+
+// 模型不收图时完全不该碰图片内容：坏图与好图给出同样的说明
+func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
+	broken := append(append([]byte{}, pngSignature...), []byte("这不是真的 png")...)
+	path := writeTempBytes(t, "broken.png", broken)
+
+	content, err := (&Read{}).Execute(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := content[0].(llm.TextContent)
+	want := "Read image file [image/png]\n" + noVisionNote
+	if text.Text != want {
+		t.Errorf("文本 = %q, want %q（说明它去解码了，不该）", text.Text, want)
+	}
+}
+
+// 质量档位必须严格递减，否则某一档永远选不到（pi 原本的顺序就踩了这个）
+func TestImageJPEGQualitiesDescend(t *testing.T) {
+	for i := 1; i < len(imageJPEGQualities); i++ {
+		if imageJPEGQualities[i] >= imageJPEGQualities[i-1] {
+			t.Errorf("第 %d 档质量 %d 不低于前一档 %d —— 这一档永远选不到",
+				i, imageJPEGQualities[i], imageJPEGQualities[i-1])
+		}
+	}
+}
+
+func TestReadImageDecodeFailure(t *testing.T) {
+	// 魔数对但内容是垃圾，不能 panic
+	bad := append(append([]byte{}, pngSignature...), []byte("not a real png")...)
+	path := writeTempBytes(t, "broken.png", bad)
+
+	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("不该返回 error: %v", err)
+	}
+	if len(content) != 1 {
+		t.Fatalf("content 有 %d 项, want 1（只给文字说明）", len(content))
+	}
+	text, _ := content[0].(llm.TextContent)
+	if !strings.Contains(text.Text, "could not be converted") {
+		t.Errorf("缺少失败说明: %q", text.Text)
+	}
+}
+
+func TestProcessImage(t *testing.T) {
+	t.Run("尺寸超限时等比缩小", func(t *testing.T) {
+		result, err := processImage(makePNG(t, 3000, 100), "image/png", defaultImageLimits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Resized {
+			t.Error("Resized = false, want true")
+		}
+		if result.Width != imageMaxWidth {
+			t.Errorf("Width = %d, want %d", result.Width, imageMaxWidth)
+		}
+		if result.OriginalWidth != 3000 || result.OriginalHeight != 100 {
+			t.Errorf("原尺寸 = %dx%d, want 3000x100", result.OriginalWidth, result.OriginalHeight)
+		}
+		note := dimensionNote(result)
+		if !strings.Contains(note, "original 3000x100") {
+			t.Errorf("dimensionNote() = %q", note)
+		}
+		if !strings.Contains(note, "Multiply coordinates by") {
+			t.Errorf("dimensionNote() = %q, want 含坐标换算提示", note)
+		}
+	})
+
+	t.Run("字节超限时逐轮缩小直到装得下", func(t *testing.T) {
+		// 上限压到 4KB：200x200 的噪点图连 JPEG 最低质量都装不下，必须靠缩尺寸
+		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 4 * 1024}
+		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
+		if err != nil {
+			t.Fatalf("err = %v, want 缩到限内", err)
+		}
+		if len(result.Data) >= limits.maxBytes {
+			t.Errorf("输出 %d 字节, 仍超过上限 %d", len(result.Data), limits.maxBytes)
+		}
+		if result.Width >= 200 {
+			t.Errorf("Width = %d, want 比 200 小（应缩过尺寸）", result.Width)
+		}
+	})
+
+	t.Run("同样尺寸下换编码就能装下", func(t *testing.T) {
+		// 上限够大：不必缩尺寸，换 JPEG 编码即可，Resized 仍为 true
+		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 20 * 1024}
+		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Resized {
+			t.Error("Resized = false, want true（重新编码过）")
+		}
+		if result.Width != 200 {
+			t.Errorf("Width = %d, want 200（尺寸没变，只换了编码）", result.Width)
+		}
+		if result.MIMEType == "image/png" {
+			t.Errorf("MIMEType = %q, want 换成更小的 JPEG", result.MIMEType)
+		}
+	})
+
+	t.Run("缩到 1x1 仍装不下就报错", func(t *testing.T) {
+		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 10}
+		_, err := processImage(makeNoisePNG(t, 50, 50), "image/png", limits)
+		if !errors.Is(err, errImageTooBig) {
+			t.Errorf("err = %v, want errImageTooBig", err)
+		}
+	})
+
+	t.Run("网页格式也能处理", func(t *testing.T) {
+		// 用 JPEG 走一遍，确认解码器分派正确
+		result, err := processImage(makeJPEG(t, 20, 20), "image/jpeg", defaultImageLimits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MIMEType != "image/jpeg" {
+			t.Errorf("MIMEType = %q, want image/jpeg", result.MIMEType)
+		}
+	})
 }
 
 func head(s string) string {

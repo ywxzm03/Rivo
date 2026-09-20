@@ -29,7 +29,7 @@ func New(cfg Config, onEvent func(llm.Event)) (*App, error) {
 			llm.AgentConfig{Model: model},
 			llm.Context{
 				SystemPrompt: systemPrompt,
-				Tools:        []llm.Tool{&tool.Read{}},
+				Tools:        []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}},
 			},
 			streamFn,
 			onEvent,

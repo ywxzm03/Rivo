@@ -111,20 +111,50 @@ func assistantMessageID(msgIndex, textIndex int) string {
 }
 
 func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionParam {
-	var text string
-	for _, c := range m.Content {
-		if v, ok := c.(llm.TextContent); ok {
-			text += v.Text
+	var output responses.ResponseInputItemFunctionCallOutputOutputUnionParam
+	if allText(m.Content) {
+		// 纯文本仍走字符串形态，线上形状不变
+		var text string
+		for _, c := range m.Content {
+			text += c.(llm.TextContent).Text
 		}
+		output.OfString = sdk.String(text)
+	} else {
+		// 含图片时改走结构化形态，非文本内容才不会被丢掉
+		var items responses.ResponseFunctionCallOutputItemListParam
+		for _, c := range m.Content {
+			switch v := c.(type) {
+			case llm.TextContent:
+				items = append(items, responses.ResponseFunctionCallOutputItemUnionParam{
+					OfInputText: &responses.ResponseInputTextContentParam{Text: v.Text},
+				})
+			case llm.ImageContent:
+				items = append(items, responses.ResponseFunctionCallOutputItemUnionParam{
+					OfInputImage: &responses.ResponseInputImageContentParam{
+						Detail:   responses.ResponseInputImageContentDetailAuto,
+						ImageURL: sdk.String("data:" + v.MIMEType + ";base64," + v.Data),
+					},
+				})
+			}
+		}
+		output.OfResponseFunctionCallOutputItemArray = items
 	}
 	return responses.ResponseInputItemUnionParam{
 		OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
 			CallID: sdk.String(m.ToolCallID),
-			Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-				OfString: sdk.String(text),
-			},
+			Output: output,
 		},
 	}
+}
+
+// allText 判断工具结果里是不是只有文本
+func allText(content []llm.Content) bool {
+	for _, c := range content {
+		if _, ok := c.(llm.TextContent); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func textContent(s string) responses.ResponseInputContentUnionParam {

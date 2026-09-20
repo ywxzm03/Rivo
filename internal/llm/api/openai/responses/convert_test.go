@@ -45,7 +45,9 @@ func (t fakeTool) Name() string               { return t.name }
 func (t fakeTool) Description() string        { return t.description }
 func (t fakeTool) Parameters() map[string]any { return t.parameters }
 
-func (t fakeTool) Execute(context.Context, map[string]any) (string, error) { return "", nil }
+func (t fakeTool) Execute(context.Context, map[string]any) ([]llm.Content, error) {
+	return []llm.Content{llm.TextContent{Text: "pong"}}, nil
+}
 
 var _ llm.Tool = fakeTool{}
 
@@ -109,6 +111,25 @@ func TestBuildParams(t *testing.T) {
 		}
 		assertWire(t, params,
 			`{"model":"gpt-5","input":[{"type":"function_call_output","call_id":"call_1","output":"pong"}]}`)
+	})
+
+	t.Run("含图片的工具结果改走结构化输出", func(t *testing.T) {
+		c := llm.Context{Messages: []llm.Message{llm.ToolResultMessage{
+			ToolCallID: "call_1",
+			ToolName:   "read",
+			Content: []llm.Content{
+				llm.TextContent{Text: "Read image file [image/png]"},
+				llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
+			},
+		}}}
+		params, err := BuildParams(testModel(), c, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params,
+			`{"model":"gpt-5","input":[{"type":"function_call_output","call_id":"call_1","output":[`+
+				`{"type":"input_text","text":"Read image file [image/png]"},`+
+				`{"type":"input_image","image_url":"data:image/png;base64,aGk=","detail":"auto"}]}]}`)
 	})
 
 	t.Run("工具定义转 function tool", func(t *testing.T) {

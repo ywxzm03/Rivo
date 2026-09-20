@@ -9,4 +9,7 @@ type Model struct {
 	Name     string
 	Provider string
 	API      API
+
+	// SupportsImages 表示这个模型接受图片输入
+	SupportsImages bool
 }
