@@ -22,9 +22,9 @@ func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.Respo
 	for _, t := range c.Tools {
 		params.Tools = append(params.Tools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
-				Name:        t.Name,
-				Description: sdk.String(t.Description),
-				Parameters:  t.Parameters,
+				Name:        t.Name(),
+				Description: sdk.String(t.Description()),
+				Parameters:  t.Parameters(),
 			},
 		})
 	}

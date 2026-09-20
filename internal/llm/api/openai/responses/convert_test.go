@@ -1,11 +1,13 @@
 package responses
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
+
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -32,11 +34,26 @@ func testModel() llm.Model {
 	return llm.Model{ID: "gpt-5", Name: "GPT-5", Provider: "openai", API: llm.APIOpenAIResponses}
 }
 
+// fakeTool 是 llm.Tool 的最小实现，用来断言工具定义的线格式
+type fakeTool struct {
+	name        string
+	description string
+	parameters  map[string]any
+}
+
+func (t fakeTool) Name() string               { return t.name }
+func (t fakeTool) Description() string        { return t.description }
+func (t fakeTool) Parameters() map[string]any { return t.parameters }
+
+func (t fakeTool) Execute(context.Context, map[string]any) (string, error) { return "", nil }
+
+var _ llm.Tool = fakeTool{}
+
 func TestBuildParams(t *testing.T) {
-	pingTool := llm.Tool{
-		Name:        "ping",
-		Description: "Return pong",
-		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+	pingTool := fakeTool{
+		name:        "ping",
+		description: "Return pong",
+		parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 	}
 
 	t.Run("system prompt 生成首条 system 消息", func(t *testing.T) {

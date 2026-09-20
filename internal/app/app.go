@@ -5,6 +5,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 type App struct {
@@ -28,10 +29,9 @@ func New(cfg Config, onEvent func(llm.Event)) (*App, error) {
 			llm.AgentConfig{Model: model},
 			llm.Context{
 				SystemPrompt: systemPrompt,
-				Tools:        agent.DemoTools(),
+				Tools:        []llm.Tool{&tool.Read{}},
 			},
 			streamFn,
-			agent.DemoExecute,
 			onEvent,
 		),
 	}, nil
