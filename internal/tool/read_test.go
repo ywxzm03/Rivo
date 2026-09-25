@@ -19,7 +19,7 @@ import (
 )
 
 // exec 跑一次 read 工具，把返回内容里的文本拼起来（纯文本用例用它）
-func exec(t *testing.T, args map[string]any) (string, error) {
+func execRead(t *testing.T, args map[string]any) (string, error) {
 	t.Helper()
 	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), args)
 	if err != nil {
@@ -55,7 +55,7 @@ func writeTemp(t *testing.T, name, content string) string {
 
 func TestReadSmallFile(t *testing.T) {
 	const content = "Hello, world!\nLine 2\nLine 3"
-	out, err := exec(t, map[string]any{"path": writeTemp(t, "a.txt", content)})
+	out, err := execRead(t, map[string]any{"path": writeTemp(t, "a.txt", content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestReadSmallFile(t *testing.T) {
 
 func TestReadKeepsTrailingNewline(t *testing.T) {
 	const content = "a\nb\n"
-	out, err := exec(t, map[string]any{"path": writeTemp(t, "a.txt", content)})
+	out, err := execRead(t, map[string]any{"path": writeTemp(t, "a.txt", content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestReadKeepsTrailingNewline(t *testing.T) {
 }
 
 func TestReadEmptyFile(t *testing.T) {
-	out, err := exec(t, map[string]any{"path": writeTemp(t, "empty.txt", "")})
+	out, err := execRead(t, map[string]any{"path": writeTemp(t, "empty.txt", "")})
 	if err != nil {
 		t.Fatalf("空文件不该报错: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestReadEmptyFile(t *testing.T) {
 }
 
 func TestReadMissingFile(t *testing.T) {
-	_, err := exec(t, map[string]any{"path": filepath.Join(t.TempDir(), "nope.txt")})
+	_, err := execRead(t, map[string]any{"path": filepath.Join(t.TempDir(), "nope.txt")})
 	if err == nil {
 		t.Fatal("err = nil, want 文件不存在报错")
 	}
@@ -96,7 +96,7 @@ func TestReadMissingFile(t *testing.T) {
 }
 
 func TestReadMissingPathParam(t *testing.T) {
-	_, err := exec(t, map[string]any{})
+	_, err := execRead(t, map[string]any{})
 	if err == nil {
 		t.Fatal("err = nil, want 缺 path 参数报错")
 	}
@@ -110,7 +110,7 @@ func TestReadRelativePath(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	out, err := exec(t, map[string]any{"path": "a.txt"})
+	out, err := execRead(t, map[string]any{"path": "a.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestReadTildePath(t *testing.T) {
 	}
 	t.Setenv("HOME", dir)
 
-	out, err := exec(t, map[string]any{"path": "~/a.txt"})
+	out, err := execRead(t, map[string]any{"path": "~/a.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestReadTruncatesByLines(t *testing.T) {
 	rows := numberedLines(2500)
 	path := writeTemp(t, "big.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path})
+	out, err := execRead(t, map[string]any{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestReadTruncatesByBytes(t *testing.T) {
 	}
 	path := writeTemp(t, "wide.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path})
+	out, err := execRead(t, map[string]any{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestReadOffset(t *testing.T) {
 	rows := numberedLines(100)
 	path := writeTemp(t, "a.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path, "offset": float64(51)})
+	out, err := execRead(t, map[string]any{"path": path, "offset": float64(51)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestReadLimit(t *testing.T) {
 	rows := numberedLines(100)
 	path := writeTemp(t, "a.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path, "limit": float64(10)})
+	out, err := execRead(t, map[string]any{"path": path, "limit": float64(10)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestReadOffsetWithLimit(t *testing.T) {
 	rows := numberedLines(100)
 	path := writeTemp(t, "a.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path, "offset": float64(41), "limit": float64(20)})
+	out, err := execRead(t, map[string]any{"path": path, "offset": float64(41), "limit": float64(20)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestReadLimitBeyondToolCap(t *testing.T) {
 	rows := numberedLines(10000)
 	path := writeTemp(t, "huge.txt", strings.Join(rows, "\n"))
 
-	out, err := exec(t, map[string]any{"path": path, "limit": float64(5000)})
+	out, err := execRead(t, map[string]any{"path": path, "limit": float64(5000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestReadLimitBeyondToolCap(t *testing.T) {
 func TestReadOffsetBeyondEnd(t *testing.T) {
 	path := writeTemp(t, "a.txt", "Line 1\nLine 2\nLine 3")
 
-	_, err := exec(t, map[string]any{"path": path, "offset": float64(100)})
+	_, err := execRead(t, map[string]any{"path": path, "offset": float64(100)})
 	if err == nil {
 		t.Fatal("err = nil, want 越界报错")
 	}
@@ -251,7 +251,7 @@ func TestReadOffsetBeyondEnd(t *testing.T) {
 func TestReadFirstLineExceedsByteLimit(t *testing.T) {
 	path := writeTemp(t, "one.txt", strings.Repeat("x", 60000))
 
-	out, err := exec(t, map[string]any{"path": path})
+	out, err := execRead(t, map[string]any{"path": path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestReadNonPositiveLimitReadsWholeFile(t *testing.T) {
 	path := writeTemp(t, "a.txt", strings.Join(rows, "\n"))
 
 	for _, limit := range []float64{-5, 0} {
-		out, err := exec(t, map[string]any{"path": path, "limit": limit})
+		out, err := execRead(t, map[string]any{"path": path, "limit": limit})
 		if err != nil {
 			t.Fatalf("limit=%v: %v", limit, err)
 		}

@@ -48,7 +48,7 @@ func resolvePath(path string) (string, error) {
 	return path, nil
 }
 
-func truncationNote(shown, reason, next string) string {
+func truncationNote(shown, reason, next string, extra ...string) string {
 	note := shown
 	if reason != "" {
 		note += " (" + reason + ")"
@@ -57,7 +57,24 @@ func truncationNote(shown, reason, next string) string {
 	if next != "" {
 		note += " Use " + next + " to continue."
 	}
+	for _, item := range extra {
+		if item == "" {
+			continue
+		}
+		note += " " + item
+		if !strings.HasSuffix(item, ".") {
+			note += "."
+		}
+	}
 	return "\n\n[" + note + "]"
+}
+
+func truncateLine(line string, maxChars int) (string, bool) {
+	runes := []rune(line)
+	if len(runes) <= maxChars {
+		return line, false
+	}
+	return string(runes[:maxChars]) + "... [truncated]", true
 }
 
 const (

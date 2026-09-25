@@ -88,3 +88,12 @@ func TestTruncateHead(t *testing.T) {
 		}
 	})
 }
+
+func TestTruncateLine(t *testing.T) {
+	if got, truncated := truncateLine("short", 5); truncated || got != "short" {
+		t.Errorf("truncateLine(short) = %q, %v", got, truncated)
+	}
+	if got, truncated := truncateLine("你好世界", 3); !truncated || got != "你好世... [truncated]" {
+		t.Errorf("truncateLine(中文) = %q, %v", got, truncated)
+	}
+}
