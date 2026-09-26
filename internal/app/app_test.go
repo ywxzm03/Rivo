@@ -20,8 +20,8 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	if a == nil {
 		t.Fatal("New() app = nil, want non-nil")
 	}
-	if len(a.agent.AgentContext.Tools) != 3 || a.agent.AgentContext.Tools[2].Name() != "grep" {
-		t.Errorf("registered tools = %d, want read, ls, grep", len(a.agent.AgentContext.Tools))
+	if len(a.agent.AgentContext.Tools) != 4 || a.agent.AgentContext.Tools[3].Name() != "find" {
+		t.Errorf("registered tools = %d, want read, ls, grep, find", len(a.agent.AgentContext.Tools))
 	}
 }
 
