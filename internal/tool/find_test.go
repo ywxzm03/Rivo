@@ -18,7 +18,7 @@ func execFind(t *testing.T, args map[string]any) (string, error) {
 		return "", err
 	}
 	var out strings.Builder
-	for _, item := range content {
+	for _, item := range content.Content {
 		if text, ok := item.(llm.TextContent); ok {
 			out.WriteString(text.Text)
 		}

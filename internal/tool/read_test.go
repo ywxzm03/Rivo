@@ -26,7 +26,7 @@ func execRead(t *testing.T, args map[string]any) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	for _, c := range content {
+	for _, c := range content.Content {
 		if v, ok := c.(llm.TextContent); ok {
 			b.WriteString(v.Text)
 		}
@@ -390,17 +390,17 @@ func TestReadImageAsAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(content) != 2 {
-		t.Fatalf("content 有 %d 项, want 2（文字 + 图片）", len(content))
+	if len(content.Content) != 2 {
+		t.Fatalf("content 有 %d 项, want 2（文字 + 图片）", len(content.Content))
 	}
 
-	text, ok := content[0].(llm.TextContent)
+	text, ok := content.Content[0].(llm.TextContent)
 	if !ok || text.Text != "Read image file [image/png]" {
-		t.Errorf("content[0] = %+v, want 图片说明", content[0])
+		t.Errorf("content[0] = %+v, want 图片说明", content.Content[0])
 	}
-	img, ok := content[1].(llm.ImageContent)
+	img, ok := content.Content[1].(llm.ImageContent)
 	if !ok {
-		t.Fatalf("content[1] = %T, want ImageContent", content[1])
+		t.Fatalf("content[1] = %T, want ImageContent", content.Content[1])
 	}
 	if img.MIMEType != "image/png" {
 		t.Errorf("MIMEType = %q, want image/png", img.MIMEType)
@@ -418,10 +418,10 @@ func TestReadImageWithoutVisionSupport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(content) != 1 {
-		t.Fatalf("content 有 %d 项, want 1（模型不收图，只给文字）", len(content))
+	if len(content.Content) != 1 {
+		t.Fatalf("content 有 %d 项, want 1（模型不收图，只给文字）", len(content.Content))
 	}
-	text, _ := content[0].(llm.TextContent)
+	text, _ := content.Content[0].(llm.TextContent)
 	want := "Read image file [image/png]\n" + noVisionNote
 	if text.Text != want {
 		t.Errorf("文本 = %q, want %q（模型看不到图，尺寸之类的信息没有用处）", text.Text, want)
@@ -437,7 +437,7 @@ func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, _ := content[0].(llm.TextContent)
+	text, _ := content.Content[0].(llm.TextContent)
 	want := "Read image file [image/png]\n" + noVisionNote
 	if text.Text != want {
 		t.Errorf("文本 = %q, want %q（说明它去解码了，不该）", text.Text, want)
@@ -463,10 +463,10 @@ func TestReadImageDecodeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("不该返回 error: %v", err)
 	}
-	if len(content) != 1 {
-		t.Fatalf("content 有 %d 项, want 1（只给文字说明）", len(content))
+	if len(content.Content) != 1 {
+		t.Fatalf("content 有 %d 项, want 1（只给文字说明）", len(content.Content))
 	}
-	text, _ := content[0].(llm.TextContent)
+	text, _ := content.Content[0].(llm.TextContent)
 	if !strings.Contains(text.Text, "could not be converted") {
 		t.Errorf("缺少失败说明: %q", text.Text)
 	}

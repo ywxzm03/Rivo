@@ -107,27 +107,27 @@ type grepMatch struct {
 }
 
 // Execute 使用 rg 搜索文件内容并返回匹配行与上下文
-func (g *Grep) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
+func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.获取参数
 	options, err := parseGrepArgs(args)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
 	absPath, isDirectory, err := resolveGrepPath(options.searchPath)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	// 3.找rg安装路径，找不到就去Github Releases下
 	rgPath, err := findRipgrep(ctx)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	result, err := runRipgrep(ctx, rgPath, buildRipgrepArgs(options, absPath), absPath, isDirectory, options)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
-	return formatGrepOutput(result, options.limit, options.contextLines, absPath, isDirectory), nil
+	return llm.ToolResult{Content: formatGrepOutput(result, options.limit, options.contextLines, absPath, isDirectory)}, nil
 }
 
 // parseGrepArgs 读取 grep 参数并应用默认值

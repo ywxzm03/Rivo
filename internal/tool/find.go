@@ -62,37 +62,37 @@ type findResult struct {
 }
 
 // Execute 使用 rg 按 glob 查找文件并返回相对搜索目录的路径
-func (f *Find) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
+func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.读取参数并解析搜索目录
 	options, err := parseFindArgs(args)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	absPath, err := resolvePath(options.searchPath)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
 		}
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
 	}
 
 	// 2.查找 rg 并流式读取匹配路径
 	rgPath, err := findRipgrep(ctx)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	result, err := runFindRipgrep(ctx, rgPath, absPath, options)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
-	return formatFindOutput(result, options.limit), nil
+	return llm.ToolResult{Content: formatFindOutput(result, options.limit)}, nil
 }
 
 // parseFindArgs 读取 find 参数并应用默认值

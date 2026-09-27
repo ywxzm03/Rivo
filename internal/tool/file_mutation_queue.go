@@ -19,10 +19,11 @@ var (
 )
 
 // withFileMutationQueue 按文件路径串行执行变更操作
-func withFileMutationQueue(ctx context.Context, path string, fn func() error) error {
+func withFileMutationQueue[T any](ctx context.Context, path string, fn func() (T, error)) (T, error) {
+	var zero T
 	key, err := mutationQueueKey(path)
 	if err != nil {
-		return err
+		return zero, err
 	}
 	current := &mutationQueue{done: make(chan struct{})}
 
@@ -30,10 +31,6 @@ func withFileMutationQueue(ctx context.Context, path string, fn func() error) er
 	previous := mutationQueues[key]
 	mutationQueues[key] = current
 	mutationQueuesMu.Unlock()
-
-	if previous != nil {
-		<-previous.done
-	}
 
 	defer func() {
 		close(current.done)
@@ -44,6 +41,16 @@ func withFileMutationQueue(ctx context.Context, path string, fn func() error) er
 		mutationQueuesMu.Unlock()
 	}()
 
+	if previous != nil {
+		select {
+		case <-previous.done:
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
 	return fn()
 }
 

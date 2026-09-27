@@ -19,7 +19,7 @@ func execWrite(t *testing.T, args map[string]any) (string, error) {
 		return "", err
 	}
 	var out strings.Builder
-	for _, item := range content {
+	for _, item := range content.Content {
 		if text, ok := item.(llm.TextContent); ok {
 			out.WriteString(text.Text)
 		}
@@ -99,8 +99,8 @@ func TestWriteHonorsCanceledContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
-	if content != nil {
-		t.Fatalf("content = %#v, want nil", content)
+	if len(content.Content) != 0 {
+		t.Fatalf("content = %#v, want empty", content.Content)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("parent directory exists or stat failed: %v", err)

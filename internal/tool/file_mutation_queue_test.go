@@ -17,20 +17,22 @@ func TestFileMutationQueueSerializesSameFile(t *testing.T) {
 	secondStarted := make(chan struct{})
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- withFileMutationQueue(context.Background(), path, func() error {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
 			close(firstStarted)
 			<-releaseFirst
-			return nil
+			return struct{}{}, nil
 		})
+		firstDone <- err
 	}()
 	<-firstStarted
 
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- withFileMutationQueue(context.Background(), path, func() error {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
 			close(secondStarted)
-			return nil
+			return struct{}{}, nil
 		})
+		secondDone <- err
 	}()
 	select {
 	case <-secondStarted:
@@ -57,14 +59,14 @@ func TestFileMutationQueueRunsDifferentFilesInParallel(t *testing.T) {
 		name := name
 		go func() {
 			defer wg.Done()
-			_ = withFileMutationQueue(context.Background(), filepath.Join(dir, name), func() error {
+			_, _ = withFileMutationQueue(context.Background(), filepath.Join(dir, name), func() (struct{}, error) {
 				if name == "a.txt" {
 					close(firstStarted)
 				} else {
 					close(secondStarted)
 				}
 				<-release
-				return nil
+				return struct{}{}, nil
 			})
 		}()
 	}
@@ -85,13 +87,13 @@ func TestFileMutationQueueRunsDifferentFilesInParallel(t *testing.T) {
 func TestFileMutationQueueReleasesAfterError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file.txt")
 	wantErr := errors.New("write failed")
-	if err := withFileMutationQueue(context.Background(), path, func() error { return wantErr }); !errors.Is(err, wantErr) {
+	if _, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) { return struct{}{}, wantErr }); !errors.Is(err, wantErr) {
 		t.Fatalf("first error = %v, want %v", err, wantErr)
 	}
 	called := false
-	if err := withFileMutationQueue(context.Background(), path, func() error {
+	if _, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
 		called = true
-		return nil
+		return struct{}{}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +123,7 @@ func TestFileMutationQueueUsesRealpathAndCleansUp(t *testing.T) {
 	if targetKey != aliasKey {
 		t.Fatalf("keys differ: target=%q alias=%q", targetKey, aliasKey)
 	}
-	if err := withFileMutationQueue(context.Background(), alias, func() error { return nil }); err != nil {
+	if _, err := withFileMutationQueue(context.Background(), alias, func() (struct{}, error) { return struct{}{}, nil }); err != nil {
 		t.Fatal(err)
 	}
 	mutationQueuesMu.Lock()
@@ -136,14 +138,14 @@ func TestFileMutationQueueCancellationBeforeCallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	called := false
-	err := withFileMutationQueue(ctx, filepath.Join(t.TempDir(), "file.txt"), func() error {
+	_, err := withFileMutationQueue(ctx, filepath.Join(t.TempDir(), "file.txt"), func() (struct{}, error) {
 		called = true
-		return ctx.Err()
+		return struct{}{}, ctx.Err()
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
-	if !called {
-		t.Fatal("canceled mutation callback was not called")
+	if called {
+		t.Fatal("canceled mutation callback was called")
 	}
 }

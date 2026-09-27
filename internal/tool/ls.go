@@ -47,7 +47,7 @@ func (l *Ls) Parameters() map[string]any {
 }
 
 // Execute 列出目录内容，一条一行、目录带斜杠后缀，撞到条目数或字节上限时附上提示
-func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
+func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.取参数：path 缺省列当前目录，limit 非正数当作没给
 	path, _ := args["path"].(string)
 	if path == "" {
@@ -61,23 +61,23 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 	// 2.解析路径并确认是目录
 	absPath, err := resolvePath(path)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
 		}
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
 	}
 
 	// 3.列目录并按名字排序，大小写不敏感
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("Cannot read directory: %w", err)
+		return llm.ToolResult{}, fmt.Errorf("Cannot read directory: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -106,7 +106,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 		lines = append(lines, name+suffix)
 	}
 	if len(lines) == 0 {
-		return textContents("(empty directory)"), nil
+		return llm.ToolResult{Content: textContents("(empty directory)")}, nil
 	}
 
 	// 5.只看字节上限
@@ -127,5 +127,5 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) ([]llm.Content, e
 			fmt.Sprintf("Showing %d of %d entries", truncation.OutputLines, len(names)),
 			reason, next)
 	}
-	return textContents(output), nil
+	return llm.ToolResult{Content: textContents(output)}, nil
 }

@@ -19,7 +19,7 @@ func execLs(t *testing.T, args map[string]any) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	for _, c := range content {
+	for _, c := range content.Content {
 		if v, ok := c.(llm.TextContent); ok {
 			b.WriteString(v.Text)
 		}

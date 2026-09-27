@@ -35,41 +35,41 @@ func (w *Write) Parameters() map[string]any {
 }
 
 // Execute 创建或覆盖文件，并在需要时递归创建父目录
-func (w *Write) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
+func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.读取必填参数，空内容也是合法写入
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
-		return nil, fmt.Errorf("write: missing required parameter: path")
+		return llm.ToolResult{}, fmt.Errorf("write: missing required parameter: path")
 	}
 	content, ok := args["content"].(string)
 	if !ok {
-		return nil, fmt.Errorf("write: missing required parameter: content")
+		return llm.ToolResult{}, fmt.Errorf("write: missing required parameter: content")
 	}
 
 	// 2.解析路径并创建父目录
 	absPath, err := resolvePath(path)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 
 	// 3.串行执行同一文件的目录创建与写入
-	err = withFileMutationQueue(ctx, absPath, func() error {
+	_, err = withFileMutationQueue(ctx, absPath, func() (struct{}, error) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return struct{}{}, err
 		}
 		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-			return err
+			return struct{}{}, err
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return struct{}{}, err
 		}
 		if err := os.WriteFile(absPath, []byte(content), 0o666); err != nil {
-			return err
+			return struct{}{}, err
 		}
-		return ctx.Err()
+		return struct{}{}, ctx.Err()
 	})
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
-	return textContents(fmt.Sprintf("Successfully wrote to %s", path)), nil
+	return llm.ToolResult{Content: textContents(fmt.Sprintf("Successfully wrote to %s", path))}, nil
 }

@@ -19,9 +19,9 @@ func (t *fakeTool) Name() string               { return t.name }
 func (t *fakeTool) Description() string        { return "" }
 func (t *fakeTool) Parameters() map[string]any { return nil }
 
-func (t *fakeTool) Execute(_ context.Context, args map[string]any) ([]llm.Content, error) {
+func (t *fakeTool) Execute(_ context.Context, args map[string]any) (llm.ToolResult, error) {
 	t.arguments = append(t.arguments, args)
-	return []llm.Content{llm.TextContent{Text: "pong"}}, nil
+	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "pong"}}}, nil
 }
 
 var _ llm.Tool = (*fakeTool)(nil)

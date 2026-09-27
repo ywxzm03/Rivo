@@ -72,11 +72,11 @@ func (r *Read) Parameters() map[string]any {
 }
 
 // Execute 读取文件：图片返回文字说明加图片附件，文本按行截断并附上续读提示
-func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content, error) {
+func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.取参数，JSON 解出来的数字都是 float64
 	path, _ := args["path"].(string)
 	if path == "" {
-		return nil, fmt.Errorf("read: missing required parameter: path")
+		return llm.ToolResult{}, fmt.Errorf("read: missing required parameter: path")
 	}
 	offset, _ := argInt(args, "offset")
 	limit, hasLimit := argInt(args, "limit")
@@ -89,19 +89,19 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content,
 	// 2.解析路径后整读，读不到就把错误原样透传给模型
 	absPath, err := resolvePath(path)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return nil, err
+		return llm.ToolResult{}, err
 	}
 	if len(data) == 0 {
-		return textContents(""), nil
+		return llm.ToolResult{Content: textContents("")}, nil
 	}
 
 	// 3.是图片就走图片分支，不进文本管线
 	if mimeType := sniffImage(data); mimeType != "" {
-		return r.readImage(mimeType, data), nil
+		return llm.ToolResult{Content: r.readImage(mimeType, data)}, nil
 	}
 
 	// 4.切行；结尾换行切出的空串不算一行，但切片仍要走原数组才能保住结尾换行
@@ -117,7 +117,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content,
 	}
 	startLineDisplay := startLine + 1
 	if startLine >= totalFileLines {
-		return nil, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", offset, totalFileLines)
+		return llm.ToolResult{}, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", offset, totalFileLines)
 	}
 
 	// 5.limit 只切出候选区间，真正的截断交给 truncateHead
@@ -134,22 +134,22 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) ([]llm.Content,
 	truncation := truncateHead(selected, defaultMaxLines, defaultMaxBytes)
 	switch {
 	case truncation.FirstLineExceedsLimit:
-		return textContents(fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use offset=%d to continue.]",
+		return llm.ToolResult{Content: textContents(fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use offset=%d to continue.]",
 			startLineDisplay, formatSize(len(allLines[startLine])), formatSize(defaultMaxBytes),
-			startLineDisplay+1)), nil
+			startLineDisplay+1))}, nil
 	case truncation.Truncated || (hasLimit && startLine+userLimitedLines < totalFileLines):
 		endLineDisplay := startLineDisplay + truncation.OutputLines - 1
 		reason := ""
 		if truncation.TruncatedBy == truncatedByBytes {
 			reason = formatSize(defaultMaxBytes) + " limit"
 		}
-		return textContents(truncation.Content + truncationNote(
+		return llm.ToolResult{Content: textContents(truncation.Content + truncationNote(
 			fmt.Sprintf("Showing lines %d-%d of %d", startLineDisplay, endLineDisplay, totalFileLines),
 			reason,
 			fmt.Sprintf("offset=%d", endLineDisplay+1),
-		)), nil
+		))}, nil
 	default:
-		return textContents(truncation.Content), nil
+		return llm.ToolResult{Content: textContents(truncation.Content)}, nil
 	}
 }
 
