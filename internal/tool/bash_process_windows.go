@@ -3,6 +3,7 @@
 package tool
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +11,39 @@ import (
 	"strconv"
 	"time"
 )
+
+// findBash 按 PATH 和 Git for Windows 的默认安装位置查找 bash.exe
+func findBash() (string, error) {
+	if path, err := exec.LookPath("bash.exe"); err == nil {
+		return path, nil
+	}
+	candidates := make([]string, 0, 8)
+	if root := os.Getenv("GIT_INSTALL_ROOT"); root != "" {
+		candidates = append(candidates,
+			filepath.Join(root, "bin", "bash.exe"),
+			filepath.Join(root, "usr", "bin", "bash.exe"),
+		)
+	}
+	roots := []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")}
+	if localAppData := os.Getenv("LocalAppData"); localAppData != "" {
+		roots = append(roots, filepath.Join(localAppData, "Programs"))
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		candidates = append(candidates,
+			filepath.Join(root, "Git", "bin", "bash.exe"),
+			filepath.Join(root, "Git", "usr", "bin", "bash.exe"),
+		)
+	}
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("bash executable not found. Install Git for Windows or add bash.exe to PATH")
+}
 
 func configureShellProcess(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {

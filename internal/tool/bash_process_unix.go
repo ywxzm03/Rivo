@@ -3,11 +3,20 @@
 package tool
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 )
+
+// findBash 查找系统提供的 bash
+func findBash() (string, error) {
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash", nil
+	}
+	return "", fmt.Errorf("bash executable not found at /bin/bash")
+}
 
 func configureShellProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
