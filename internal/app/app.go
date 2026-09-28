@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"runtime"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -24,12 +25,17 @@ func New(cfg Config, onEvent func(llm.Event)) (*App, error) {
 		return nil, err
 	}
 
+	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{}, &tool.Edit{}}
+	if runtime.GOOS == "windows" {
+		tools = append(tools, &tool.PowerShell{})
+	}
+
 	return &App{
 		agent: agent.NewAgent(
 			llm.AgentConfig{Model: model},
 			llm.Context{
 				SystemPrompt: systemPrompt,
-				Tools:        []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{}, &tool.Edit{}},
+				Tools:        tools,
 			},
 			streamFn,
 			onEvent,

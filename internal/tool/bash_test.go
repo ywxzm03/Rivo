@@ -84,7 +84,7 @@ func TestBashEnvironmentAndSanitization(t *testing.T) {
 	if got, want := bashText(result), "red\nAB"; got != want {
 		t.Errorf("sanitized output = %q, want %q", got, want)
 	}
-	if !strings.Contains(strings.Join(bashEnvironment(), "\n"), binDir) {
+	if !strings.Contains(strings.Join(shellEnvironment(), "\n"), binDir) {
 		t.Errorf("bash environment does not include cache bin %q", binDir)
 	}
 }
@@ -135,7 +135,7 @@ func TestBashByteTruncation(t *testing.T) {
 
 func TestTruncateBashTailAllowsPartialFinalLine(t *testing.T) {
 	input := strings.Repeat("x", defaultMaxBytes+100)
-	result := truncateBashTail(input)
+	result := truncateShellTail(input)
 	if !result.Truncated || !result.LastLinePartial || result.OutputBytes != defaultMaxBytes {
 		t.Errorf("truncation = %+v", result)
 	}

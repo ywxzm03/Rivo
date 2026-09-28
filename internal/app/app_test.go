@@ -1,6 +1,7 @@
 package app
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,8 +21,15 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	if a == nil {
 		t.Fatal("New() app = nil, want non-nil")
 	}
-	if len(a.agent.AgentContext.Tools) != 7 || a.agent.AgentContext.Tools[4].Name() != "bash" || a.agent.AgentContext.Tools[6].Name() != "edit" {
-		t.Errorf("registered tools = %d, want read, ls, grep, find, bash, write, edit", len(a.agent.AgentContext.Tools))
+	wantTools := 7
+	if runtime.GOOS == "windows" {
+		wantTools = 8
+	}
+	if len(a.agent.AgentContext.Tools) != wantTools || a.agent.AgentContext.Tools[4].Name() != "bash" || a.agent.AgentContext.Tools[6].Name() != "edit" {
+		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(a.agent.AgentContext.Tools), wantTools)
+	}
+	if runtime.GOOS == "windows" && a.agent.AgentContext.Tools[7].Name() != "powershell" {
+		t.Errorf("last registered tool = %q, want powershell", a.agent.AgentContext.Tools[7].Name())
 	}
 }
 

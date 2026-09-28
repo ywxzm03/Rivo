@@ -3,23 +3,16 @@ package tool
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
-
-const bashMaxTimeoutMS = 2_147_483_647
 
 type Bash struct{}
 
@@ -30,159 +23,41 @@ func (b *Bash) Description() string {
 }
 
 func (b *Bash) Parameters() map[string]any {
-	return map[string]any{
-		"type":     "object",
-		"required": []string{"command"},
-		"properties": map[string]any{
-			"command": map[string]any{"type": "string", "description": "Shell command to execute"},
-			"timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
-		},
-	}
+	return shellParameters()
 }
 
 // Execute 执行 bash 命令并返回清洗、截断后的合并输出
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	// 1.读取并校验命令参数
-	command, ok := args["command"].(string)
-	if !ok || command == "" {
-		return llm.ToolResult{}, fmt.Errorf("bash: command must be a non-empty string")
-	}
-	timeout, err := bashTimeout(args)
-	if err != nil {
-		return llm.ToolResult{}, err
-	}
-
-	// 2.准备工作目录、环境与取消上下文
-	cwd, err := os.Getwd()
-	if err != nil {
-		return llm.ToolResult{}, err
-	}
-	env := bashEnvironment()
-	commandCtx := ctx
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		commandCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
-	// 3.启动独立进程组并收集合并输出
-	cmd := exec.CommandContext(commandCtx, "/bin/bash", "-c", command)
-	cmd.Dir = cwd
-	cmd.Env = env
-	configureBashProcess(cmd)
-	output := newBashOutputAccumulator()
-	cmd.Stdout = output
-	cmd.Stderr = output
-	if err := cmd.Start(); err != nil {
-		return llm.ToolResult{}, err
-	}
-	waitErr := cmd.Wait()
-	if commandCtx.Err() != nil {
-		killBashProcessGroup(cmd)
-		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			return bashErrorResult(output, fmt.Sprintf("Command timed out after %s seconds", formatBashTimeout(timeout.Seconds())))
-		}
-		return bashErrorResult(output, "Command aborted")
-	}
-
-	// 4.生成最终输出，非零退出码作为工具错误
-	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
-			return bashErrorResult(output, fmt.Sprintf("Command exited with code %d", exitErr.ExitCode()))
-		}
-		return llm.ToolResult{}, waitErr
-	}
-	return output.result()
+	return executeShellCommand(ctx, args, "bash", func(commandCtx context.Context, command string) (*exec.Cmd, error) {
+		return exec.CommandContext(commandCtx, "/bin/bash", "-c", command), nil
+	})
 }
 
-func bashTimeout(args map[string]any) (time.Duration, error) {
-	v, exists := args["timeout"]
-	if !exists {
-		return 0, nil
-	}
-	seconds, ok := v.(float64)
-	if !ok || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
-		return 0, fmt.Errorf("bash: invalid timeout: must be a finite number of seconds greater than 0")
-	}
-	if seconds*1000 > bashMaxTimeoutMS {
-		return 0, fmt.Errorf("bash: invalid timeout: maximum is %s seconds", formatBashTimeout(float64(bashMaxTimeoutMS)/1000))
-	}
-	return time.Duration(seconds * float64(time.Second)), nil
-}
+var shellANSI = regexp.MustCompile(`(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))|(?:\x1b[@-_])`)
 
-func bashEnvironment() []string {
-	env := append([]string(nil), os.Environ()...)
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		return env
-	}
-	binDir := filepath.Join(cacheDir, "rivo", "bin")
-	pathKey, pathValue := "PATH", ""
-	for i, item := range env {
-		if strings.HasPrefix(item, "PATH=") {
-			pathValue = strings.TrimPrefix(item, "PATH=")
-			env[i] = "PATH=" + prependPath(binDir, pathValue)
-			return env
-		}
-	}
-	env = append(env, pathKey+"="+binDir)
-	return env
-}
-
-func prependPath(entry, current string) string {
-	for _, item := range strings.Split(current, string(os.PathListSeparator)) {
-		if item == entry {
-			return current
-		}
-	}
-	if current == "" {
-		return entry
-	}
-	return entry + string(os.PathListSeparator) + current
-}
-
-func bashErrorResult(output *bashOutputAccumulator, status string) (llm.ToolResult, error) {
-	result, err := output.result()
-	if err != nil {
-		return llm.ToolResult{}, err
-	}
-	text := result.Content[0].(llm.TextContent).Text
-	if text == "(no output)" {
-		return llm.ToolResult{}, errors.New(status)
-	}
-	return llm.ToolResult{}, errors.New(text + "\n\n" + status)
-}
-
-func formatBashTimeout(seconds float64) string {
-	return strconv.FormatFloat(seconds, 'f', -1, 64)
-}
-
-var bashANSI = regexp.MustCompile(`(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b\][^\x07]*(?:\x07|\x1b\\))|(?:\x1b[@-_])`)
-
-type bashOutputAccumulator struct {
+type shellOutputAccumulator struct {
 	mu   sync.Mutex
 	data bytes.Buffer
 }
 
-func newBashOutputAccumulator() *bashOutputAccumulator { return &bashOutputAccumulator{} }
+func newShellOutputAccumulator() *shellOutputAccumulator { return &shellOutputAccumulator{} }
 
-func (o *bashOutputAccumulator) Write(data []byte) (int, error) {
+func (o *shellOutputAccumulator) Write(data []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.data.Write(data)
 }
 
-func (o *bashOutputAccumulator) result() (llm.ToolResult, error) {
+func (o *shellOutputAccumulator) result() (llm.ToolResult, error) {
 	o.mu.Lock()
 	data := append([]byte(nil), o.data.Bytes()...)
 	o.mu.Unlock()
-	content := sanitizeBashOutput(data)
-	truncation := truncateBashTail(content)
+	content := sanitizeShellOutput(data)
+	truncation := truncateShellTail(content)
 	text := truncation.Content
 	details := map[string]any(nil)
 	if truncation.Truncated {
-		fullOutputPath, err := writeBashFullOutput(content)
+		fullOutputPath, err := writeShellFullOutput(content)
 		if err != nil {
 			return llm.ToolResult{}, err
 		}
@@ -200,7 +75,7 @@ func (o *bashOutputAccumulator) result() (llm.ToolResult, error) {
 			},
 			"fullOutputPath": fullOutputPath,
 		}
-		text += bashTruncationNote(truncation, fullOutputPath)
+		text += shellTruncationNote(truncation, fullOutputPath)
 	}
 	if text == "" {
 		text = "(no output)"
@@ -212,8 +87,8 @@ func (o *bashOutputAccumulator) result() (llm.ToolResult, error) {
 	return result, nil
 }
 
-func sanitizeBashOutput(data []byte) string {
-	text := bashANSI.ReplaceAllString(string(data), "")
+func sanitizeShellOutput(data []byte) string {
+	text := shellANSI.ReplaceAllString(string(data), "")
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	var builder strings.Builder
@@ -229,7 +104,7 @@ func sanitizeBashOutput(data []byte) string {
 	return builder.String()
 }
 
-type bashTruncation struct {
+type shellTruncation struct {
 	Content         string
 	Truncated       bool
 	TruncatedBy     string
@@ -241,11 +116,11 @@ type bashTruncation struct {
 	LastLineBytes   int
 }
 
-func truncateBashTail(content string) bashTruncation {
+func truncateShellTail(content string) shellTruncation {
 	lines := splitLines(content)
 	totalBytes := len([]byte(content))
 	if len(lines) <= defaultMaxLines && totalBytes <= defaultMaxBytes {
-		return bashTruncation{Content: content, TotalLines: len(lines), TotalBytes: totalBytes, OutputLines: len(lines), OutputBytes: totalBytes}
+		return shellTruncation{Content: content, TotalLines: len(lines), TotalBytes: totalBytes, OutputLines: len(lines), OutputBytes: totalBytes}
 	}
 
 	kept := make([]string, 0, min(len(lines), defaultMaxLines))
@@ -261,7 +136,7 @@ func truncateBashTail(content string) bashTruncation {
 		if used+lineSize > defaultMaxBytes {
 			truncatedBy = truncatedByBytes
 			if len(kept) == 0 {
-				line = truncateBashStringFromEnd(line, defaultMaxBytes)
+				line = truncateShellStringFromEnd(line, defaultMaxBytes)
 				kept = append(kept, line)
 				partial = true
 			}
@@ -277,7 +152,7 @@ func truncateBashTail(content string) bashTruncation {
 		truncatedBy = truncatedByLines
 	}
 	text := strings.Join(kept, "\n")
-	return bashTruncation{
+	return shellTruncation{
 		Content:         text,
 		Truncated:       true,
 		TruncatedBy:     truncatedBy,
@@ -290,7 +165,7 @@ func truncateBashTail(content string) bashTruncation {
 	}
 }
 
-func truncateBashStringFromEnd(text string, maxBytes int) string {
+func truncateShellStringFromEnd(text string, maxBytes int) string {
 	data := []byte(text)
 	if len(data) <= maxBytes {
 		return text
@@ -302,7 +177,7 @@ func truncateBashStringFromEnd(text string, maxBytes int) string {
 	return string(data)
 }
 
-func writeBashFullOutput(content string) (string, error) {
+func writeShellFullOutput(content string) (string, error) {
 	file, err := os.CreateTemp("", "rivo-bash-*.log")
 	if err != nil {
 		return "", err
@@ -320,7 +195,7 @@ func writeBashFullOutput(content string) (string, error) {
 	return path, nil
 }
 
-func bashTruncationNote(truncation bashTruncation, fullOutputPath string) string {
+func shellTruncationNote(truncation shellTruncation, fullOutputPath string) string {
 	endLine := truncation.TotalLines
 	if truncation.LastLinePartial {
 		lineSize := formatSize(truncation.LastLineBytes)

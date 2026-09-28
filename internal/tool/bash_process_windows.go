@@ -11,25 +11,25 @@ import (
 	"time"
 )
 
-func configureBashProcess(cmd *exec.Cmd) {
+func configureShellProcess(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		_ = killBashProcessTree(cmd.Process.Pid)
+		_ = killShellProcess(cmd.Process.Pid)
 		return os.ErrProcessDone
 	}
 	cmd.WaitDelay = 500 * time.Millisecond
 }
 
-func killBashProcessGroup(cmd *exec.Cmd) {
+func killShellProcessTree(cmd *exec.Cmd) {
 	if cmd.Process != nil {
-		_ = killBashProcessTree(cmd.Process.Pid)
+		_ = killShellProcess(cmd.Process.Pid)
 	}
 }
 
-// killBashProcessTree 使用 taskkill 递归终止 bash 及其子进程
-func killBashProcessTree(pid int) error {
+// killShellProcess 使用 taskkill 递归终止 shell 及其子进程
+func killShellProcess(pid int) error {
 	return newTaskkillCommand(pid).Run()
 }
 

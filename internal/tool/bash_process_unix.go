@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func configureBashProcess(cmd *exec.Cmd) {
+func configureShellProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -24,7 +24,7 @@ func configureBashProcess(cmd *exec.Cmd) {
 	cmd.WaitDelay = 500 * time.Millisecond
 }
 
-func killBashProcessGroup(cmd *exec.Cmd) {
+func killShellProcessTree(cmd *exec.Cmd) {
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
