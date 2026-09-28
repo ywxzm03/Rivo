@@ -106,8 +106,10 @@ func parseFindArgs(args map[string]any) (findOptions, error) {
 		searchPath = "."
 	}
 	limit, hasLimit := argInt(args, "limit")
-	if !hasLimit || limit < 0 {
+	if !hasLimit {
 		limit = findDefaultLimit
+	} else if limit < 1 {
+		limit = 1
 	}
 	return findOptions{pattern: pattern, searchPath: searchPath, limit: limit}, nil
 }
