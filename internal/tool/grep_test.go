@@ -5,28 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
-
-func writeFakeRipgrep(t *testing.T, output string, exitCode int, stderr string) (argsPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "rg")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RG_ARGS_FILE\"\nif [ -n \"$RG_STDERR\" ]; then printf '%s' \"$RG_STDERR\" >&2; fi\nprintf '%s' \"$RG_OUTPUT\"\nexit \"$RG_EXIT\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	argsPath = filepath.Join(dir, "args")
-	t.Setenv("PATH", dir)
-	t.Setenv("RG_ARGS_FILE", argsPath)
-	t.Setenv("RG_OUTPUT", output)
-	t.Setenv("RG_EXIT", strconv.Itoa(exitCode))
-	t.Setenv("RG_STDERR", stderr)
-	return argsPath
-}
 
 func execGrep(t *testing.T, args map[string]any) (string, error) {
 	t.Helper()
@@ -249,13 +232,9 @@ func TestGrepKillsProcessAtMatchLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "continued")
-	script := filepath.Join(t.TempDir(), "rg")
-	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$RG_EVENT\"\nsleep 1\ntouch %q\n", marker)
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", filepath.Dir(script))
-	t.Setenv("RG_EVENT", matchEvent(path, 1, "match"))
+	writeFakeRipgrep(t, matchEvent(path, 1, "match"), 0, "")
+	t.Setenv("RG_SLEEP_SECONDS", "1")
+	t.Setenv("RG_MARKER", marker)
 	if _, err := execGrep(t, map[string]any{"pattern": "x", "path": dir, "limit": float64(1)}); err != nil {
 		t.Fatal(err)
 	}

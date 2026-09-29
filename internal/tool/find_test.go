@@ -120,7 +120,11 @@ func TestFindByteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "50.0KB limit reached") {
-		t.Errorf("output missing byte-limit notice: %q", out[len(out)-100:])
+		tail := out
+		if len(tail) > 100 {
+			tail = tail[len(tail)-100:]
+		}
+		t.Errorf("output missing byte-limit notice: %q", tail)
 	}
 	if len(out) > defaultMaxBytes+100 {
 		t.Errorf("output size = %d, exceeds expected cap", len(out))
@@ -147,12 +151,9 @@ func TestFindPathValidation(t *testing.T) {
 func TestFindKillsProcessAfterLimitProbe(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "continued")
-	script := filepath.Join(t.TempDir(), "rg")
-	body := fmt.Sprintf("#!/bin/sh\nprintf 'a.go\\nb.go\\n'\n/bin/sleep 1\ntouch %q\n", marker)
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", filepath.Dir(script))
+	writeFakeRipgrep(t, "a.go\nb.go\n", 0, "")
+	t.Setenv("RG_SLEEP_SECONDS", "1")
+	t.Setenv("RG_MARKER", marker)
 	if _, err := execFind(t, map[string]any{"pattern": "*.go", "path": dir, "limit": float64(1)}); err != nil {
 		t.Fatal(err)
 	}

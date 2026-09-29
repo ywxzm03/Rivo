@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,7 @@ func TestBashEnvironmentAndSanitization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binDir := cache + "/rivo/bin"
+	binDir := filepath.Join(cache, "rivo", "bin")
 	t.Setenv("PATH", "/usr/bin")
 	result, err := runBash(t, context.Background(), map[string]any{"command": "printf '\\033[31mred\\033[0m\\r\\nA\\001B'"})
 	if err != nil {

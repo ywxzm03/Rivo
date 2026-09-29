@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -183,14 +184,19 @@ func resolveEditPath(path string) (string, error) {
 		path = path[1:]
 	}
 	if strings.HasPrefix(path, "file://") {
-		u, err := url.Parse(path)
-		if err != nil {
-			return "", err
+		localPath := strings.TrimPrefix(path, "file://")
+		if runtime.GOOS == "windows" && len(localPath) >= 2 && isWindowsDrivePath(localPath) {
+			path = localPath
+		} else {
+			u, err := url.Parse(path)
+			if err != nil {
+				return "", err
+			}
+			if u.Host != "" && u.Host != "localhost" {
+				return "", fmt.Errorf("edit: file URL must refer to the local machine")
+			}
+			path = u.Path
 		}
-		if u.Host != "" && u.Host != "localhost" {
-			return "", fmt.Errorf("edit: file URL must refer to the local machine")
-		}
-		path = u.Path
 	}
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -200,6 +206,11 @@ func resolveEditPath(path string) (string, error) {
 		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 	}
 	return filepath.Abs(path)
+}
+
+// isWindowsDrivePath 判断路径是否以 Windows 驱动器前缀开头
+func isWindowsDrivePath(path string) bool {
+	return ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':'
 }
 
 func normalizeLineEndings(text string) string {

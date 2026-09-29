@@ -58,6 +58,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 func TestFindRipgrepOffline(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LocalAppData", t.TempDir())
 	t.Setenv("RIVO_OFFLINE", "1")
 
 	_, err := findRipgrep(t.Context())
@@ -69,6 +70,7 @@ func TestFindRipgrepOffline(t *testing.T) {
 func TestFindRipgrepUsesCache(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LocalAppData", t.TempDir())
 	t.Setenv("RIVO_OFFLINE", "yes")
 
 	cache, err := os.UserCacheDir()
