@@ -207,6 +207,7 @@ func runRipgrep(ctx context.Context, rgPath string, args []string, absPath strin
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
+	configureShellProcess(command)
 	if err := command.Start(); err != nil {
 		return grepResult{}, err
 	}
@@ -241,14 +242,14 @@ func runRipgrep(ctx context.Context, rgPath string, args []string, absPath strin
 		if result.matchCount >= options.limit {
 			result.matchLimitReached = true
 			killedDueToLimit = true
-			_ = command.Process.Kill()
+			killShellProcessTree(command)
 			break
 		}
 	}
 	// 3.等待进程结束，并区分主动终止、无匹配与执行错误
 	if err := scanner.Err(); err != nil {
 		if !killedDueToLimit {
-			_ = command.Process.Kill()
+			killShellProcessTree(command)
 		}
 		_ = command.Wait()
 		return grepResult{}, err

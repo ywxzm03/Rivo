@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -90,8 +91,8 @@ func TestReadMissingFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want 文件不存在报错")
 	}
-	if !strings.Contains(err.Error(), "no such file or directory") {
-		t.Errorf("err = %v, want 含 no such file or directory", err)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want fs.ErrNotExist", err)
 	}
 }
 
@@ -126,6 +127,7 @@ func TestReadTildePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 
 	out, err := execRead(t, map[string]any{"path": "~/a.txt"})
 	if err != nil {

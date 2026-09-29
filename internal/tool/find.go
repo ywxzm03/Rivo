@@ -133,6 +133,7 @@ func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOpt
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
+	configureShellProcess(command)
 	if err := command.Start(); err != nil {
 		return findResult{}, err
 	}
@@ -146,14 +147,14 @@ func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOpt
 		if len(result.paths) >= options.limit {
 			result.limitReached = true
 			stoppedDueToLimit = true
-			_ = command.Process.Kill()
+			killShellProcessTree(command)
 			break
 		}
 		result.paths = append(result.paths, path)
 	}
 	if err := scanner.Err(); err != nil {
 		if !stoppedDueToLimit {
-			_ = command.Process.Kill()
+			killShellProcessTree(command)
 		}
 		_ = command.Wait()
 		return findResult{}, err

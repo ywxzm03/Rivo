@@ -76,6 +76,7 @@ func TestWriteSupportsEmptyAndRelativePaths(t *testing.T) {
 func TestWriteSupportsTildePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 
 	if _, err := execWrite(t, map[string]any{"path": "~/tilde.txt", "content": "home"}); err != nil {
 		t.Fatal(err)
