@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -37,7 +38,11 @@ func main() {
 	if stderr := os.Getenv("RG_STDERR"); stderr != "" {
 		fmt.Fprint(os.Stderr, stderr)
 	}
-	fmt.Fprint(os.Stdout, os.Getenv("RG_OUTPUT"))
+	output := os.Getenv("RG_OUTPUT")
+	fmt.Fprint(os.Stdout, output)
+	if output != "" && !strings.HasSuffix(output, "\n") {
+		fmt.Fprintln(os.Stdout)
+	}
 	if sleepSeconds := os.Getenv("RG_SLEEP_SECONDS"); sleepSeconds != "" {
 		seconds, _ := strconv.ParseFloat(sleepSeconds, 64)
 		time.Sleep(time.Duration(seconds * float64(time.Second)))
