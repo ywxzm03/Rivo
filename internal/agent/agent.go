@@ -25,6 +25,7 @@ func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, 
 	}
 }
 
+// Run 执行一轮或多轮模型调用，并在需要时执行模型返回的工具
 func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

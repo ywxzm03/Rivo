@@ -18,6 +18,7 @@ type Model struct {
 	ReasoningEffort ReasoningEffort
 }
 
+// ReasoningEffort 表示模型 reasoning 的计算强度
 type ReasoningEffort string
 
 const (

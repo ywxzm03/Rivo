@@ -35,8 +35,11 @@ type ThinkingContent struct {
 	ThinkingSignature string
 }
 
+// Type 返回 ThinkingContent 的内容类型
 func (ThinkingContent) Type() ContentType { return ContentThinking }
-func (ThinkingContent) content()          {}
+
+// content 标记 ThinkingContent 实现 Content 接口
+func (ThinkingContent) content() {}
 
 type ToolCall struct {
 	ID        string

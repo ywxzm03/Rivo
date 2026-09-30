@@ -186,6 +186,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	return events, nil
 }
 
+// sendEvent 在上下文未取消时向模型事件通道发送事件
 func sendEvent(ctx context.Context, events chan<- llm.Event, event llm.Event) bool {
 	select {
 	case events <- event:
@@ -305,6 +306,7 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot,
 	}
 }
 
+// appendThinking 将 reasoning 增量追加到指定内容块
 func appendThinking(message *llm.AssistantMessage, index int, delta string) {
 	content, ok := message.Content[index].(llm.ThinkingContent)
 	if ok {
@@ -313,6 +315,7 @@ func appendThinking(message *llm.AssistantMessage, index int, delta string) {
 	}
 }
 
+// appendText 将文本增量追加到指定内容块
 func appendText(message *llm.AssistantMessage, index int, delta string) {
 	content, ok := message.Content[index].(llm.TextContent)
 	if ok {
@@ -321,6 +324,7 @@ func appendText(message *llm.AssistantMessage, index int, delta string) {
 	}
 }
 
+// updateToolArguments 用最新 JSON 参数替换工具调用参数
 func updateToolArguments(message *llm.AssistantMessage, index int, raw string) {
 	var args map[string]any
 	if json.Unmarshal([]byte(raw), &args) != nil {
@@ -333,6 +337,7 @@ func updateToolArguments(message *llm.AssistantMessage, index int, raw string) {
 	}
 }
 
+// updateCustomToolArguments 更新 custom tool call 的字符串输入
 func updateCustomToolArguments(message *llm.AssistantMessage, index int, input string) {
 	call, ok := message.Content[index].(llm.ToolCall)
 	if ok {

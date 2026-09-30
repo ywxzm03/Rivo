@@ -11,6 +11,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
+// BuildParams 将 Rivo 上下文和模型配置转换为 Responses 请求参数
 func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.ResponseNewParams, error) {
 	items, err := BuildInputItems(c)
 	if err != nil {
@@ -46,6 +47,7 @@ func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.Respo
 	return params, nil
 }
 
+// validReasoningEffort 判断 reasoning effort 是否为支持的等级
 func validReasoningEffort(effort llm.ReasoningEffort) bool {
 	switch effort {
 	case llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh,
@@ -95,6 +97,7 @@ func userMessageItem(m llm.UserMessage) responses.ResponseInputItemUnionParam {
 	return responses.ResponseInputItemParamOfMessage(contents, responses.EasyInputMessageRoleUser)
 }
 
+// assistantMessageItems 将 assistant 内容拆分为 Responses 输入 item
 func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.ResponseInputItemUnionParam, error) {
 	var items []responses.ResponseInputItemUnionParam
 	var contents []responses.ResponseOutputMessageContentUnionParam
@@ -225,6 +228,7 @@ func imageContent(c llm.ImageContent) responses.ResponseInputContentUnionParam {
 	}
 }
 
+// BuildAssistantMessage 将 Responses 输出转换为 Rivo assistant 消息和工具调用
 func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []llm.ToolCall, error) {
 	msg := &llm.AssistantMessage{ResponseID: resp.ID}
 	var calls []llm.ToolCall
