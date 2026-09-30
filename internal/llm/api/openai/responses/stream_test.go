@@ -43,6 +43,24 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	}
 }
 
+func TestAssistantMessageSnapshotCopiesContent(t *testing.T) {
+	message := &llm.AssistantMessage{
+		ResponseID: "before",
+		Content:    []llm.Content{llm.TextContent{Text: "before"}},
+	}
+	snapshot := assistantMessageSnapshot(message)
+
+	message.ResponseID = "after"
+	message.Content[0] = llm.TextContent{Text: "after"}
+
+	if snapshot.ResponseID != "before" {
+		t.Fatalf("snapshot ResponseID = %q, want before", snapshot.ResponseID)
+	}
+	if got := snapshot.Content[0].(llm.TextContent).Text; got != "before" {
+		t.Fatalf("snapshot content = %q, want before", got)
+	}
+}
+
 func TestFinishReasoningSlotUsesSummaryAndRawSignature(t *testing.T) {
 	partial := &llm.AssistantMessage{}
 	slots := map[int64]outputSlot{}

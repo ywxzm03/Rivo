@@ -53,7 +53,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		terminal := false
 		send := func(event llm.Event) bool {
 			if event.Partial == nil {
-				event.Partial = partial
+				event.Partial = assistantMessageSnapshot(partial)
 			}
 			return sendEvent(ctx, events, event)
 		}
@@ -189,6 +189,13 @@ func sendEvent(ctx context.Context, events chan<- llm.Event, event llm.Event) bo
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// assistantMessageSnapshot 复制消息结构和内容切片，避免事件消费者读取生产中的消息
+func assistantMessageSnapshot(message *llm.AssistantMessage) *llm.AssistantMessage {
+	snapshot := *message
+	snapshot.Content = append([]llm.Content(nil), message.Content...)
+	return &snapshot
 }
 
 // addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
