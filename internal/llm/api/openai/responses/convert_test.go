@@ -173,6 +173,21 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
 	})
 
+	t.Run("DeepSeek reasoning 模型使用 Responses 请求", func(t *testing.T) {
+		model := llm.Model{
+			ID:              "deepseek-flash",
+			Provider:        "deepseek",
+			API:             llm.APIOpenAIResponses,
+			Reasoning:       true,
+			ReasoningEffort: llm.ReasoningEffortMedium,
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"deepseek-flash","reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
 	t.Run("reasoning effort 不接受未定义等级", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
