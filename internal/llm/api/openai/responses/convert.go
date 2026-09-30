@@ -6,6 +6,7 @@ import (
 
 	sdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -19,6 +20,20 @@ func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.Respo
 		Model: model.ID,
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
 	}
+	if model.Reasoning {
+		effort := model.ReasoningEffort
+		if effort == "" {
+			effort = llm.ReasoningEffortMedium
+		}
+		if !validReasoningEffort(effort) {
+			return responses.ResponseNewParams{}, fmt.Errorf("openai: 不支持的 reasoning effort %q", effort)
+		}
+		params.Reasoning = shared.ReasoningParam{
+			Effort:  shared.ReasoningEffort(effort),
+			Summary: shared.ReasoningSummaryAuto,
+		}
+		params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
+	}
 	for _, t := range c.Tools {
 		params.Tools = append(params.Tools, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
@@ -29,6 +44,16 @@ func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.Respo
 		})
 	}
 	return params, nil
+}
+
+func validReasoningEffort(effort llm.ReasoningEffort) bool {
+	switch effort {
+	case llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh,
+		llm.ReasoningEffortXHigh, llm.ReasoningEffortMax:
+		return true
+	default:
+		return false
+	}
 }
 
 func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
@@ -88,6 +113,16 @@ func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.Re
 		switch v := c.(type) {
 		case llm.TextContent:
 			contents = append(contents, outputTextContent(v.Text))
+		case llm.ThinkingContent:
+			flush()
+			if v.ThinkingSignature == "" {
+				continue
+			}
+			item, err := reasoningItemParam(v)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, responses.ResponseInputItemUnionParam{OfReasoning: &item})
 		case llm.ToolCall:
 			flush()
 			args, err := json.Marshal(v.Arguments)
@@ -101,6 +136,15 @@ func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.Re
 	}
 	flush()
 	return items, nil
+}
+
+// reasoningItemParam 将持久化的 provider reasoning item 转回 SDK 参数
+func reasoningItemParam(content llm.ThinkingContent) (responses.ResponseReasoningItemParam, error) {
+	var item responses.ResponseReasoningItem
+	if err := json.Unmarshal([]byte(content.ThinkingSignature), &item); err != nil {
+		return responses.ResponseReasoningItemParam{}, fmt.Errorf("openai: 解析 reasoning item: %w", err)
+	}
+	return item.ToParam(), nil
 }
 
 func assistantMessageID(msgIndex, textIndex int) string {
@@ -182,14 +226,45 @@ func imageContent(c llm.ImageContent) responses.ResponseInputContentUnionParam {
 }
 
 func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []llm.ToolCall, error) {
-	msg := &llm.AssistantMessage{}
+	msg := &llm.AssistantMessage{ResponseID: resp.ID}
 	var calls []llm.ToolCall
 	for _, item := range resp.Output {
 		switch item.Type {
+		case "reasoning":
+			reasoning := item.AsReasoning()
+			var thinking string
+			for i, part := range reasoning.Summary {
+				if i > 0 {
+					thinking += "\n\n"
+				}
+				thinking += part.Text
+			}
+			if thinking == "" {
+				for i, part := range reasoning.Content {
+					if i > 0 {
+						thinking += "\n\n"
+					}
+					thinking += part.Text
+				}
+			}
+			signature := reasoning.RawJSON()
+			if signature == "" {
+				data, err := json.Marshal(reasoning)
+				if err != nil {
+					return nil, nil, fmt.Errorf("openai: 序列化 reasoning item: %w", err)
+				}
+				signature = string(data)
+			}
+			msg.Content = append(msg.Content, llm.ThinkingContent{
+				Thinking:          thinking,
+				ThinkingSignature: signature,
+			})
 		case "message":
 			for _, part := range item.Content {
 				if part.Type == "output_text" {
 					msg.Content = append(msg.Content, llm.TextContent{Text: part.Text})
+				} else if part.Type == "refusal" {
+					msg.Content = append(msg.Content, llm.TextContent{Text: part.Refusal})
 				}
 			}
 		case "function_call":
@@ -197,6 +272,10 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			if err != nil {
 				return nil, nil, err
 			}
+			calls = append(calls, tc)
+			msg.Content = append(msg.Content, tc)
+		case "custom_tool_call":
+			tc := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{"input": item.Input}}
 			calls = append(calls, tc)
 			msg.Content = append(msg.Content, tc)
 		}
@@ -208,6 +287,10 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 	case resp.Status == responses.ResponseStatusIncomplete &&
 		resp.IncompleteDetails.Reason == "max_output_tokens":
 		msg.StopReason = llm.StopReasonLength
+	case resp.Status == responses.ResponseStatusIncomplete,
+		resp.Status == responses.ResponseStatusFailed,
+		resp.Status == responses.ResponseStatusCancelled:
+		msg.StopReason = llm.StopReasonError
 	default:
 		msg.StopReason = llm.StopReasonStop
 	}

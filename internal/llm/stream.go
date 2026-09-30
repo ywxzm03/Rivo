@@ -5,18 +5,30 @@ import "context"
 type EventType string
 
 const (
-	EventTextDelta EventType = "text_delta"
-	EventToolCall  EventType = "toolcall"
-	EventDone      EventType = "done"
-	EventError     EventType = "error"
+	EventStart         EventType = "start"
+	EventTextStart     EventType = "text_start"
+	EventTextDelta     EventType = "text_delta"
+	EventTextEnd       EventType = "text_end"
+	EventThinkingStart EventType = "thinking_start"
+	EventThinkingDelta EventType = "thinking_delta"
+	EventThinkingEnd   EventType = "thinking_end"
+	EventToolCallStart EventType = "toolcall_start"
+	EventToolCallDelta EventType = "toolcall_delta"
+	EventToolCallEnd   EventType = "toolcall_end"
+	EventToolCall      EventType = "toolcall"
+	EventDone          EventType = "done"
+	EventError         EventType = "error"
 )
 
 type Event struct {
-	Type     EventType
-	Delta    string
-	ToolCall ToolCall
-	Message  *AssistantMessage
-	Err      error
+	Type         EventType
+	ContentIndex int
+	Delta        string
+	Content      string
+	ToolCall     ToolCall
+	Partial      *AssistantMessage
+	Message      *AssistantMessage
+	Err          error
 }
 
 const (

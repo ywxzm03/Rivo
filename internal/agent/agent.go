@@ -60,8 +60,18 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		if streamErr == nil {
 			for ev := range events {
 				switch ev.Type {
-				case llm.EventTextDelta, llm.EventToolCall:
-					appendAssistantEvent(&partial, ev)
+				case llm.EventStart:
+					if ev.Partial != nil {
+						partial = *ev.Partial
+					}
+				case llm.EventTextStart, llm.EventTextDelta, llm.EventTextEnd,
+					llm.EventThinkingStart, llm.EventThinkingDelta, llm.EventThinkingEnd,
+					llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallEnd, llm.EventToolCall:
+					if ev.Partial != nil {
+						partial = *ev.Partial
+					} else {
+						appendAssistantEvent(&partial, ev)
+					}
 					if err := a.emit(llm.MessageUpdateEvent{
 						Message:               partial,
 						AssistantMessageEvent: ev,
