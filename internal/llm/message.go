@@ -33,6 +33,8 @@ type ToolResultMessage struct {
 	ToolCallID string
 	ToolName   string
 	Content    []Content
+	Details    any
+	IsError    bool
 }
 
 func (ToolResultMessage) Role() Role { return RoleToolResult }

@@ -26,6 +26,8 @@ type Grep struct{}
 
 func (g *Grep) Name() string { return "grep" }
 
+func (g *Grep) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (g *Grep) Description() string {
 	return fmt.Sprintf(
 		"Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. "+

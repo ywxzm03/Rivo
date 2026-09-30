@@ -18,6 +18,8 @@ type Bash struct{}
 
 func (b *Bash) Name() string { return "bash" }
 
+func (b *Bash) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (b *Bash) Description() string {
 	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", defaultMaxLines, defaultMaxBytes/1024)
 }

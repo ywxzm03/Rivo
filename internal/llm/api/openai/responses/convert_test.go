@@ -44,6 +44,9 @@ type fakeTool struct {
 func (t fakeTool) Name() string               { return t.name }
 func (t fakeTool) Description() string        { return t.description }
 func (t fakeTool) Parameters() map[string]any { return t.parameters }
+func (t fakeTool) ExecutionMode() llm.ToolExecutionMode {
+	return llm.ToolExecutionParallel
+}
 
 func (t fakeTool) Execute(context.Context, map[string]any) (llm.ToolResult, error) {
 	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "pong"}}}, nil

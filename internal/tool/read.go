@@ -40,6 +40,8 @@ type Read struct {
 
 func (r *Read) Name() string { return "read" }
 
+func (r *Read) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (r *Read) Description() string {
 	return fmt.Sprintf(
 		"Read the contents of a file. Supports text files and images (jpg, png, webp). Images are sent as attachments. "+

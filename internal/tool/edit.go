@@ -42,6 +42,8 @@ type matchedEdit struct {
 
 func (e *Edit) Name() string { return "edit" }
 
+func (e *Edit) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (e *Edit) Description() string {
 	return "Edit a file using exact text replacement. Every oldText must match a unique, non-overlapping region of the original file. Multiple edits are matched against the original file and applied together."
 }

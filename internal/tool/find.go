@@ -21,6 +21,8 @@ type Find struct{}
 
 func (f *Find) Name() string { return "find" }
 
+func (f *Find) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (f *Find) Description() string {
 	return fmt.Sprintf(
 		"Find files by glob pattern. Returns paths relative to the search directory. Includes hidden files and respects .gitignore. "+

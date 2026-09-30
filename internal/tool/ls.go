@@ -21,6 +21,8 @@ type Ls struct{}
 
 func (l *Ls) Name() string { return "ls" }
 
+func (l *Ls) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (l *Ls) Description() string {
 	return fmt.Sprintf(
 		"List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. "+

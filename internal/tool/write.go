@@ -13,6 +13,8 @@ type Write struct{}
 
 func (w *Write) Name() string { return "write" }
 
+func (w *Write) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
+
 func (w *Write) Description() string {
 	return "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
 }
