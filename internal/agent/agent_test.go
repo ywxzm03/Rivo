@@ -142,7 +142,7 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 	defer releaseSecond()
 
 	started := make(chan string, 2)
-	finished := make(chan string, 2)
+	toolEnds := make(chan string, 2)
 	makeTool := func(name string, release <-chan struct{}) *controlledTool {
 		return &controlledTool{
 			name: name,
@@ -150,7 +150,6 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 			run: func(context.Context) (llm.ToolResult, error) {
 				started <- name
 				<-release
-				finished <- name
 				return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: name}}}, nil
 			},
 		}
@@ -161,10 +160,18 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 		llm.AssistantMessage{Content: toolCalls("first", "second"), StopReason: llm.StopReasonToolUse},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}},
 	)
+	var events []llm.AgentEvent
+	onEvent := func(event llm.AgentEvent) error {
+		events = append(events, event)
+		if end, ok := event.(llm.ToolExecutionEndEvent); ok {
+			toolEnds <- end.ToolName
+		}
+		return nil
+	}
 	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{
 		makeTool("first", firstRelease),
 		makeTool("second", secondRelease),
-	}}, streamFn, nil)
+	}}, streamFn, onEvent)
 
 	type runResult struct {
 		err error
@@ -182,12 +189,12 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 	}
 
 	releaseSecond()
-	if got := waitForToolSignal(t, finished); got != "second" {
-		t.Fatalf("first completed tool = %q, want second", got)
+	if got := waitForToolSignal(t, toolEnds); got != "second" {
+		t.Fatalf("first tool_execution_end = %q, want second", got)
 	}
 	releaseFirst()
-	if got := waitForToolSignal(t, finished); got != "first" {
-		t.Fatalf("second completed tool = %q, want first", got)
+	if got := waitForToolSignal(t, toolEnds); got != "first" {
+		t.Fatalf("second tool_execution_end = %q, want first", got)
 	}
 	select {
 	case result := <-runDone:
@@ -211,6 +218,26 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 	}
 	if firstResult.ToolName != "first" || secondResult.ToolName != "second" {
 		t.Fatalf("tool result order = %q, %q; want first, second", firstResult.ToolName, secondResult.ToolName)
+	}
+	var startNames, endNames, resultStarts, resultEnds []string
+	for _, event := range events {
+		switch event := event.(type) {
+		case llm.ToolExecutionStartEvent:
+			startNames = append(startNames, event.ToolName)
+		case llm.ToolExecutionEndEvent:
+			endNames = append(endNames, event.ToolName)
+		case llm.MessageStartEvent:
+			if message, ok := event.Message.(llm.ToolResultMessage); ok {
+				resultStarts = append(resultStarts, message.ToolName)
+			}
+		case llm.MessageEndEvent:
+			if message, ok := event.Message.(llm.ToolResultMessage); ok {
+				resultEnds = append(resultEnds, message.ToolName)
+			}
+		}
+	}
+	if strings.Join(startNames, ",") != "first,second" || strings.Join(endNames, ",") != "second,first" || strings.Join(resultStarts, ",") != "first,second" || strings.Join(resultEnds, ",") != "first,second" {
+		t.Fatalf("tool event order = start:%v end:%v result-start:%v result-end:%v", startNames, endNames, resultStarts, resultEnds)
 	}
 }
 
@@ -393,6 +420,80 @@ func TestAgentRunUnknownTool(t *testing.T) {
 	}
 }
 
+func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
+		ch := make(chan llm.Event, 3)
+		ch <- llm.Event{Type: llm.EventTextDelta, Delta: "hel"}
+		ch <- llm.Event{Type: llm.EventTextDelta, Delta: "lo"}
+		ch <- llm.Event{Type: llm.EventDone, Message: &llm.AssistantMessage{
+			Content:    []llm.Content{llm.TextContent{Text: "hello"}},
+			StopReason: llm.StopReasonStop,
+		}}
+		close(ch)
+		return ch, nil
+	}
+	var events []llm.AgentEvent
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{
+		ID:       "model-id",
+		Provider: "provider-id",
+		API:      llm.APIOpenAIResponses,
+	}}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
+
+	message, err := a.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTypes := []string{
+		llm.AgentEventAgentStart,
+		llm.AgentEventTurnStart,
+		llm.AgentEventMessageStart,
+		llm.AgentEventMessageEnd,
+		llm.AgentEventMessageStart,
+		llm.AgentEventMessageUpdate,
+		llm.AgentEventMessageUpdate,
+		llm.AgentEventMessageEnd,
+		llm.AgentEventTurnEnd,
+		llm.AgentEventAgentEnd,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("event count = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type() != want {
+			t.Errorf("events[%d].Type() = %q, want %q", i, events[i].Type(), want)
+		}
+	}
+	firstUpdateEvent, ok := events[5].(llm.MessageUpdateEvent)
+	if !ok {
+		t.Fatalf("events[5] = %T, want MessageUpdateEvent", events[5])
+	}
+	firstUpdate, ok := firstUpdateEvent.Message.(llm.AssistantMessage)
+	if !ok || firstUpdate.Content[0].(llm.TextContent).Text != "hello" {
+		t.Fatalf("first shared partial message = %#v", firstUpdateEvent.Message)
+	}
+	secondUpdateEvent, ok := events[6].(llm.MessageUpdateEvent)
+	if !ok {
+		t.Fatalf("events[6] = %T, want MessageUpdateEvent", events[6])
+	}
+	secondUpdate, ok := secondUpdateEvent.Message.(llm.AssistantMessage)
+	if !ok || secondUpdate.Content[0].(llm.TextContent).Text != "hello" {
+		t.Fatalf("second partial message = %#v", secondUpdateEvent.Message)
+	}
+	if firstUpdateEvent.AssistantMessageEvent.Delta != "hel" || secondUpdateEvent.AssistantMessageEvent.Delta != "lo" {
+		t.Fatalf("assistant stream events = %+v, %+v", firstUpdateEvent.AssistantMessageEvent, secondUpdateEvent.AssistantMessageEvent)
+	}
+	if message.API != llm.APIOpenAIResponses || message.Provider != "provider-id" || message.Model != "model-id" {
+		t.Errorf("assistant metadata = api:%q provider:%q model:%q", message.API, message.Provider, message.Model)
+	}
+	agentEnd, ok := events[9].(llm.AgentEndEvent)
+	if !ok || len(agentEnd.Messages) != 2 {
+		t.Errorf("agent_end event = %#v, want two messages", events[9])
+	}
+}
+
 func TestAgentRunStreamError(t *testing.T) {
 	sentinel := errors.New("boom")
 	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
@@ -401,8 +502,128 @@ func TestAgentRunStreamError(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
+	var events []llm.AgentEvent
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	message, err := a.Run(context.Background(), "hi")
+	if !errors.Is(err, sentinel) {
 		t.Errorf("err = %v, want boom", err)
+	}
+	if message == nil || message.StopReason != llm.StopReasonError || message.Model != "m1" {
+		t.Fatalf("error assistant message = %+v", message)
+	}
+	if len(message.Content) != 1 {
+		t.Fatalf("error assistant content = %+v, want one error text", message.Content)
+	}
+	errorText, ok := message.Content[0].(llm.TextContent)
+	if !ok || errorText.Text != sentinel.Error() {
+		t.Errorf("error assistant content = %+v, want original error", message.Content)
+	}
+	if got := len(a.AgentContext.Messages); got != 2 {
+		t.Fatalf("context messages = %d, want user and error assistant", got)
+	}
+	if len(events) < 2 || events[len(events)-2].Type() != llm.AgentEventMessageEnd || events[len(events)-1].Type() != llm.AgentEventAgentEnd {
+		t.Errorf("last events = %+v, want message_end then agent_end", events)
+	}
+}
+
+func TestAgentEventSinkErrorStopsRunAndCancelsModelStream(t *testing.T) {
+	sentinel := errors.New("sink failed")
+	calls := 0
+	canceled := make(chan struct{})
+	streamFn := func(ctx context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
+		calls++
+		ch := make(chan llm.Event)
+		go func() {
+			defer close(ch)
+			select {
+			case ch <- llm.Event{Type: llm.EventTextDelta, Delta: "partial"}:
+				<-ctx.Done()
+			case <-ctx.Done():
+			}
+			close(canceled)
+		}()
+		return ch, nil
+	}
+	var events []llm.AgentEvent
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		if event.Type() == llm.AgentEventMessageUpdate {
+			return sentinel
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want sink error", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("model stream did not observe cancellation")
+	}
+	if calls != 1 {
+		t.Errorf("StreamFn calls = %d, want 1", calls)
+	}
+	if events[len(events)-1].Type() != llm.AgentEventMessageUpdate {
+		t.Errorf("last event = %q, want message_update", events[len(events)-1].Type())
+	}
+}
+
+func TestAgentToolEventSinkErrorCancelsOtherParallelTools(t *testing.T) {
+	sentinel := errors.New("tool event sink failed")
+	canceled := make(chan struct{})
+	fast := &controlledTool{
+		name: "fast",
+		mode: llm.ToolExecutionParallel,
+		run: func(context.Context) (llm.ToolResult, error) {
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "done"}}}, nil
+		},
+	}
+	slow := &controlledTool{
+		name: "slow",
+		mode: llm.ToolExecutionParallel,
+		run: func(ctx context.Context) (llm.ToolResult, error) {
+			<-ctx.Done()
+			close(canceled)
+			return llm.ToolResult{}, ctx.Err()
+		},
+	}
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: toolCalls("fast", "slow"), StopReason: llm.StopReasonToolUse},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "must not run"}}},
+	)
+	var events []llm.AgentEvent
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{fast, slow}}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		if end, ok := event.(llm.ToolExecutionEndEvent); ok && end.ToolName == "fast" {
+			return sentinel
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want sink error", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("unfinished parallel tool did not receive cancellation")
+	}
+	if calls != 1 {
+		t.Errorf("StreamFn calls = %d, want 1", calls)
+	}
+	for _, event := range events {
+		switch event := event.(type) {
+		case llm.MessageStartEvent:
+			if _, ok := event.Message.(llm.ToolResultMessage); ok {
+				t.Error("tool result message emitted after event sink failed")
+			}
+		case llm.MessageEndEvent:
+			if _, ok := event.Message.(llm.ToolResultMessage); ok {
+				t.Error("tool result message emitted after event sink failed")
+			}
+		}
 	}
 }

@@ -21,6 +21,9 @@ func (UserMessage) Role() Role { return RoleUser }
 func (UserMessage) message()   {}
 
 type AssistantMessage struct {
+	API        API
+	Provider   string
+	Model      string
 	Content    []Content
 	StopReason StopReason
 	Usage      Usage

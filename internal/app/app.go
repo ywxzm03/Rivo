@@ -13,7 +13,7 @@ type App struct {
 	agent *agent.Agent
 }
 
-func New(cfg Config, onEvent func(llm.Event)) (*App, error) {
+func New(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	spec, err := lookupProvider(cfg.ProviderID)
 	if err != nil {
 		return nil, err

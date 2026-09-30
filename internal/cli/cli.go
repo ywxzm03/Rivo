@@ -30,10 +30,12 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// 2.组装Agent
-	a, err := app.New(cfg, func(ev llm.Event) {
-		if ev.Type == llm.EventTextDelta {
-			fmt.Fprint(stdout, ev.Delta)
+	a, err := app.New(cfg, func(ev llm.AgentEvent) error {
+		if update, ok := ev.(llm.MessageUpdateEvent); ok && update.AssistantMessageEvent.Type == llm.EventTextDelta {
+			_, err := fmt.Fprint(stdout, update.AssistantMessageEvent.Delta)
+			return err
 		}
+		return nil
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
