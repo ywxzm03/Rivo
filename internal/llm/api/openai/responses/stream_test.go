@@ -61,6 +61,29 @@ func TestAssistantMessageSnapshotCopiesContent(t *testing.T) {
 	}
 }
 
+func TestIncompleteResponseError(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  responses.ResponseStatus
+		reason  string
+		wantErr bool
+	}{
+		{name: "completed", status: responses.ResponseStatusCompleted},
+		{name: "max output tokens", status: responses.ResponseStatusIncomplete, reason: "max_output_tokens"},
+		{name: "content filter", status: responses.ResponseStatusIncomplete, reason: "content_filter", wantErr: true},
+		{name: "unknown incomplete", status: responses.ResponseStatusIncomplete, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := responses.Response{Status: tt.status}
+			response.IncompleteDetails.Reason = tt.reason
+			if err := incompleteResponseError(response); (err != nil) != tt.wantErr {
+				t.Fatalf("incompleteResponseError() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestFinishReasoningSlotUsesSummaryAndRawSignature(t *testing.T) {
 	partial := &llm.AssistantMessage{}
 	slots := map[int64]outputSlot{}

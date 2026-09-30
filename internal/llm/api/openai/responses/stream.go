@@ -156,6 +156,10 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					send(llm.Event{Type: llm.EventError, Err: err})
 					return
 				}
+				if err := incompleteResponseError(ev.Response); err != nil {
+					send(llm.Event{Type: llm.EventError, Err: err})
+					return
+				}
 				if !send(llm.Event{Type: llm.EventDone, Message: msg}) {
 					return
 				}
@@ -196,6 +200,17 @@ func assistantMessageSnapshot(message *llm.AssistantMessage) *llm.AssistantMessa
 	snapshot := *message
 	snapshot.Content = append([]llm.Content(nil), message.Content...)
 	return &snapshot
+}
+
+// incompleteResponseError 将除输出长度限制外的 incomplete 响应转换为错误
+func incompleteResponseError(response responses.Response) error {
+	if response.Status != responses.ResponseStatusIncomplete || response.IncompleteDetails.Reason == "max_output_tokens" {
+		return nil
+	}
+	if response.IncompleteDetails.Reason == "" {
+		return errors.New("openai: 响应未完成")
+	}
+	return fmt.Errorf("openai: 响应未完成: %s", response.IncompleteDetails.Reason)
 }
 
 // addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
