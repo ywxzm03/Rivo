@@ -18,7 +18,7 @@ type Client struct {
 }
 
 type outputSlot struct {
-	kind       llm.EventType
+	kind       string
 	contentIdx int
 	arguments  string
 }
@@ -37,7 +37,7 @@ func NewClient(apiKey, baseURL string) *Client {
 }
 
 // Stream 将 Responses SSE 事件转换为带 content index 的统一模型事件
-func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.Event, error) {
+func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 	if model.API != llm.APIOpenAIResponses {
 		return nil, fmt.Errorf("openai: 暂不支持协议 %q", model.API)
 	}
@@ -46,19 +46,19 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		return nil, err
 	}
 	stream := cl.api.Responses.NewStreaming(ctx, params)
-	events := make(chan llm.Event)
+	events := make(chan llm.AssistantMessageEvent)
 	go func() {
 		defer close(events)
 		defer stream.Close()
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
-		if !sendEvent(ctx, events, llm.Event{Type: llm.EventStart, Partial: assistantMessageSnapshot(partial)}) {
+		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: assistantMessageSnapshot(partial)}) {
 			return
 		}
 		slots := map[outputSlotKey]outputSlot{}
 		terminal := false
-		send := func(event llm.Event) bool {
-			if event.Partial == nil {
-				event.Partial = assistantMessageSnapshot(partial)
+		send := func(event llm.AssistantMessageEvent) bool {
+			if eventPartial(event) == nil {
+				event = withEventPartial(event, assistantMessageSnapshot(partial))
 			}
 			return sendEvent(ctx, events, event)
 		}
@@ -84,7 +84,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					continue
 				}
 				appendThinking(partial, slot.contentIdx, ev.Delta)
-				if !send(llm.Event{Type: llm.EventThinkingDelta, ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+				if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
 					return
 				}
 			case "response.reasoning_summary_part.done":
@@ -93,7 +93,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					continue
 				}
 				appendThinking(partial, slot.contentIdx, "\n\n")
-				if !send(llm.Event{Type: llm.EventThinkingDelta, ContentIndex: slot.contentIdx, Delta: "\n\n"}) {
+				if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: "\n\n"}) {
 					return
 				}
 			case "response.output_text.delta", "response.refusal.delta":
@@ -102,7 +102,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					continue
 				}
 				appendText(partial, slot.contentIdx, ev.Delta)
-				if !send(llm.Event{Type: llm.EventTextDelta, ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+				if !send(llm.AssistantMessageTextDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
 					return
 				}
 			case "response.function_call_arguments.delta":
@@ -113,7 +113,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 				slot.arguments += ev.Delta
 				slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
 				updateToolArguments(partial, slot.contentIdx, slot.arguments)
-				if !send(llm.Event{Type: llm.EventToolCallDelta, ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+				if !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
 					return
 				}
 			case "response.function_call_arguments.done":
@@ -127,7 +127,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 				updateToolArguments(partial, slot.contentIdx, slot.arguments)
 				if strings.HasPrefix(ev.Arguments, previous) {
 					delta := ev.Arguments[len(previous):]
-					if delta != "" && !send(llm.Event{Type: llm.EventToolCallDelta, ContentIndex: slot.contentIdx, Delta: delta}) {
+					if delta != "" && !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: delta}) {
 						return
 					}
 				}
@@ -139,33 +139,33 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 				terminal = true
 				msg, _, err := BuildAssistantMessage(ev.Response)
 				if err != nil {
-					send(llm.Event{Type: llm.EventError, Err: err})
+					send(llm.AssistantMessageErrorEvent{Err: err})
 					return
 				}
 				if err := incompleteResponseError(ev.Response); err != nil {
-					send(llm.Event{Type: llm.EventError, Err: err})
+					send(llm.AssistantMessageErrorEvent{Err: err})
 					return
 				}
-				if !send(llm.Event{Type: llm.EventDone, Message: msg}) {
+				if !send(llm.AssistantMessageDoneEvent{Message: msg}) {
 					return
 				}
 				return
 			case "response.failed":
 				terminal = true
 				errResp := ev.Response.Error
-				send(llm.Event{Type: llm.EventError, Err: apiError("openai: 请求失败", string(errResp.Code), errResp.Message)})
+				send(llm.AssistantMessageErrorEvent{Err: apiError("openai: 请求失败", string(errResp.Code), errResp.Message)})
 				return
 			case "error":
 				terminal = true
-				send(llm.Event{Type: llm.EventError, Err: apiError("openai", ev.Code, ev.Message)})
+				send(llm.AssistantMessageErrorEvent{Err: apiError("openai", ev.Code, ev.Message)})
 				return
 			}
 		}
 		if !terminal {
 			if err := stream.Err(); err != nil {
-				send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 流中断: %w", err)})
+				send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 流中断: %w", err)})
 			} else {
-				send(llm.Event{Type: llm.EventError, Err: errors.New("openai: 流在终止事件前结束")})
+				send(llm.AssistantMessageErrorEvent{Err: errors.New("openai: 流在终止事件前结束")})
 			}
 		}
 	}()
@@ -173,12 +173,85 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 }
 
 // sendEvent 在上下文未取消时向模型事件通道发送事件
-func sendEvent(ctx context.Context, events chan<- llm.Event, event llm.Event) bool {
+func sendEvent(ctx context.Context, events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) bool {
 	select {
 	case events <- event:
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+func eventPartial(event llm.AssistantMessageEvent) *llm.AssistantMessage {
+	switch event := event.(type) {
+	case llm.AssistantMessageStartEvent:
+		return event.Partial
+	case llm.AssistantMessageTextStartEvent:
+		return event.Partial
+	case llm.AssistantMessageTextDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageTextEndEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingStartEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingEndEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallStartEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallEndEvent:
+		return event.Partial
+	case llm.AssistantMessageDoneEvent:
+		return event.Partial
+	case llm.AssistantMessageErrorEvent:
+		return event.Partial
+	}
+	return nil
+}
+
+func withEventPartial(event llm.AssistantMessageEvent, partial *llm.AssistantMessage) llm.AssistantMessageEvent {
+	switch event := event.(type) {
+	case llm.AssistantMessageStartEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageTextStartEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageTextDeltaEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageTextEndEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageThinkingStartEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageThinkingDeltaEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageThinkingEndEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageToolCallStartEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageToolCallDeltaEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageToolCallEndEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageDoneEvent:
+		event.Partial = partial
+		return event
+	case llm.AssistantMessageErrorEvent:
+		event.Partial = partial
+		return event
+	default:
+		return event
 	}
 }
 
@@ -201,17 +274,17 @@ func incompleteResponseError(response responses.Response) error {
 }
 
 // addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
-func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
+func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	idx := len(partial.Content)
 	switch item.Type {
 	case "reasoning":
 		partial.Content = append(partial.Content, llm.ThinkingContent{})
 		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventThinkingStart, contentIdx: idx}
-		return send(llm.Event{Type: llm.EventThinkingStart, ContentIndex: idx})
+		return send(llm.AssistantMessageThinkingStartEvent{ContentIndex: idx})
 	case "message":
 		partial.Content = append(partial.Content, llm.TextContent{})
 		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventTextStart, contentIdx: idx}
-		return send(llm.Event{Type: llm.EventTextStart, ContentIndex: idx})
+		return send(llm.AssistantMessageTextStartEvent{ContentIndex: idx})
 	case "function_call":
 		call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{}}
 		partial.Content = append(partial.Content, call)
@@ -220,21 +293,21 @@ func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]output
 			updateToolArguments(partial, idx, item.Arguments.OfString)
 			call = partial.Content[idx].(llm.ToolCall)
 		}
-		return send(llm.Event{Type: llm.EventToolCallStart, ContentIndex: idx, ToolCall: call})
+		return send(llm.AssistantMessageToolCallStartEvent{ContentIndex: idx, ToolCall: call})
 	default:
-		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
 		return false
 	}
 }
 
 // addContentPartSlot 为 message output item 的独立内容块创建 slot
-func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex, contentIndex int64, partType string, send func(llm.Event) bool) bool {
+func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex, contentIndex int64, partType string, send func(llm.AssistantMessageEvent) bool) bool {
 	key := outputSlotKey{outputIndex: outputIndex, contentIndex: contentIndex}
 	if _, ok := slots[key]; ok {
 		return true
 	}
 	idx := len(partial.Content)
-	var kind llm.EventType
+	var kind string
 	var content llm.Content
 	switch partType {
 	case "output_text", "refusal":
@@ -242,16 +315,19 @@ func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 	case "reasoning_text":
 		kind, content = llm.EventThinkingStart, llm.ThinkingContent{}
 	default:
-		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 content part 类型 %q", partType)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 content part 类型 %q", partType)})
 		return false
 	}
 	partial.Content = append(partial.Content, content)
 	slots[key] = outputSlot{kind: kind, contentIdx: idx}
-	return send(llm.Event{Type: kind, ContentIndex: idx})
+	if kind == llm.EventThinkingStart {
+		return send(llm.AssistantMessageThinkingStartEvent{ContentIndex: idx})
+	}
+	return send(llm.AssistantMessageTextStartEvent{ContentIndex: idx})
 }
 
 // finishOutputSlot 用 output_item.done 的完整 item 固化内容并发出结束事件
-func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
+func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	slot, ok := slots[outputSlotKey{outputIndex: outputIndex}]
 	if !ok {
 		return true
@@ -281,29 +357,29 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]out
 		}
 		partial.Content[slot.contentIdx] = llm.ThinkingContent{Thinking: thinking, ThinkingSignature: signature}
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
-		return send(llm.Event{Type: llm.EventThinkingEnd, ContentIndex: slot.contentIdx, Content: thinking})
+		return send(llm.AssistantMessageThinkingEndEvent{ContentIndex: slot.contentIdx, Content: thinking})
 	case "message":
 		return finishMessageSlots(partial, slots, outputIndex, item.Content, send)
 	case "function_call":
 		call, err := toolCallFromItem(item)
 		if err != nil {
-			send(llm.Event{Type: llm.EventError, Err: err})
+			send(llm.AssistantMessageErrorEvent{Err: err})
 			return false
 		}
 		partial.Content[slot.contentIdx] = call
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
-		return send(llm.Event{Type: llm.EventToolCallEnd, ContentIndex: slot.contentIdx, ToolCall: call})
+		return send(llm.AssistantMessageToolCallEndEvent{ContentIndex: slot.contentIdx, ToolCall: call})
 	default:
-		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
 		return false
 	}
 }
 
 // finishMessageSlots 按 message 的 content index 分别固化文本和拒答内容
-func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, contents []responses.ResponseOutputMessageContentUnion, send func(llm.Event) bool) bool {
+func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, contents []responses.ResponseOutputMessageContentUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	if len(contents) == 0 {
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
-		return send(llm.Event{Type: llm.EventTextEnd, ContentIndex: 0})
+		return send(llm.AssistantMessageTextEndEvent{ContentIndex: 0})
 	}
 	for contentIndex, part := range contents {
 		key := outputSlotKey{outputIndex: outputIndex, contentIndex: int64(contentIndex)}
@@ -320,7 +396,7 @@ func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 		}
 		partial.Content[slot.contentIdx] = llm.TextContent{Text: text}
 		delete(slots, key)
-		if !send(llm.Event{Type: llm.EventTextEnd, ContentIndex: slot.contentIdx, Content: text}) {
+		if !send(llm.AssistantMessageTextEndEvent{ContentIndex: slot.contentIdx, Content: text}) {
 			return false
 		}
 	}

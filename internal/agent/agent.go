@@ -26,7 +26,6 @@ func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, 
 	}
 }
 
-// Run 执行一轮或多轮模型调用，并在需要时执行模型返回的工具
 func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -61,17 +60,17 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		var final *llm.AssistantMessage
 		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
-			for ev := range events {
-				switch ev.Type {
-				case llm.EventStart:
+			for event := range events {
+				switch ev := event.(type) {
+				case llm.AssistantMessageStartEvent:
 					if ev.Partial != nil {
 						partial = cloneAssistantMessage(*ev.Partial)
 					}
-				case llm.EventTextStart, llm.EventTextDelta, llm.EventTextEnd,
-					llm.EventThinkingStart, llm.EventThinkingDelta, llm.EventThinkingEnd,
-					llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallEnd:
-					if ev.Partial != nil {
-						partial = cloneAssistantMessage(*ev.Partial)
+				case llm.AssistantMessageTextStartEvent, llm.AssistantMessageTextDeltaEvent, llm.AssistantMessageTextEndEvent,
+					llm.AssistantMessageThinkingStartEvent, llm.AssistantMessageThinkingDeltaEvent, llm.AssistantMessageThinkingEndEvent,
+					llm.AssistantMessageToolCallStartEvent, llm.AssistantMessageToolCallDeltaEvent, llm.AssistantMessageToolCallEndEvent:
+					if snapshot := assistantEventPartial(ev); snapshot != nil {
+						partial = cloneAssistantMessage(*snapshot)
 					} else {
 						appendAssistantEvent(&partial, ev, toolCallArguments)
 					}
@@ -82,9 +81,9 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 						cancel()
 						return nil, err
 					}
-				case llm.EventDone:
+				case llm.AssistantMessageDoneEvent:
 					final = ev.Message
-				case llm.EventError:
+				case llm.AssistantMessageErrorEvent:
 					streamErr = ev.Err
 					if streamErr == nil {
 						streamErr = errors.New("agent: 模型流返回空错误")
@@ -150,7 +149,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 }
 
-// cloneAssistantMessage 复制消息结构和内容切片，隔离事件消费者与后续累积更新
 func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
 	message.Content = append([]llm.Content(nil), message.Content...)
 	return message
@@ -170,34 +168,43 @@ func setAssistantMetadata(message *llm.AssistantMessage, model llm.Model) {
 }
 
 // appendAssistantEvent 将无快照的模型事件累积到对应内容索引
-func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event, toolCallArguments map[int]string) {
-	index := event.ContentIndex
-	switch event.Type {
-	case llm.EventTextStart:
+func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMessageEvent, toolCallArguments map[int]string) {
+	var index int
+	switch event := event.(type) {
+	case llm.AssistantMessageTextStartEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, llm.TextContent{})
-	case llm.EventTextDelta:
+	case llm.AssistantMessageTextDeltaEvent:
+		index = event.ContentIndex
 		if ensureAssistantContentSlot(message, index) {
 			text, _ := message.Content[index].(llm.TextContent)
 			text.Text += event.Delta
 			message.Content[index] = text
 		}
-	case llm.EventTextEnd:
+	case llm.AssistantMessageTextEndEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, llm.TextContent{Text: event.Content})
-	case llm.EventThinkingStart:
+	case llm.AssistantMessageThinkingStartEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, llm.ThinkingContent{})
-	case llm.EventThinkingDelta:
+	case llm.AssistantMessageThinkingDeltaEvent:
+		index = event.ContentIndex
 		if ensureAssistantContentSlot(message, index) {
 			thinking, _ := message.Content[index].(llm.ThinkingContent)
 			thinking.Thinking += event.Delta
 			message.Content[index] = thinking
 		}
-	case llm.EventThinkingEnd:
+	case llm.AssistantMessageThinkingEndEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, llm.ThinkingContent{Thinking: event.Content})
-	case llm.EventToolCallStart:
+	case llm.AssistantMessageToolCallStartEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, event.ToolCall)
-	case llm.EventToolCallDelta:
+	case llm.AssistantMessageToolCallDeltaEvent:
+		index = event.ContentIndex
 		toolCallArguments[index] += event.Delta
 		var arguments map[string]any
+		// delta事件发送的增量是多段的，是不完整的JSON；需要一直更新当前值，直到JSON反序列化成功，这就说明工具参数发送完整了，tool_call完整了
 		if json.Unmarshal([]byte(toolCallArguments[index]), &arguments) == nil && ensureAssistantContentSlot(message, index) {
 			call, ok := message.Content[index].(llm.ToolCall)
 			if !ok {
@@ -206,9 +213,34 @@ func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event, toolCa
 			call.Arguments = arguments
 			message.Content[index] = call
 		}
-	case llm.EventToolCallEnd:
+	case llm.AssistantMessageToolCallEndEvent:
+		index = event.ContentIndex
 		setAssistantContent(message, index, event.ToolCall)
 	}
+}
+
+func assistantEventPartial(event llm.AssistantMessageEvent) *llm.AssistantMessage {
+	switch event := event.(type) {
+	case llm.AssistantMessageTextStartEvent:
+		return event.Partial
+	case llm.AssistantMessageTextDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageTextEndEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingStartEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageThinkingEndEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallStartEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallDeltaEvent:
+		return event.Partial
+	case llm.AssistantMessageToolCallEndEvent:
+		return event.Partial
+	}
+	return nil
 }
 
 func setAssistantContent(message *llm.AssistantMessage, index int, content llm.Content) bool {

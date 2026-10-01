@@ -10,8 +10,8 @@ import (
 func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	partial := &llm.AssistantMessage{}
 	slots := map[outputSlotKey]outputSlot{}
-	var events []llm.Event
-	send := func(event llm.Event) bool {
+	var events []llm.AssistantMessageEvent
+	send := func(event llm.AssistantMessageEvent) bool {
 		events = append(events, event)
 		return true
 	}
@@ -38,7 +38,7 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	if got := partial.Content[2].(llm.ToolCall).Arguments["path"]; got != "a.txt" {
 		t.Fatalf("tool arguments = %#v", partial.Content[2])
 	}
-	if len(events) != 3 || events[0].ContentIndex != 0 || events[1].ContentIndex != 1 || events[2].ContentIndex != 2 {
+	if len(events) != 3 || eventIndex(events[0]) != 0 || eventIndex(events[1]) != 1 || eventIndex(events[2]) != 2 {
 		t.Fatalf("start events = %+v", events)
 	}
 }
@@ -46,8 +46,8 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 func TestOutputSlotsSeparateMessageContentParts(t *testing.T) {
 	partial := &llm.AssistantMessage{}
 	slots := map[outputSlotKey]outputSlot{}
-	var events []llm.Event
-	send := func(event llm.Event) bool {
+	var events []llm.AssistantMessageEvent
+	send := func(event llm.AssistantMessageEvent) bool {
 		events = append(events, event)
 		return true
 	}
@@ -75,44 +75,45 @@ func TestOutputSlotsSeparateMessageContentParts(t *testing.T) {
 	if got := partial.Content[1].(llm.TextContent).Text; got != "second" {
 		t.Fatalf("second content = %q, want second", got)
 	}
-	if len(events) != 4 || events[2].Type != llm.EventTextEnd || events[3].Type != llm.EventTextEnd || events[2].ContentIndex != 0 || events[3].ContentIndex != 1 {
+	if len(events) != 4 || events[2].Type() != llm.EventTextEnd || events[3].Type() != llm.EventTextEnd || eventIndex(events[2]) != 0 || eventIndex(events[3]) != 1 {
 		t.Fatalf("events = %+v, want independent text end events", events)
 	}
 }
 
 func TestAddOutputSlotRejectsCustomTool(t *testing.T) {
-	var event llm.Event
+	var event llm.AssistantMessageEvent
 	accepted := addOutputSlot(&llm.AssistantMessage{}, map[outputSlotKey]outputSlot{}, 0,
 		responseItem(t, `{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}`),
-		func(got llm.Event) bool {
+		func(got llm.AssistantMessageEvent) bool {
 			event = got
 			return true
 		})
 	if accepted {
 		t.Fatal("addOutputSlot accepted custom tool")
 	}
-	if event.Type != llm.EventError || event.Err == nil {
+	if event.Type() != llm.EventError || event.(llm.AssistantMessageErrorEvent).Err == nil {
 		t.Fatalf("event = %+v, want unsupported custom tool error", event)
 	}
 }
 
 func TestToolCallStartIncludesDetails(t *testing.T) {
 	partial := &llm.AssistantMessage{}
-	var event llm.Event
+	var event llm.AssistantMessageEvent
 	accepted := addOutputSlot(partial, map[outputSlotKey]outputSlot{}, 0,
 		responseItem(t, `{"type":"function_call","id":"f1","call_id":"call-1","name":"read","arguments":"{\"path\":\"a.txt\"}"}`),
-		func(got llm.Event) bool {
+		func(got llm.AssistantMessageEvent) bool {
 			event = got
 			return true
 		})
 	if !accepted {
 		t.Fatal("addOutputSlot returned false")
 	}
-	if event.Type != llm.EventToolCallStart {
-		t.Fatalf("event type = %q, want toolcall_start", event.Type)
+	if event.Type() != llm.EventToolCallStart {
+		t.Fatalf("event type = %q, want toolcall_start", event.Type())
 	}
-	if event.ToolCall.ID != "call-1" || event.ToolCall.Name != "read" || event.ToolCall.Arguments["path"] != "a.txt" {
-		t.Fatalf("tool call = %#v, want call-1/read/path=a.txt", event.ToolCall)
+	toolEvent := event.(llm.AssistantMessageToolCallStartEvent)
+	if toolEvent.ToolCall.ID != "call-1" || toolEvent.ToolCall.Name != "read" || toolEvent.ToolCall.Arguments["path"] != "a.txt" {
+		t.Fatalf("tool call = %#v, want call-1/read/path=a.txt", toolEvent.ToolCall)
 	}
 }
 
@@ -161,15 +162,15 @@ func TestFinishReasoningSlotUsesSummaryAndRawSignature(t *testing.T) {
 	partial := &llm.AssistantMessage{}
 	slots := map[outputSlotKey]outputSlot{}
 	item := responseItem(t, `{"type":"reasoning","id":"r1","summary":[],"content":[],"status":"in_progress"}`)
-	var events []llm.Event
-	if !addOutputSlot(partial, slots, 0, item, func(event llm.Event) bool {
+	var events []llm.AssistantMessageEvent
+	if !addOutputSlot(partial, slots, 0, item, func(event llm.AssistantMessageEvent) bool {
 		events = append(events, event)
 		return true
 	}) {
 		t.Fatal("addOutputSlot returned false")
 	}
 	done := responseItem(t, `{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"cot"}],"encrypted_content":"enc","status":"completed"}`)
-	if !finishOutputSlot(partial, slots, 0, done, func(event llm.Event) bool {
+	if !finishOutputSlot(partial, slots, 0, done, func(event llm.AssistantMessageEvent) bool {
 		events = append(events, event)
 		return true
 	}) {
@@ -179,9 +180,33 @@ func TestFinishReasoningSlotUsesSummaryAndRawSignature(t *testing.T) {
 	if thinking.Thinking != "summary" || thinking.ThinkingSignature == "" {
 		t.Fatalf("thinking = %#v", thinking)
 	}
-	if len(events) != 2 || events[1].Type != llm.EventThinkingEnd || events[1].Content != "summary" {
+	if len(events) != 2 || events[1].Type() != llm.EventThinkingEnd || events[1].(llm.AssistantMessageThinkingEndEvent).Content != "summary" {
 		t.Fatalf("events = %+v", events)
 	}
+}
+
+func eventIndex(event llm.AssistantMessageEvent) int {
+	switch event := event.(type) {
+	case llm.AssistantMessageTextStartEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageTextEndEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageThinkingStartEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageToolCallStartEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageTextDeltaEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageThinkingDeltaEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageToolCallDeltaEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageThinkingEndEvent:
+		return event.ContentIndex
+	case llm.AssistantMessageToolCallEndEvent:
+		return event.ContentIndex
+	}
+	return -1
 }
 
 func responseItem(t *testing.T, input string) responses.ResponseOutputItemUnion {

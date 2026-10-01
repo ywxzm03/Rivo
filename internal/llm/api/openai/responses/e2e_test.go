@@ -19,7 +19,7 @@ import (
 
 type e2eProvider interface {
 	Models() []llm.Model
-	Stream(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.Event, error)
+	Stream(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error)
 }
 
 func TestReasoningE2E(t *testing.T) {
@@ -134,11 +134,11 @@ func runE2ERound(t *testing.T, provider e2eProvider, model llm.Model, input llm.
 	var message *llm.AssistantMessage
 	var streamErr error
 	for event := range events {
-		switch event.Type {
+		switch event.Type() {
 		case llm.EventError:
-			streamErr = event.Err
+			streamErr = event.(llm.AssistantMessageErrorEvent).Err
 		case llm.EventDone:
-			message = event.Message
+			message = event.(llm.AssistantMessageDoneEvent).Message
 		}
 	}
 	if streamErr != nil {

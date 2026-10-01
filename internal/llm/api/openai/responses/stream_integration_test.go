@@ -128,13 +128,13 @@ func collectResponse(t *testing.T, client *Client, model llm.Model, input llm.Co
 	var message *llm.AssistantMessage
 	var gotThinkingDelta bool
 	for event := range events {
-		switch event.Type {
+		switch event.Type() {
 		case llm.EventThinkingDelta:
 			gotThinkingDelta = true
 		case llm.EventError:
-			t.Fatal(event.Err)
+			t.Fatal(event.(llm.AssistantMessageErrorEvent).Err)
 		case llm.EventDone:
-			message = event.Message
+			message = event.(llm.AssistantMessageDoneEvent).Message
 		}
 	}
 	if wantThinkingDelta && !gotThinkingDelta {
