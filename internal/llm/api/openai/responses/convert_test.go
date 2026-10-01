@@ -319,6 +319,17 @@ func TestBuildAssistantMessage(t *testing.T) {
 			t.Error("期望非法 JSON 报错")
 		}
 	})
+
+	t.Run("custom tool 返回不支持错误", func(t *testing.T) {
+		resp := responseFromJSON(t, `{
+			"id":"resp_custom","created_at":0,"status":"completed",
+			"output":[{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+		}`)
+		if _, _, err := BuildAssistantMessage(resp); err == nil {
+			t.Error("期望 custom tool 不支持错误")
+		}
+	})
 }
 
 func TestAssistantMessageReplayRoundTrip(t *testing.T) {

@@ -43,6 +43,22 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	}
 }
 
+func TestAddOutputSlotRejectsCustomTool(t *testing.T) {
+	var event llm.Event
+	accepted := addOutputSlot(&llm.AssistantMessage{}, map[int64]outputSlot{}, 0,
+		responseItem(t, `{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}`),
+		func(got llm.Event) bool {
+			event = got
+			return true
+		})
+	if accepted {
+		t.Fatal("addOutputSlot accepted custom tool")
+	}
+	if event.Type != llm.EventError || event.Err == nil {
+		t.Fatalf("event = %+v, want unsupported custom tool error", event)
+	}
+}
+
 func TestAssistantMessageSnapshotCopiesContent(t *testing.T) {
 	message := &llm.AssistantMessage{
 		ResponseID: "before",

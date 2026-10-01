@@ -119,32 +119,6 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 						return
 					}
 				}
-			case "response.custom_tool_call_input.delta":
-				slot, ok := slots[ev.OutputIndex]
-				if !ok || slot.kind != llm.EventToolCallStart {
-					continue
-				}
-				slot.arguments += ev.Delta
-				slots[ev.OutputIndex] = slot
-				updateCustomToolArguments(partial, slot.contentIdx, slot.arguments)
-				if !send(llm.Event{Type: llm.EventToolCallDelta, ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
-					return
-				}
-			case "response.custom_tool_call_input.done":
-				slot, ok := slots[ev.OutputIndex]
-				if !ok || slot.kind != llm.EventToolCallStart {
-					continue
-				}
-				previous := slot.arguments
-				slot.arguments = ev.Input
-				slots[ev.OutputIndex] = slot
-				updateCustomToolArguments(partial, slot.contentIdx, slot.arguments)
-				if strings.HasPrefix(ev.Input, previous) {
-					delta := ev.Input[len(previous):]
-					if delta != "" && !send(llm.Event{Type: llm.EventToolCallDelta, ContentIndex: slot.contentIdx, Delta: delta}) {
-						return
-					}
-				}
 			case "response.output_item.done":
 				if !finishOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
 					return
@@ -234,12 +208,9 @@ func addOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot, ou
 			updateToolArguments(partial, idx, item.Arguments.OfString)
 		}
 		return send(llm.Event{Type: llm.EventToolCallStart, ContentIndex: idx})
-	case "custom_tool_call":
-		partial.Content = append(partial.Content, llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{"input": item.Input}})
-		slots[outputIndex] = outputSlot{kind: llm.EventToolCallStart, contentIdx: idx, arguments: item.Input}
-		return send(llm.Event{Type: llm.EventToolCallStart, ContentIndex: idx})
 	default:
-		return true
+		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		return false
 	}
 }
 
@@ -296,13 +267,9 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot,
 		partial.Content[slot.contentIdx] = call
 		delete(slots, outputIndex)
 		return send(llm.Event{Type: llm.EventToolCallEnd, ContentIndex: slot.contentIdx, ToolCall: call})
-	case "custom_tool_call":
-		call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{"input": item.Input}}
-		partial.Content[slot.contentIdx] = call
-		delete(slots, outputIndex)
-		return send(llm.Event{Type: llm.EventToolCallEnd, ContentIndex: slot.contentIdx, ToolCall: call})
 	default:
-		return true
+		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		return false
 	}
 }
 
@@ -333,15 +300,6 @@ func updateToolArguments(message *llm.AssistantMessage, index int, raw string) {
 	call, ok := message.Content[index].(llm.ToolCall)
 	if ok {
 		call.Arguments = args
-		message.Content[index] = call
-	}
-}
-
-// updateCustomToolArguments 更新 custom tool call 的字符串输入
-func updateCustomToolArguments(message *llm.AssistantMessage, index int, input string) {
-	call, ok := message.Content[index].(llm.ToolCall)
-	if ok {
-		call.Arguments = map[string]any{"input": input}
 		message.Content[index] = call
 	}
 }

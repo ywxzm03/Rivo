@@ -278,10 +278,8 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			}
 			calls = append(calls, tc)
 			msg.Content = append(msg.Content, tc)
-		case "custom_tool_call":
-			tc := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{"input": item.Input}}
-			calls = append(calls, tc)
-			msg.Content = append(msg.Content, tc)
+		default:
+			return nil, nil, fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)
 		}
 
 	}
