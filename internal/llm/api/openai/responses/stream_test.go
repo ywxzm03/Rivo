@@ -9,7 +9,7 @@ import (
 
 func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	partial := &llm.AssistantMessage{}
-	slots := map[int64]outputSlot{}
+	slots := map[outputSlotKey]outputSlot{}
 	var events []llm.Event
 	send := func(event llm.Event) bool {
 		events = append(events, event)
@@ -27,7 +27,7 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	}
 	appendThinking(partial, 0, "plan")
 	appendText(partial, 1, "answer")
-	slots[2] = outputSlot{kind: llm.EventToolCallStart, contentIdx: 2, arguments: `{"path":"a.txt"}`}
+	slots[outputSlotKey{outputIndex: 2}] = outputSlot{kind: llm.EventToolCallStart, contentIdx: 2, arguments: `{"path":"a.txt"}`}
 	updateToolArguments(partial, 2, `{"path":"a.txt"}`)
 	if got := partial.Content[0].(llm.ThinkingContent).Thinking; got != "plan" {
 		t.Fatalf("thinking = %q", got)
@@ -43,9 +43,46 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 	}
 }
 
+func TestOutputSlotsSeparateMessageContentParts(t *testing.T) {
+	partial := &llm.AssistantMessage{}
+	slots := map[outputSlotKey]outputSlot{}
+	var events []llm.Event
+	send := func(event llm.Event) bool {
+		events = append(events, event)
+		return true
+	}
+
+	message := responseItem(t, `{"type":"message","id":"m1","role":"assistant","status":"in_progress","content":[]}`)
+	if !addOutputSlot(partial, slots, 0, message, send) {
+		t.Fatal("addOutputSlot returned false")
+	}
+	if !addContentPartSlot(partial, slots, 0, 1, "output_text", send) {
+		t.Fatal("addContentPartSlot returned false")
+	}
+	appendText(partial, slots[outputSlotKey{outputIndex: 0}].contentIdx, "first")
+	appendText(partial, slots[outputSlotKey{outputIndex: 0, contentIndex: 1}].contentIdx, "second")
+
+	done := responseItem(t, `{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first","annotations":[]},{"type":"refusal","refusal":"second"}]}`)
+	if !finishOutputSlot(partial, slots, 0, done, send) {
+		t.Fatal("finishOutputSlot returned false")
+	}
+	if len(partial.Content) != 2 {
+		t.Fatalf("partial content length = %d, want 2", len(partial.Content))
+	}
+	if got := partial.Content[0].(llm.TextContent).Text; got != "first" {
+		t.Fatalf("first content = %q, want first", got)
+	}
+	if got := partial.Content[1].(llm.TextContent).Text; got != "second" {
+		t.Fatalf("second content = %q, want second", got)
+	}
+	if len(events) != 4 || events[2].Type != llm.EventTextEnd || events[3].Type != llm.EventTextEnd || events[2].ContentIndex != 0 || events[3].ContentIndex != 1 {
+		t.Fatalf("events = %+v, want independent text end events", events)
+	}
+}
+
 func TestAddOutputSlotRejectsCustomTool(t *testing.T) {
 	var event llm.Event
-	accepted := addOutputSlot(&llm.AssistantMessage{}, map[int64]outputSlot{}, 0,
+	accepted := addOutputSlot(&llm.AssistantMessage{}, map[outputSlotKey]outputSlot{}, 0,
 		responseItem(t, `{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}`),
 		func(got llm.Event) bool {
 			event = got
@@ -102,7 +139,7 @@ func TestIncompleteResponseError(t *testing.T) {
 
 func TestFinishReasoningSlotUsesSummaryAndRawSignature(t *testing.T) {
 	partial := &llm.AssistantMessage{}
-	slots := map[int64]outputSlot{}
+	slots := map[outputSlotKey]outputSlot{}
 	item := responseItem(t, `{"type":"reasoning","id":"r1","summary":[],"content":[],"status":"in_progress"}`)
 	var events []llm.Event
 	if !addOutputSlot(partial, slots, 0, item, func(event llm.Event) bool {

@@ -23,6 +23,11 @@ type outputSlot struct {
 	arguments  string
 }
 
+type outputSlotKey struct {
+	outputIndex  int64
+	contentIndex int64
+}
+
 func NewClient(apiKey, baseURL string) *Client {
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {
@@ -49,7 +54,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		if !sendEvent(ctx, events, llm.Event{Type: llm.EventStart, Partial: assistantMessageSnapshot(partial)}) {
 			return
 		}
-		slots := map[int64]outputSlot{}
+		slots := map[outputSlotKey]outputSlot{}
 		terminal := false
 		send := func(event llm.Event) bool {
 			if event.Partial == nil {
@@ -66,8 +71,15 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 				if !addOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
 					return
 				}
+			case "response.content_part.added":
+				if !addContentPartSlot(partial, slots, ev.OutputIndex, ev.ContentIndex, ev.Part.Type, send) {
+					return
+				}
 			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-				slot, ok := slots[ev.OutputIndex]
+				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
+				if !ok && ev.Type == "response.reasoning_summary_text.delta" {
+					slot, ok = slots[outputSlotKey{outputIndex: ev.OutputIndex}]
+				}
 				if !ok || slot.kind != llm.EventThinkingStart {
 					continue
 				}
@@ -76,7 +88,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					return
 				}
 			case "response.reasoning_summary_part.done":
-				slot, ok := slots[ev.OutputIndex]
+				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
 				if !ok || slot.kind != llm.EventThinkingStart {
 					continue
 				}
@@ -85,7 +97,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					return
 				}
 			case "response.output_text.delta", "response.refusal.delta":
-				slot, ok := slots[ev.OutputIndex]
+				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
 				if !ok || slot.kind != llm.EventTextStart {
 					continue
 				}
@@ -94,24 +106,24 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					return
 				}
 			case "response.function_call_arguments.delta":
-				slot, ok := slots[ev.OutputIndex]
+				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
 				if !ok || slot.kind != llm.EventToolCallStart {
 					continue
 				}
 				slot.arguments += ev.Delta
-				slots[ev.OutputIndex] = slot
+				slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
 				updateToolArguments(partial, slot.contentIdx, slot.arguments)
 				if !send(llm.Event{Type: llm.EventToolCallDelta, ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
 					return
 				}
 			case "response.function_call_arguments.done":
-				slot, ok := slots[ev.OutputIndex]
+				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
 				if !ok || slot.kind != llm.EventToolCallStart {
 					continue
 				}
 				previous := slot.arguments
 				slot.arguments = ev.Arguments
-				slots[ev.OutputIndex] = slot
+				slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
 				updateToolArguments(partial, slot.contentIdx, slot.arguments)
 				if strings.HasPrefix(ev.Arguments, previous) {
 					delta := ev.Arguments[len(previous):]
@@ -189,21 +201,21 @@ func incompleteResponseError(response responses.Response) error {
 }
 
 // addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
-func addOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
+func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
 	idx := len(partial.Content)
 	switch item.Type {
 	case "reasoning":
 		partial.Content = append(partial.Content, llm.ThinkingContent{})
-		slots[outputIndex] = outputSlot{kind: llm.EventThinkingStart, contentIdx: idx}
+		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventThinkingStart, contentIdx: idx}
 		return send(llm.Event{Type: llm.EventThinkingStart, ContentIndex: idx})
 	case "message":
 		partial.Content = append(partial.Content, llm.TextContent{})
-		slots[outputIndex] = outputSlot{kind: llm.EventTextStart, contentIdx: idx}
+		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventTextStart, contentIdx: idx}
 		return send(llm.Event{Type: llm.EventTextStart, ContentIndex: idx})
 	case "function_call":
 		call := llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: map[string]any{}}
 		partial.Content = append(partial.Content, call)
-		slots[outputIndex] = outputSlot{kind: llm.EventToolCallStart, contentIdx: idx, arguments: item.Arguments.OfString}
+		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventToolCallStart, contentIdx: idx, arguments: item.Arguments.OfString}
 		if item.Arguments.OfString != "" {
 			updateToolArguments(partial, idx, item.Arguments.OfString)
 		}
@@ -214,9 +226,32 @@ func addOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot, ou
 	}
 }
 
+// addContentPartSlot 为 message output item 的独立内容块创建 slot
+func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex, contentIndex int64, partType string, send func(llm.Event) bool) bool {
+	key := outputSlotKey{outputIndex: outputIndex, contentIndex: contentIndex}
+	if _, ok := slots[key]; ok {
+		return true
+	}
+	idx := len(partial.Content)
+	var kind llm.EventType
+	var content llm.Content
+	switch partType {
+	case "output_text", "refusal":
+		kind, content = llm.EventTextStart, llm.TextContent{}
+	case "reasoning_text":
+		kind, content = llm.EventThinkingStart, llm.ThinkingContent{}
+	default:
+		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 content part 类型 %q", partType)})
+		return false
+	}
+	partial.Content = append(partial.Content, content)
+	slots[key] = outputSlot{kind: kind, contentIdx: idx}
+	return send(llm.Event{Type: kind, ContentIndex: idx})
+}
+
 // finishOutputSlot 用 output_item.done 的完整 item 固化内容并发出结束事件
-func finishOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
-	slot, ok := slots[outputIndex]
+func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.Event) bool) bool {
+	slot, ok := slots[outputSlotKey{outputIndex: outputIndex}]
 	if !ok {
 		return true
 	}
@@ -244,20 +279,10 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot,
 			signature = string(data)
 		}
 		partial.Content[slot.contentIdx] = llm.ThinkingContent{Thinking: thinking, ThinkingSignature: signature}
-		delete(slots, outputIndex)
+		delete(slots, outputSlotKey{outputIndex: outputIndex})
 		return send(llm.Event{Type: llm.EventThinkingEnd, ContentIndex: slot.contentIdx, Content: thinking})
 	case "message":
-		var text string
-		for _, part := range item.Content {
-			if part.Type == "output_text" {
-				text += part.Text
-			} else if part.Type == "refusal" {
-				text += part.Refusal
-			}
-		}
-		partial.Content[slot.contentIdx] = llm.TextContent{Text: text}
-		delete(slots, outputIndex)
-		return send(llm.Event{Type: llm.EventTextEnd, ContentIndex: slot.contentIdx, Content: text})
+		return finishMessageSlots(partial, slots, outputIndex, item.Content, send)
 	case "function_call":
 		call, err := toolCallFromItem(item)
 		if err != nil {
@@ -265,12 +290,40 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[int64]outputSlot,
 			return false
 		}
 		partial.Content[slot.contentIdx] = call
-		delete(slots, outputIndex)
+		delete(slots, outputSlotKey{outputIndex: outputIndex})
 		return send(llm.Event{Type: llm.EventToolCallEnd, ContentIndex: slot.contentIdx, ToolCall: call})
 	default:
 		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
 		return false
 	}
+}
+
+// finishMessageSlots 按 message 的 content index 分别固化文本和拒答内容
+func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, contents []responses.ResponseOutputMessageContentUnion, send func(llm.Event) bool) bool {
+	if len(contents) == 0 {
+		delete(slots, outputSlotKey{outputIndex: outputIndex})
+		return send(llm.Event{Type: llm.EventTextEnd, ContentIndex: 0})
+	}
+	for contentIndex, part := range contents {
+		key := outputSlotKey{outputIndex: outputIndex, contentIndex: int64(contentIndex)}
+		slot, ok := slots[key]
+		if !ok {
+			if !addContentPartSlot(partial, slots, outputIndex, int64(contentIndex), part.Type, send) {
+				return false
+			}
+			slot = slots[key]
+		}
+		text := part.Text
+		if part.Type == "refusal" {
+			text = part.Refusal
+		}
+		partial.Content[slot.contentIdx] = llm.TextContent{Text: text}
+		delete(slots, key)
+		if !send(llm.Event{Type: llm.EventTextEnd, ContentIndex: slot.contentIdx, Content: text}) {
+			return false
+		}
+	}
+	return true
 }
 
 // appendThinking 将 reasoning 增量追加到指定内容块
