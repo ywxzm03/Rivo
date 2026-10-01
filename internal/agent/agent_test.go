@@ -471,7 +471,7 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 		t.Fatalf("events[5] = %T, want MessageUpdateEvent", events[5])
 	}
 	firstUpdate, ok := firstUpdateEvent.Message.(llm.AssistantMessage)
-	if !ok || firstUpdate.Content[0].(llm.TextContent).Text != "hello" {
+	if !ok || firstUpdate.Content[0].(llm.TextContent).Text != "hel" {
 		t.Fatalf("first shared partial message = %#v", firstUpdateEvent.Message)
 	}
 	secondUpdateEvent, ok := events[6].(llm.MessageUpdateEvent)

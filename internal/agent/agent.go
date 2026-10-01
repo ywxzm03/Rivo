@@ -65,18 +65,18 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 				switch ev.Type {
 				case llm.EventStart:
 					if ev.Partial != nil {
-						partial = *ev.Partial
+						partial = cloneAssistantMessage(*ev.Partial)
 					}
 				case llm.EventTextStart, llm.EventTextDelta, llm.EventTextEnd,
 					llm.EventThinkingStart, llm.EventThinkingDelta, llm.EventThinkingEnd,
 					llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallEnd, llm.EventToolCall:
 					if ev.Partial != nil {
-						partial = *ev.Partial
+						partial = cloneAssistantMessage(*ev.Partial)
 					} else {
 						appendAssistantEvent(&partial, ev, toolCallArguments)
 					}
 					if err := a.emit(llm.MessageUpdateEvent{
-						Message:               partial,
+						Message:               cloneAssistantMessage(partial),
 						AssistantMessageEvent: ev,
 					}); err != nil {
 						cancel()
@@ -148,6 +148,12 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			return nil, err
 		}
 	}
+}
+
+// cloneAssistantMessage 复制消息结构和内容切片，隔离事件消费者与后续累积更新
+func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
+	message.Content = append([]llm.Content(nil), message.Content...)
+	return message
 }
 
 func (a *Agent) newAssistantMessage() llm.AssistantMessage {

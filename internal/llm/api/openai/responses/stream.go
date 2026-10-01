@@ -46,7 +46,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		defer close(events)
 		defer stream.Close()
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
-		if !sendEvent(ctx, events, llm.Event{Type: llm.EventStart, Partial: partial}) {
+		if !sendEvent(ctx, events, llm.Event{Type: llm.EventStart, Partial: assistantMessageSnapshot(partial)}) {
 			return
 		}
 		slots := map[int64]outputSlot{}
