@@ -32,7 +32,7 @@ func TestAgentEventTypesAndPayloads(t *testing.T) {
 	}
 
 	toolResult := ToolResultMessage{ToolCallID: "call-1", ToolName: "read"}
-	modelEvent := AssistantMessageTextDeltaEvent{Delta: "partial"}
+	modelEvent := Event{Type: EventTextDelta, Delta: "partial"}
 	args := map[string]any{"path": "file.txt"}
 	result := ToolResult{Content: []Content{TextContent{Text: "output"}}}
 
@@ -44,8 +44,7 @@ func TestAgentEventTypesAndPayloads(t *testing.T) {
 	if !ok || partial.Content[0].(TextContent).Text != "partial" {
 		t.Fatalf("message_update partial message = %#v", update.Message)
 	}
-	textEvent, ok := update.AssistantMessageEvent.(AssistantMessageTextDeltaEvent)
-	if !ok || textEvent.Type() != EventTextDelta || textEvent.Delta != "partial" {
+	if update.AssistantMessageEvent.Type != EventTextDelta || update.AssistantMessageEvent.Delta != "partial" {
 		t.Fatalf("message_update source event = %+v", update.AssistantMessageEvent)
 	}
 

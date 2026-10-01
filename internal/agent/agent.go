@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -58,32 +57,21 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		events, streamErr := a.StreamFn(ctx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
 
 		var final *llm.AssistantMessage
-		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
-			for event := range events {
-				switch ev := event.(type) {
-				case llm.AssistantMessageStartEvent:
-					if ev.Partial != nil {
-						partial = cloneAssistantMessage(*ev.Partial)
-					}
-				case llm.AssistantMessageTextStartEvent, llm.AssistantMessageTextDeltaEvent, llm.AssistantMessageTextEndEvent,
-					llm.AssistantMessageThinkingStartEvent, llm.AssistantMessageThinkingDeltaEvent, llm.AssistantMessageThinkingEndEvent,
-					llm.AssistantMessageToolCallStartEvent, llm.AssistantMessageToolCallDeltaEvent, llm.AssistantMessageToolCallEndEvent:
-					if snapshot := assistantEventPartial(ev); snapshot != nil {
-						partial = cloneAssistantMessage(*snapshot)
-					} else {
-						appendAssistantEvent(&partial, ev, toolCallArguments)
-					}
+			for ev := range events {
+				switch ev.Type {
+				case llm.EventTextDelta, llm.EventToolCall:
+					appendAssistantEvent(&partial, ev)
 					if err := a.emit(llm.MessageUpdateEvent{
-						Message:               cloneAssistantMessage(partial),
+						Message:               partial,
 						AssistantMessageEvent: ev,
 					}); err != nil {
 						cancel()
 						return nil, err
 					}
-				case llm.AssistantMessageDoneEvent:
+				case llm.EventDone:
 					final = ev.Message
-				case llm.AssistantMessageErrorEvent:
+				case llm.EventError:
 					streamErr = ev.Err
 					if streamErr == nil {
 						streamErr = errors.New("agent: 模型流返回空错误")
@@ -149,11 +137,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 }
 
-func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
-	message.Content = append([]llm.Content(nil), message.Content...)
-	return message
-}
-
 func (a *Agent) newAssistantMessage() llm.AssistantMessage {
 	message := llm.AssistantMessage{}
 	setAssistantMetadata(&message, a.AgentConfig.Model)
@@ -167,98 +150,21 @@ func setAssistantMetadata(message *llm.AssistantMessage, model llm.Model) {
 	message.Model = model.ID
 }
 
-// appendAssistantEvent 将无快照的模型事件累积到对应内容索引
-func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMessageEvent, toolCallArguments map[int]string) {
-	var index int
-	switch event := event.(type) {
-	case llm.AssistantMessageTextStartEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, llm.TextContent{})
-	case llm.AssistantMessageTextDeltaEvent:
-		index = event.ContentIndex
-		if ensureAssistantContentSlot(message, index) {
-			text, _ := message.Content[index].(llm.TextContent)
-			text.Text += event.Delta
-			message.Content[index] = text
-		}
-	case llm.AssistantMessageTextEndEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, llm.TextContent{Text: event.Content})
-	case llm.AssistantMessageThinkingStartEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, llm.ThinkingContent{})
-	case llm.AssistantMessageThinkingDeltaEvent:
-		index = event.ContentIndex
-		if ensureAssistantContentSlot(message, index) {
-			thinking, _ := message.Content[index].(llm.ThinkingContent)
-			thinking.Thinking += event.Delta
-			message.Content[index] = thinking
-		}
-	case llm.AssistantMessageThinkingEndEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, llm.ThinkingContent{Thinking: event.Content})
-	case llm.AssistantMessageToolCallStartEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, event.ToolCall)
-	case llm.AssistantMessageToolCallDeltaEvent:
-		index = event.ContentIndex
-		toolCallArguments[index] += event.Delta
-		var arguments map[string]any
-		// delta事件发送的增量是多段的，是不完整的JSON；需要一直更新当前值，直到JSON反序列化成功，这就说明工具参数发送完整了，tool_call完整了
-		if json.Unmarshal([]byte(toolCallArguments[index]), &arguments) == nil && ensureAssistantContentSlot(message, index) {
-			call, ok := message.Content[index].(llm.ToolCall)
-			if !ok {
-				call = llm.ToolCall{}
+func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event) {
+	switch event.Type {
+	case llm.EventTextDelta:
+		last := len(message.Content) - 1
+		if last >= 0 {
+			if text, ok := message.Content[last].(llm.TextContent); ok {
+				text.Text += event.Delta
+				message.Content[last] = text
+				return
 			}
-			call.Arguments = arguments
-			message.Content[index] = call
 		}
-	case llm.AssistantMessageToolCallEndEvent:
-		index = event.ContentIndex
-		setAssistantContent(message, index, event.ToolCall)
+		message.Content = append(message.Content, llm.TextContent{Text: event.Delta})
+	case llm.EventToolCall:
+		message.Content = append(message.Content, event.ToolCall)
 	}
-}
-
-func assistantEventPartial(event llm.AssistantMessageEvent) *llm.AssistantMessage {
-	switch event := event.(type) {
-	case llm.AssistantMessageTextStartEvent:
-		return event.Partial
-	case llm.AssistantMessageTextDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageTextEndEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingStartEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingEndEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallStartEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallEndEvent:
-		return event.Partial
-	}
-	return nil
-}
-
-func setAssistantContent(message *llm.AssistantMessage, index int, content llm.Content) bool {
-	if !ensureAssistantContentSlot(message, index) {
-		return false
-	}
-	message.Content[index] = content
-	return true
-}
-
-func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
-	if index < 0 {
-		return false
-	}
-	for len(message.Content) <= index {
-		message.Content = append(message.Content, nil)
-	}
-	return true
 }
 
 // finishModelError 将模型流错误记录为 assistant 消息并结束本次运行

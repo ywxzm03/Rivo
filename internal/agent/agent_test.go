@@ -77,12 +77,12 @@ func toolCalls(names ...string) []llm.Content {
 
 // doneStreamFn 造一个按调用次数依次返回预设回复的假 StreamFn
 func doneStreamFn(calls *int, replies ...llm.AssistantMessage) llm.StreamFn {
-	return func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	return func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
 		i := *calls
 		*calls++
-		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch := make(chan llm.Event, 1)
 		reply := replies[min(i, len(replies)-1)]
-		ch <- llm.AssistantMessageDoneEvent{Message: &reply}
+		ch <- llm.Event{Type: llm.EventDone, Message: &reply}
 		close(ch)
 		return ch, nil
 	}
@@ -421,11 +421,11 @@ func TestAgentRunUnknownTool(t *testing.T) {
 }
 
 func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		ch := make(chan llm.AssistantMessageEvent, 3)
-		ch <- llm.AssistantMessageTextDeltaEvent{Delta: "hel"}
-		ch <- llm.AssistantMessageTextDeltaEvent{Delta: "lo"}
-		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
+		ch := make(chan llm.Event, 3)
+		ch <- llm.Event{Type: llm.EventTextDelta, Delta: "hel"}
+		ch <- llm.Event{Type: llm.EventTextDelta, Delta: "lo"}
+		ch <- llm.Event{Type: llm.EventDone, Message: &llm.AssistantMessage{
 			Content:    []llm.Content{llm.TextContent{Text: "hello"}},
 			StopReason: llm.StopReasonStop,
 		}}
@@ -471,7 +471,7 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 		t.Fatalf("events[5] = %T, want MessageUpdateEvent", events[5])
 	}
 	firstUpdate, ok := firstUpdateEvent.Message.(llm.AssistantMessage)
-	if !ok || firstUpdate.Content[0].(llm.TextContent).Text != "hel" {
+	if !ok || firstUpdate.Content[0].(llm.TextContent).Text != "hello" {
 		t.Fatalf("first shared partial message = %#v", firstUpdateEvent.Message)
 	}
 	secondUpdateEvent, ok := events[6].(llm.MessageUpdateEvent)
@@ -482,9 +482,7 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 	if !ok || secondUpdate.Content[0].(llm.TextContent).Text != "hello" {
 		t.Fatalf("second partial message = %#v", secondUpdateEvent.Message)
 	}
-	firstDelta := firstUpdateEvent.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent)
-	secondDelta := secondUpdateEvent.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent)
-	if firstDelta.Delta != "hel" || secondDelta.Delta != "lo" {
+	if firstUpdateEvent.AssistantMessageEvent.Delta != "hel" || secondUpdateEvent.AssistantMessageEvent.Delta != "lo" {
 		t.Fatalf("assistant stream events = %+v, %+v", firstUpdateEvent.AssistantMessageEvent, secondUpdateEvent.AssistantMessageEvent)
 	}
 	if message.API != llm.APIOpenAIResponses || message.Provider != "provider-id" || message.Model != "model-id" {
@@ -496,63 +494,11 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 	}
 }
 
-func TestAgentAccumulatesIndexedEventsWithoutPartialSnapshots(t *testing.T) {
-	toolCall := llm.ToolCall{ID: "call-1", Name: "read", Arguments: map[string]any{"path": "a.txt"}}
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		ch := make(chan llm.AssistantMessageEvent, 10)
-		ch <- llm.AssistantMessageTextStartEvent{ContentIndex: 0}
-		ch <- llm.AssistantMessageTextDeltaEvent{ContentIndex: 0, Delta: "answer"}
-		ch <- llm.AssistantMessageTextEndEvent{ContentIndex: 0, Content: "answer"}
-		ch <- llm.AssistantMessageThinkingStartEvent{ContentIndex: 1}
-		ch <- llm.AssistantMessageThinkingDeltaEvent{ContentIndex: 1, Delta: "plan"}
-		ch <- llm.AssistantMessageThinkingEndEvent{ContentIndex: 1, Content: "plan"}
-		ch <- llm.AssistantMessageToolCallStartEvent{ContentIndex: 2, ToolCall: toolCall}
-		ch <- llm.AssistantMessageToolCallDeltaEvent{ContentIndex: 2, Delta: `{"path":"a.txt"}`}
-		ch <- llm.AssistantMessageToolCallEndEvent{ContentIndex: 2, ToolCall: toolCall}
-		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}}}
-		close(ch)
-		return ch, nil
-	}
-	var updates []llm.AssistantMessage
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
-		update, ok := event.(llm.MessageUpdateEvent)
-		if !ok {
-			return nil
-		}
-		message, ok := update.Message.(llm.AssistantMessage)
-		if !ok {
-			t.Fatalf("message update has message type %T", update.Message)
-		}
-		updates = append(updates, message)
-		return nil
-	})
-
-	if _, err := a.Run(context.Background(), "hi"); err != nil {
-		t.Fatal(err)
-	}
-	if len(updates) != 9 {
-		t.Fatalf("message update count = %d, want 9", len(updates))
-	}
-	got := updates[len(updates)-1].Content
-	if len(got) != 3 {
-		t.Fatalf("partial content length = %d, want 3: %#v", len(got), got)
-	}
-	if text, ok := got[0].(llm.TextContent); !ok || text.Text != "answer" {
-		t.Errorf("text content = %#v, want answer", got[0])
-	}
-	if thinking, ok := got[1].(llm.ThinkingContent); !ok || thinking.Thinking != "plan" {
-		t.Errorf("thinking content = %#v, want plan", got[1])
-	}
-	if call, ok := got[2].(llm.ToolCall); !ok || call.ID != toolCall.ID || call.Name != toolCall.Name || call.Arguments["path"] != "a.txt" {
-		t.Errorf("tool call = %#v, want %#v", got[2], toolCall)
-	}
-}
-
 func TestAgentRunStreamError(t *testing.T) {
 	sentinel := errors.New("boom")
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		ch := make(chan llm.AssistantMessageEvent, 1)
-		ch <- llm.AssistantMessageErrorEvent{Err: sentinel}
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
+		ch := make(chan llm.Event, 1)
+		ch <- llm.Event{Type: llm.EventError, Err: sentinel}
 		close(ch)
 		return ch, nil
 	}
@@ -587,13 +533,13 @@ func TestAgentEventSinkErrorStopsRunAndCancelsModelStream(t *testing.T) {
 	sentinel := errors.New("sink failed")
 	calls := 0
 	canceled := make(chan struct{})
-	streamFn := func(ctx context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	streamFn := func(ctx context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
 		calls++
-		ch := make(chan llm.AssistantMessageEvent)
+		ch := make(chan llm.Event)
 		go func() {
 			defer close(ch)
 			select {
-			case ch <- llm.AssistantMessageTextDeltaEvent{Delta: "partial"}:
+			case ch <- llm.Event{Type: llm.EventTextDelta, Delta: "partial"}:
 				<-ctx.Done()
 			case <-ctx.Done():
 			}

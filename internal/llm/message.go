@@ -24,7 +24,6 @@ type AssistantMessage struct {
 	API        API
 	Provider   string
 	Model      string
-	ResponseID string
 	Content    []Content
 	StopReason StopReason
 	Usage      Usage

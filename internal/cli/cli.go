@@ -31,11 +31,9 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// 2.组装Agent
 	a, err := app.New(cfg, func(ev llm.AgentEvent) error {
-		if update, ok := ev.(llm.MessageUpdateEvent); ok {
-			if text, ok := update.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent); ok {
-				_, err := fmt.Fprint(stdout, text.Delta)
-				return err
-			}
+		if update, ok := ev.(llm.MessageUpdateEvent); ok && update.AssistantMessageEvent.Type == llm.EventTextDelta {
+			_, err := fmt.Fprint(stdout, update.AssistantMessageEvent.Delta)
+			return err
 		}
 		return nil
 	})

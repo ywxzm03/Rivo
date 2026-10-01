@@ -28,6 +28,6 @@ func New(cfg Config) *Provider {
 
 func (p *Provider) Models() []llm.Model { return p.models }
 
-func (p *Provider) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+func (p *Provider) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.Event, error) {
 	return p.client.Stream(ctx, model, c, opts)
 }
