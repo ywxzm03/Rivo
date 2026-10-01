@@ -25,6 +25,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.txt
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
       - name: Run go vet
         run: go vet ./...
 
