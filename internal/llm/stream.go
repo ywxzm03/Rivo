@@ -15,7 +15,6 @@ const (
 	EventToolCallStart EventType = "toolcall_start"
 	EventToolCallDelta EventType = "toolcall_delta"
 	EventToolCallEnd   EventType = "toolcall_end"
-	EventToolCall      EventType = "toolcall"
 	EventDone          EventType = "done"
 	EventError         EventType = "error"
 )

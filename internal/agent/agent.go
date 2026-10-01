@@ -69,7 +69,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 					}
 				case llm.EventTextStart, llm.EventTextDelta, llm.EventTextEnd,
 					llm.EventThinkingStart, llm.EventThinkingDelta, llm.EventThinkingEnd,
-					llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallEnd, llm.EventToolCall:
+					llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallEnd:
 					if ev.Partial != nil {
 						partial = cloneAssistantMessage(*ev.Partial)
 					} else {
@@ -208,8 +208,6 @@ func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event, toolCa
 		}
 	case llm.EventToolCallEnd:
 		setAssistantContent(message, index, event.ToolCall)
-	case llm.EventToolCall:
-		message.Content = append(message.Content, event.ToolCall)
 	}
 }
 
