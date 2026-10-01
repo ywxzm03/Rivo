@@ -161,6 +161,59 @@ func TestBuildParams(t *testing.T) {
 				`"content":[{"type":"output_text","text":"3.14159","annotations":[]}]},`+
 				`{"role":"user","content":[{"type":"input_text","text":"你好"}]}]}`)
 	})
+
+	t.Run("reasoning 请求启用摘要和加密内容", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ReasoningEffort = llm.ReasoningEffortHigh
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("DeepSeek reasoning 模型使用 Responses 请求", func(t *testing.T) {
+		model := llm.Model{
+			ID:              "deepseek-flash",
+			Provider:        "deepseek",
+			API:             llm.APIOpenAIResponses,
+			Reasoning:       true,
+			ReasoningEffort: llm.ReasoningEffortMedium,
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"deepseek-flash","reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("reasoning effort 不接受未定义等级", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ReasoningEffort = llm.ReasoningEffort("ultra")
+		if _, err := BuildParams(model, llm.Context{}, llm.Options{}); err == nil {
+			t.Error("BuildParams() error = nil, want unsupported effort error")
+		}
+	})
+
+	t.Run("assistant reasoning item 原样回放", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		signature := `{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"cot"}],"encrypted_content":"enc","status":"completed"}`
+		params, err := BuildParams(model, llm.Context{Messages: []llm.Message{
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ThinkingContent{Thinking: "summary", ThinkingSignature: signature},
+				llm.TextContent{Text: "answer"},
+			}},
+		}}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"],"input":[`+
+			`{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],"encrypted_content":"enc","content":[{"type":"reasoning_text","text":"cot"}],"status":"completed"},`+
+			`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0","content":[{"type":"output_text","text":"answer","annotations":[]}]}]}`)
+	})
 }
 
 func responseFromJSON(t *testing.T, s string) responses.Response {
@@ -173,6 +226,26 @@ func responseFromJSON(t *testing.T, s string) responses.Response {
 }
 
 func TestBuildAssistantMessage(t *testing.T) {
+	t.Run("reasoning summary 优先并保存原始 item", func(t *testing.T) {
+		resp := responseFromJSON(t, `{
+			"id":"resp_reasoning","created_at":0,"status":"completed",
+			"output":[{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],
+			 "content":[{"type":"reasoning_text","text":"cot"}],"encrypted_content":"enc","status":"completed"}],
+			"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}
+		}`)
+		msg, _, err := BuildAssistantMessage(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		thinking, ok := msg.Content[0].(llm.ThinkingContent)
+		if !ok || thinking.Thinking != "summary" || thinking.ThinkingSignature == "" {
+			t.Fatalf("thinking = %#v", msg.Content[0])
+		}
+		if msg.ResponseID != "resp_reasoning" {
+			t.Errorf("ResponseID = %q", msg.ResponseID)
+		}
+	})
+
 	t.Run("文本与工具调用，stopReason 为 toolUse", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_1","created_at":0,"status":"completed",
@@ -244,6 +317,17 @@ func TestBuildAssistantMessage(t *testing.T) {
 		}`)
 		if _, _, err := BuildAssistantMessage(resp); err == nil {
 			t.Error("期望非法 JSON 报错")
+		}
+	})
+
+	t.Run("custom tool 返回不支持错误", func(t *testing.T) {
+		resp := responseFromJSON(t, `{
+			"id":"resp_custom","created_at":0,"status":"completed",
+			"output":[{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+		}`)
+		if _, _, err := BuildAssistantMessage(resp); err == nil {
+			t.Error("期望 custom tool 不支持错误")
 		}
 	})
 }

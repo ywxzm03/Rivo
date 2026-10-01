@@ -5,6 +5,7 @@ type ContentType string
 const (
 	ContentText     ContentType = "text"
 	ContentImage    ContentType = "image"
+	ContentThinking ContentType = "thinking"
 	ContentToolCall ContentType = "toolCall"
 )
 
@@ -28,6 +29,16 @@ type ImageContent struct {
 func (ImageContent) Type() ContentType { return ContentImage }
 func (ImageContent) content()          {}
 
+// ThinkingContent 保存模型 reasoning 的可展示文本和 provider 原始 item 用于回放
+type ThinkingContent struct {
+	Thinking          string
+	ThinkingSignature string
+}
+
+func (ThinkingContent) Type() ContentType { return ContentThinking }
+
+func (ThinkingContent) content() {}
+
 type ToolCall struct {
 	ID        string
 	Name      string
@@ -40,5 +51,6 @@ func (ToolCall) content()          {}
 var (
 	_ Content = TextContent{}
 	_ Content = ImageContent{}
+	_ Content = ThinkingContent{}
 	_ Content = ToolCall{}
 )
