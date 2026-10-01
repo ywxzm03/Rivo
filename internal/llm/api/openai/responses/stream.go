@@ -77,7 +77,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 				}
 			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
-				if !ok && ev.Type == "response.reasoning_summary_text.delta" {
+				if !ok {
 					slot, ok = slots[outputSlotKey{outputIndex: ev.OutputIndex}]
 				}
 				if !ok || slot.kind != llm.EventThinkingStart {
@@ -378,8 +378,12 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]out
 // finishMessageSlots 按 message 的 content index 分别固化文本和拒答内容
 func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, contents []responses.ResponseOutputMessageContentUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	if len(contents) == 0 {
+		slot, ok := slots[outputSlotKey{outputIndex: outputIndex}]
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
-		return send(llm.AssistantMessageTextEndEvent{ContentIndex: 0})
+		if !ok {
+			return send(llm.AssistantMessageTextEndEvent{ContentIndex: 0})
+		}
+		return send(llm.AssistantMessageTextEndEvent{ContentIndex: slot.contentIdx})
 	}
 	for contentIndex, part := range contents {
 		key := outputSlotKey{outputIndex: outputIndex, contentIndex: int64(contentIndex)}

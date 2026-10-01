@@ -248,6 +248,55 @@ func TestStreamTerminalErrorEvents(t *testing.T) {
 	}
 }
 
+func TestStreamReasoningTextDeltaFallsBackToOutputSlot(t *testing.T) {
+	reasoning := `{"type":"reasoning","id":"r","summary":[],"content":[{"type":"reasoning_text","text":"cot"}],"status":"completed"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeSSE(w, `{"type":"response.created","response":{"id":"resp"}}`)
+		writeSSE(w, `{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"r","summary":[],"content":[],"status":"in_progress"}}`)
+		writeSSE(w, `{"type":"response.reasoning_text.delta","output_index":0,"content_index":1,"delta":"cot"}`)
+		writeSSE(w, `{"type":"response.output_item.done","output_index":0,"item":`+reasoning+`}`)
+		writeSSE(w, `{"type":"response.completed","response":{"id":"resp","status":"completed","output":[`+reasoning+`]}}`)
+	}))
+	defer server.Close()
+
+	events, err := NewClient("test-key", server.URL+"/v1").Stream(context.Background(), testModel(), llm.Context{}, llm.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delta string
+	for event := range events {
+		if thinking, ok := event.(llm.AssistantMessageThinkingDeltaEvent); ok {
+			delta += thinking.Delta
+		}
+	}
+	if delta != "cot" {
+		t.Fatalf("thinking delta = %q, want cot", delta)
+	}
+}
+
+func TestFinishEmptyMessageUsesOutputSlotContentIndex(t *testing.T) {
+	partial := &llm.AssistantMessage{}
+	slots := map[outputSlotKey]outputSlot{}
+	var events []llm.AssistantMessageEvent
+	send := func(event llm.AssistantMessageEvent) bool {
+		events = append(events, event)
+		return true
+	}
+	if !addOutputSlot(partial, slots, 0, responseItem(t, `{"type":"reasoning","id":"r","summary":[],"content":[],"status":"in_progress"}`), send) {
+		t.Fatal("reasoning output slot was rejected")
+	}
+	if !addOutputSlot(partial, slots, 1, responseItem(t, `{"type":"message","id":"m","role":"assistant","status":"in_progress","content":[]}`), send) {
+		t.Fatal("message output slot was rejected")
+	}
+	if !finishOutputSlot(partial, slots, 1, responseItem(t, `{"type":"message","id":"m","role":"assistant","status":"completed","content":[]}`), send) {
+		t.Fatal("empty message output was rejected")
+	}
+	if got := eventIndex(events[len(events)-1]); got != 1 {
+		t.Fatalf("empty message end index = %d, want 1", got)
+	}
+}
+
 func TestStreamStopsWhenContextIsCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
