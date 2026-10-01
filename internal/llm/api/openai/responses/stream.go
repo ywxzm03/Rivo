@@ -218,8 +218,9 @@ func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]output
 		slots[outputSlotKey{outputIndex: outputIndex}] = outputSlot{kind: llm.EventToolCallStart, contentIdx: idx, arguments: item.Arguments.OfString}
 		if item.Arguments.OfString != "" {
 			updateToolArguments(partial, idx, item.Arguments.OfString)
+			call = partial.Content[idx].(llm.ToolCall)
 		}
-		return send(llm.Event{Type: llm.EventToolCallStart, ContentIndex: idx})
+		return send(llm.Event{Type: llm.EventToolCallStart, ContentIndex: idx, ToolCall: call})
 	default:
 		send(llm.Event{Type: llm.EventError, Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
 		return false

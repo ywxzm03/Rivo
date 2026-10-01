@@ -96,6 +96,26 @@ func TestAddOutputSlotRejectsCustomTool(t *testing.T) {
 	}
 }
 
+func TestToolCallStartIncludesDetails(t *testing.T) {
+	partial := &llm.AssistantMessage{}
+	var event llm.Event
+	accepted := addOutputSlot(partial, map[outputSlotKey]outputSlot{}, 0,
+		responseItem(t, `{"type":"function_call","id":"f1","call_id":"call-1","name":"read","arguments":"{\"path\":\"a.txt\"}"}`),
+		func(got llm.Event) bool {
+			event = got
+			return true
+		})
+	if !accepted {
+		t.Fatal("addOutputSlot returned false")
+	}
+	if event.Type != llm.EventToolCallStart {
+		t.Fatalf("event type = %q, want toolcall_start", event.Type)
+	}
+	if event.ToolCall.ID != "call-1" || event.ToolCall.Name != "read" || event.ToolCall.Arguments["path"] != "a.txt" {
+		t.Fatalf("tool call = %#v, want call-1/read/path=a.txt", event.ToolCall)
+	}
+}
+
 func TestAssistantMessageSnapshotCopiesContent(t *testing.T) {
 	message := &llm.AssistantMessage{
 		ResponseID: "before",
