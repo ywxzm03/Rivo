@@ -494,6 +494,58 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 	}
 }
 
+func TestAgentAccumulatesIndexedEventsWithoutPartialSnapshots(t *testing.T) {
+	toolCall := llm.ToolCall{ID: "call-1", Name: "read", Arguments: map[string]any{"path": "a.txt"}}
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {
+		ch := make(chan llm.Event, 10)
+		ch <- llm.Event{Type: llm.EventTextStart, ContentIndex: 0}
+		ch <- llm.Event{Type: llm.EventTextDelta, ContentIndex: 0, Delta: "answer"}
+		ch <- llm.Event{Type: llm.EventTextEnd, ContentIndex: 0, Content: "answer"}
+		ch <- llm.Event{Type: llm.EventThinkingStart, ContentIndex: 1}
+		ch <- llm.Event{Type: llm.EventThinkingDelta, ContentIndex: 1, Delta: "plan"}
+		ch <- llm.Event{Type: llm.EventThinkingEnd, ContentIndex: 1, Content: "plan"}
+		ch <- llm.Event{Type: llm.EventToolCallStart, ContentIndex: 2}
+		ch <- llm.Event{Type: llm.EventToolCallDelta, ContentIndex: 2, Delta: `{"path":"a.txt"}`}
+		ch <- llm.Event{Type: llm.EventToolCallEnd, ContentIndex: 2, ToolCall: toolCall}
+		ch <- llm.Event{Type: llm.EventDone, Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}}}
+		close(ch)
+		return ch, nil
+	}
+	var updates []llm.AssistantMessage
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		update, ok := event.(llm.MessageUpdateEvent)
+		if !ok {
+			return nil
+		}
+		message, ok := update.Message.(llm.AssistantMessage)
+		if !ok {
+			t.Fatalf("message update has message type %T", update.Message)
+		}
+		updates = append(updates, message)
+		return nil
+	})
+
+	if _, err := a.Run(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 9 {
+		t.Fatalf("message update count = %d, want 9", len(updates))
+	}
+	got := updates[len(updates)-1].Content
+	if len(got) != 3 {
+		t.Fatalf("partial content length = %d, want 3: %#v", len(got), got)
+	}
+	if text, ok := got[0].(llm.TextContent); !ok || text.Text != "answer" {
+		t.Errorf("text content = %#v, want answer", got[0])
+	}
+	if thinking, ok := got[1].(llm.ThinkingContent); !ok || thinking.Thinking != "plan" {
+		t.Errorf("thinking content = %#v, want plan", got[1])
+	}
+	if call, ok := got[2].(llm.ToolCall); !ok || call.ID != toolCall.ID || call.Name != toolCall.Name || call.Arguments["path"] != "a.txt" {
+		t.Errorf("tool call = %#v, want %#v", got[2], toolCall)
+	}
+}
+
 func TestAgentRunStreamError(t *testing.T) {
 	sentinel := errors.New("boom")
 	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.Event, error) {

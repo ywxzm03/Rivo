@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -58,6 +59,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		events, streamErr := a.StreamFn(ctx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
 
 		var final *llm.AssistantMessage
+		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
 			for ev := range events {
 				switch ev.Type {
@@ -71,7 +73,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 					if ev.Partial != nil {
 						partial = *ev.Partial
 					} else {
-						appendAssistantEvent(&partial, ev)
+						appendAssistantEvent(&partial, ev, toolCallArguments)
 					}
 					if err := a.emit(llm.MessageUpdateEvent{
 						Message:               partial,
@@ -161,21 +163,66 @@ func setAssistantMetadata(message *llm.AssistantMessage, model llm.Model) {
 	message.Model = model.ID
 }
 
-func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event) {
+// appendAssistantEvent 将无快照的模型事件累积到对应内容索引
+func appendAssistantEvent(message *llm.AssistantMessage, event llm.Event, toolCallArguments map[int]string) {
+	index := event.ContentIndex
 	switch event.Type {
+	case llm.EventTextStart:
+		setAssistantContent(message, index, llm.TextContent{})
 	case llm.EventTextDelta:
-		last := len(message.Content) - 1
-		if last >= 0 {
-			if text, ok := message.Content[last].(llm.TextContent); ok {
-				text.Text += event.Delta
-				message.Content[last] = text
-				return
-			}
+		if ensureAssistantContentSlot(message, index) {
+			text, _ := message.Content[index].(llm.TextContent)
+			text.Text += event.Delta
+			message.Content[index] = text
 		}
-		message.Content = append(message.Content, llm.TextContent{Text: event.Delta})
+	case llm.EventTextEnd:
+		setAssistantContent(message, index, llm.TextContent{Text: event.Content})
+	case llm.EventThinkingStart:
+		setAssistantContent(message, index, llm.ThinkingContent{})
+	case llm.EventThinkingDelta:
+		if ensureAssistantContentSlot(message, index) {
+			thinking, _ := message.Content[index].(llm.ThinkingContent)
+			thinking.Thinking += event.Delta
+			message.Content[index] = thinking
+		}
+	case llm.EventThinkingEnd:
+		setAssistantContent(message, index, llm.ThinkingContent{Thinking: event.Content})
+	case llm.EventToolCallStart:
+		setAssistantContent(message, index, event.ToolCall)
+	case llm.EventToolCallDelta:
+		toolCallArguments[index] += event.Delta
+		var arguments map[string]any
+		if json.Unmarshal([]byte(toolCallArguments[index]), &arguments) == nil && ensureAssistantContentSlot(message, index) {
+			call, ok := message.Content[index].(llm.ToolCall)
+			if !ok {
+				call = llm.ToolCall{}
+			}
+			call.Arguments = arguments
+			message.Content[index] = call
+		}
+	case llm.EventToolCallEnd:
+		setAssistantContent(message, index, event.ToolCall)
 	case llm.EventToolCall:
 		message.Content = append(message.Content, event.ToolCall)
 	}
+}
+
+func setAssistantContent(message *llm.AssistantMessage, index int, content llm.Content) bool {
+	if !ensureAssistantContentSlot(message, index) {
+		return false
+	}
+	message.Content[index] = content
+	return true
+}
+
+func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
+	if index < 0 {
+		return false
+	}
+	for len(message.Content) <= index {
+		message.Content = append(message.Content, nil)
+	}
+	return true
 }
 
 // finishModelError 将模型流错误记录为 assistant 消息并结束本次运行
