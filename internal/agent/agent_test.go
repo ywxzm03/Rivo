@@ -681,3 +681,112 @@ func TestAgentToolEventSinkErrorCancelsOtherParallelTools(t *testing.T) {
 		}
 	}
 }
+
+// blockedStreamFn 造一个在 StreamFn 中阻塞直到收到释放信号的假流
+func blockedStreamFn(started chan struct{}, release chan struct{}) llm.StreamFn {
+	return func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		started <- struct{}{}
+		<-release
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		reply := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}}
+		ch <- llm.AssistantMessageDoneEvent{Message: &reply}
+		close(ch)
+		return ch, nil
+	}
+}
+
+func TestAgentRunSerializesConcurrentRuns(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, blockedStreamFn(started, release), nil)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := a.Run(context.Background(), "first")
+		firstDone <- err
+	}()
+	<-started
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := a.Run(context.Background(), "second")
+		secondDone <- err
+	}()
+	// 第二次运行必须等第一次完成后才能进入模型流
+	select {
+	case <-started:
+		t.Fatal("second Run started while the first Run was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	// 两次运行的消息在会话中按序成对，不互相混入
+	if len(a.AgentContext.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
+	}
+	for i, want := range []string{"first", "ok", "second", "ok"} {
+		message := a.AgentContext.Messages[i]
+		if i%2 == 1 {
+			assistant, ok := message.(llm.AssistantMessage)
+			if !ok || len(assistant.Content) != 1 {
+				t.Fatalf("message %d = %#v, want assistant message", i, message)
+			}
+			if text, ok := assistant.Content[0].(llm.TextContent); !ok || text.Text != want {
+				t.Fatalf("message %d = %#v, want text %q", i, message, want)
+			}
+			continue
+		}
+		user, ok := message.(llm.UserMessage)
+		if !ok || len(user.Content) != 1 {
+			t.Fatalf("message %d = %#v, want user message", i, message)
+		}
+		if text, ok := user.Content[0].(llm.TextContent); !ok || text.Text != want {
+			t.Fatalf("message %d = %#v, want text %q", i, message, want)
+		}
+	}
+}
+
+func TestAgentRunCanceledWhileQueued(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, blockedStreamFn(started, release), nil)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := a.Run(context.Background(), "first")
+		firstDone <- err
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := a.Run(ctx, "second")
+		secondDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	// 排队等待期间被取消的运行不得修改会话
+	if err := <-secondDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Run() error = %v, want context.Canceled", err)
+	}
+	if len(a.AgentContext.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(a.AgentContext.Messages))
+	}
+	user, ok := a.AgentContext.Messages[0].(llm.UserMessage)
+	if !ok || len(user.Content) != 1 {
+		t.Fatalf("message 0 = %#v, want user message", a.AgentContext.Messages[0])
+	}
+	if text, ok := user.Content[0].(llm.TextContent); !ok || text.Text != "first" {
+		t.Fatalf("message 0 = %#v, want text %q", a.AgentContext.Messages[0], "first")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
