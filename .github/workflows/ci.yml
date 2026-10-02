@@ -43,7 +43,6 @@ jobs:
       matrix:
         os:
           - windows-latest
-          - macos-latest
           - ubuntu-latest
 
     steps:
@@ -131,6 +130,8 @@ jobs:
 
       - name: Run OpenCodeReview
         uses: alibaba/open-code-review@94450deebadda2cfa65230fa05b4c744f6381923 # v1.11.9
+        env:
+          OCR_NO_UPDATE: '1'
         with:
           llm_url: ${{ secrets.OCR_LLM_BASE_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
@@ -138,6 +139,6 @@ jobs:
           llm_use_anthropic: 'false'
           llm_reasoning_effort: ${{ vars.OCR_LLM_REASONING_EFFORT }}
           language: Chinese
-          ocr_version: '1.11.9'
+          ocr_version: '1.12.11'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
