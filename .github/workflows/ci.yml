@@ -4,7 +4,7 @@ concurrency:
   group: >-
     ${{
       (
-        github.event_name == 'pull_request_target'
+        github.event_name == 'pull_request'
         || (
           github.event_name == 'issue_comment'
           && github.event.issue.pull_request
@@ -27,9 +27,9 @@ concurrency:
 
 on:
   push:
+    branches:
+      - main
   pull_request:
-    types: [opened, synchronize, reopened]
-  pull_request_target:
     types: [opened, synchronize, reopened]
   issue_comment:
     types: [created]
@@ -97,7 +97,7 @@ jobs:
       contents: read
       pull-requests: write
     if: |
-      github.event_name == 'pull_request_target'
+      github.event_name == 'pull_request'
       || (
         github.event_name == 'issue_comment'
         && github.event.issue.pull_request
