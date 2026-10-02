@@ -790,3 +790,28 @@ func TestAgentRunCanceledWhileQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAgentRunRejectsCanceledContext(t *testing.T) {
+	calls := 0
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		calls++
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{}}
+		close(ch)
+		return ch, nil
+	}
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+
+	// 守卫空闲且 ctx 已取消时 select 两个分支同时就绪，Run 必须放弃执行而不是随机抢占守卫
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.Run(ctx, "canceled"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("StreamFn calls = %d, want 0", calls)
+	}
+	if len(a.AgentContext.Messages) != 0 {
+		t.Fatalf("messages = %d, want 0", len(a.AgentContext.Messages))
+	}
+}

@@ -34,6 +34,13 @@ func (a *Agent) acquireRunGuard(ctx context.Context) (func(), error) {
 	a.runGuardOnce.Do(func() { a.runGuard = make(chan struct{}, 1) })
 	select {
 	case a.runGuard <- struct{}{}:
+		// 守卫就绪与 ctx 取消同时发生时 select 会随机选择分支，需复查取消避免已取消的运行抢占守卫
+		select {
+		case <-ctx.Done():
+			<-a.runGuard
+			return nil, ctx.Err()
+		default:
+		}
 		return func() { <-a.runGuard }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
