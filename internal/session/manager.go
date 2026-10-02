@@ -22,6 +22,8 @@ type SessionManager struct {
 	dir         string
 	sessionFile string
 	unwritten   Entry
+	// needsNewline 表示会话文件末尾缺少换行（加载残行文件后为 true），追加前先补写
+	needsNewline bool
 }
 
 // DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/agent/sessions/--<编码后的cwd>--/
@@ -79,18 +81,13 @@ func Open(path, cwd string) (*SessionManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasSuffix(data, []byte("\n")) {
-		if f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
-			_, _ = f.WriteString("\n")
-			_ = f.Close()
-		}
-	}
 	m := &SessionManager{
-		header:      *header,
-		byID:        make(map[string]Entry, len(entries)),
-		dir:         filepath.Dir(path),
-		sessionFile: path,
-		flushed:     true,
+		header:       *header,
+		byID:         make(map[string]Entry, len(entries)),
+		dir:          filepath.Dir(path),
+		sessionFile:  path,
+		flushed:      true,
+		needsNewline: !bytes.HasSuffix(data, []byte("\n")),
 	}
 	// 1.按文件序建索引：重复 ID 后者覆盖前者，leaf 取最后一个 entry
 	for _, e := range entries {
@@ -254,20 +251,37 @@ func (m *SessionManager) flush() error {
 	return nil
 }
 
-// appendLine 向已存在的会话文件追加一行
+// appendLine 向已存在的会话文件追加一行；末尾缺换行时先补写，部分写失败回滚到追加前长度
 func (m *SessionManager) appendLine(e Entry) error {
 	line, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("session: 编码 entry 失败: %w", err)
 	}
-	f, err := os.OpenFile(m.sessionFile, os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(m.sessionFile, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("session: 打开会话文件失败: %w", err)
 	}
 	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	// 1.记录追加前长度，用于部分写失败时回滚
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("session: 获取会话文件大小失败: %w", err)
+	}
+	// 2.末尾缺换行先补一个，防止新行与残行粘连成一行
+	buf := make([]byte, 0, len(line)+2)
+	if m.needsNewline {
+		buf = append(buf, '\n')
+	}
+	buf = append(buf, line...)
+	buf = append(buf, '\n')
+	if _, err := f.Write(buf); err != nil {
+		// 3.部分写失败回滚到追加前状态，缺换行标志保持不变，重试时整行重写
+		if rollbackErr := f.Truncate(info.Size()); rollbackErr != nil {
+			return fmt.Errorf("session: 写入会话文件失败: %w; 回滚失败: %v", err, rollbackErr)
+		}
 		return fmt.Errorf("session: 写入会话文件失败: %w", err)
 	}
+	m.needsNewline = false
 	return nil
 }
 

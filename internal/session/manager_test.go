@@ -313,7 +313,7 @@ func TestOpenUnknownEntryKeepsTreeChain(t *testing.T) {
 	}
 }
 
-func TestOpenRepairsTrailingNewline(t *testing.T) {
+func TestOpenDefersNewlineRepairToAppend(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
 	data := `{"type":"session","version":1,"id":"s1","timestamp":"t","cwd":"/p"}` + "\n" +
@@ -325,16 +325,20 @@ func TestOpenRepairsTrailingNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
+	// 加载期不修改文件，补换行推迟到首次追加
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Size() != int64(len(data))+1 {
-		t.Fatalf("file size = %d, want %d (missing newline repaired)", info.Size(), len(data)+1)
+	if info.Size() != int64(len(data)) {
+		t.Fatalf("file size after Open = %d, want %d (no write during load)", info.Size(), len(data))
 	}
-	// 修复后追加不会与残行粘连
+	// 首次追加先补换行再写新行，两行各自完整
 	if err := m.AppendMessage(userMsg("u2")); err != nil {
 		t.Fatal(err)
+	}
+	if got := len(readLines(t, path)); got != 3 {
+		t.Fatalf("lines after append = %d, want 3", got)
 	}
 	m2, err := Open(path, "/project")
 	if err != nil {
@@ -342,6 +346,9 @@ func TestOpenRepairsTrailingNewline(t *testing.T) {
 	}
 	if len(m2.entries) != 2 {
 		t.Errorf("entries after re-open = %d, want 2", len(m2.entries))
+	}
+	if m2.needsNewline {
+		t.Error("needsNewline = true after append, want false")
 	}
 }
 
@@ -360,12 +367,16 @@ func TestOpenTornLastLineSkipped(t *testing.T) {
 	if len(m.entries) != 0 {
 		t.Errorf("entries = %d, want 0 (torn line skipped)", len(m.entries))
 	}
-	// 残行之后的追加在新行上，重新加载能完整解析
+	// 残行之后的追加先补换行再写新行，重新加载时残行被跳过、新行完整解析
 	if err := m.AppendMessage(userMsg("u2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, "/project"); err != nil {
+	m2, err := Open(path, "/project")
+	if err != nil {
 		t.Fatalf("re-Open() error = %v", err)
+	}
+	if len(m2.entries) != 1 {
+		t.Errorf("entries after re-open = %d, want 1 (torn line skipped, new entry parsed)", len(m2.entries))
 	}
 }
 
