@@ -32,19 +32,34 @@ func withFileMutationQueue[T any](ctx context.Context, path string, fn func() (T
 	mutationQueues[key] = current
 	mutationQueuesMu.Unlock()
 
+	// canceled 标记等待前序操作期间被取消的调用，其节点不能提前从队列摘除
+	var canceled bool
 	defer func() {
-		close(current.done)
 		mutationQueuesMu.Lock()
 		if mutationQueues[key] == current {
-			delete(mutationQueues, key)
+			if canceled {
+				// 取消的等待者把队尾还给前序节点，后续调用仍会等到前序操作完成
+				mutationQueues[key] = previous
+			} else {
+				delete(mutationQueues, key)
+			}
 		}
 		mutationQueuesMu.Unlock()
+		if !canceled {
+			close(current.done)
+		}
 	}()
 
 	if previous != nil {
 		select {
 		case <-previous.done:
 		case <-ctx.Done():
+			// 已入队的后续调用在等待本节点的 done，关闭时机推迟到前序操作完成之后
+			canceled = true
+			go func() {
+				<-previous.done
+				close(current.done)
+			}()
 			return zero, ctx.Err()
 		}
 	}
