@@ -15,6 +15,9 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
+
+	runGuardOnce sync.Once
+	runGuard     chan struct{}
 }
 
 func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
@@ -26,7 +29,32 @@ func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, 
 	}
 }
 
+// acquireRunGuard 独占一次运行的执行权，并发 Run 在此排队且等待期间可被取消
+func (a *Agent) acquireRunGuard(ctx context.Context) (func(), error) {
+	a.runGuardOnce.Do(func() { a.runGuard = make(chan struct{}, 1) })
+	select {
+	case a.runGuard <- struct{}{}:
+		// 守卫就绪与 ctx 取消同时发生时 select 会随机选择分支，需复查取消避免已取消的运行抢占守卫
+		select {
+		case <-ctx.Done():
+			<-a.runGuard
+			return nil, ctx.Err()
+		default:
+		}
+		return func() { <-a.runGuard }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
+	// 同一 Agent 的多次运行在此排队串行执行，等待期间响应取消
+	release, err := a.acquireRunGuard(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	firstMessageIndex := len(a.AgentContext.Messages)
