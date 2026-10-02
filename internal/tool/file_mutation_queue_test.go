@@ -149,3 +149,109 @@ func TestFileMutationQueueCancellationBeforeCallback(t *testing.T) {
 		t.Fatal("canceled mutation callback was called")
 	}
 }
+
+func TestFileMutationQueueKeepsOrderWhenWaiterCancels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
+			close(firstStarted)
+			<-releaseFirst
+			return struct{}{}, nil
+		})
+		firstDone <- err
+	}()
+	<-firstStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(ctx, path, func() (struct{}, error) {
+			return struct{}{}, nil
+		})
+		secondDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-secondDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second error = %v, want context.Canceled", err)
+	}
+
+	thirdStarted := make(chan struct{})
+	thirdDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
+			close(thirdStarted)
+			return struct{}{}, nil
+		})
+		thirdDone <- err
+	}()
+	// 前序操作仍在执行时，第三个调用不能因第二个调用取消而提前进入
+	select {
+	case <-thirdStarted:
+		t.Fatal("third mutation started while the first mutation was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-thirdDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileMutationQueueKeepsOrderWhenMiddleWaiterCancels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
+			close(firstStarted)
+			<-releaseFirst
+			return struct{}{}, nil
+		})
+		firstDone <- err
+	}()
+	<-firstStarted
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(secondCtx, path, func() (struct{}, error) {
+			return struct{}{}, nil
+		})
+		secondDone <- err
+	}()
+
+	thirdStarted := make(chan struct{})
+	thirdDone := make(chan error, 1)
+	go func() {
+		_, err := withFileMutationQueue(context.Background(), path, func() (struct{}, error) {
+			close(thirdStarted)
+			return struct{}{}, nil
+		})
+		thirdDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancelSecond()
+	if err := <-secondDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second error = %v, want context.Canceled", err)
+	}
+	// 中间的等待者取消后，第三个调用仍须等前序操作完成
+	select {
+	case <-thirdStarted:
+		t.Fatal("third mutation started while the first mutation was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-thirdDone; err != nil {
+		t.Fatal(err)
+	}
+}
