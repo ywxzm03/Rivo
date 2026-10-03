@@ -37,6 +37,26 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 				return err
 			}
 		}
+		// 压缩完成打印一行反馈，覆盖自动与溢出来源；手动压缩的失败经 runREPL
+		// 的错误路径打印，避免同一错误输出两次
+		if end, ok := ev.(llm.CompactionEndEvent); ok {
+			if end.Error != "" {
+				if end.Reason != "manual" {
+					if _, err := fmt.Fprintf(stderr, "[context compaction failed (%s): %s]\n", end.Reason, end.Error); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			preview := end.Summary
+			// 按 rune 截断，避免把多字节字符从中间切开输出乱码
+			if runes := []rune(preview); len(runes) > 80 {
+				preview = string(runes[:80]) + "..."
+			}
+			if _, err := fmt.Fprintf(stdout, "\n[context compacted (%s): %d -> %d tokens]\n%s\n", end.Reason, end.TokensBefore, end.TokensAfter, preview); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -51,10 +71,10 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout)
 		}
 		return err
-	})
+	}, a.Compact)
 }
 
-func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error) int {
+func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error, compact func(context.Context, string) error) int {
 	reader := bufio.NewReader(stdin)
 	for {
 		if _, err := fmt.Fprint(stdout, "> "); err != nil {
@@ -76,6 +96,14 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 		}
 		if input == "/exit" || input == "/quit" {
 			return 0
+		}
+		// /compact [instructions] 手动触发上下文压缩
+		if input == "/compact" || strings.HasPrefix(input, "/compact ") {
+			instructions := strings.TrimSpace(strings.TrimPrefix(input, "/compact"))
+			if err := compact(context.Background(), instructions); err != nil {
+				fmt.Fprintf(stderr, "Rivo: %v\n", err)
+			}
+			continue
 		}
 		if err := run(context.Background(), input); err != nil {
 			fmt.Fprintf(stderr, "Rivo: %v\n", err)

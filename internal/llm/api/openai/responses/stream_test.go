@@ -1,6 +1,8 @@
 package responses
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3/responses"
@@ -216,4 +218,43 @@ func responseItem(t *testing.T, input string) responses.ResponseOutputItemUnion 
 		t.Fatal(err)
 	}
 	return item
+}
+
+func TestClassifyAPIErrorWrapsContextOverflow(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    string
+		message string
+		want    bool
+	}{
+		{name: "context_length_exceeded code", code: "context_length_exceeded", message: "input too long", want: true},
+		{name: "max context tokens code", code: "above_model_max_context_tokens", message: "", want: true},
+		{name: "maximum context length message", code: "", message: "This model's maximum context length is 128000 tokens", want: true},
+		{name: "too many input tokens", code: "invalid_request_error", message: "Too many input tokens", want: true},
+		{name: "loose phrase in echoed content", code: "", message: "user asked about the context window of gpt-4", want: false},
+		{name: "unrelated error", code: "invalid_request_error", message: "bad json body", want: false},
+		{name: "empty error", code: "", message: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := classifyAPIError("openai", tt.code, tt.message)
+			if got := llm.IsContextOverflow(err); got != tt.want {
+				t.Fatalf("IsContextOverflow(%v) = %v, want %v", err, got, tt.want)
+			}
+			if !tt.want && strings.Contains(err.Error(), llm.ErrContextOverflow.Error()) {
+				t.Errorf("unrelated error %q should not mention overflow", err)
+			}
+		})
+	}
+}
+
+func TestClassifyStreamErrorWrapsContextOverflow(t *testing.T) {
+	wrapped := errors.New("POST returned 400: context_length_exceeded")
+	if err := classifyStreamError("openai: 流中断", wrapped); !llm.IsContextOverflow(err) {
+		t.Fatalf("classifyStreamError() = %v, want overflow", err)
+	}
+	plain := errors.New("connection reset")
+	if err := classifyStreamError("openai: 流中断", plain); llm.IsContextOverflow(err) {
+		t.Fatalf("classifyStreamError() = %v, want non-overflow", err)
+	}
 }

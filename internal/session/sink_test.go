@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -65,5 +66,190 @@ func TestSinkPropagatesPersistError(t *testing.T) {
 	})
 	if err := sink(llm.MessageEndEvent{Message: userMsg("hi")}); err == nil {
 		t.Fatal("sink() error = nil, want persist failure propagated")
+	}
+}
+
+func TestSinkPersistsCompaction(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	sink := Sink(m, nil)
+	// 1.四条消息按序落盘，镜像与消息序对齐
+	for _, msg := range []llm.Message{
+		userMsg("hi"),
+		assistantMsg("plan"),
+		userMsg("more"),
+		assistantMsg("done"),
+	} {
+		if err := sink(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatalf("sink(message_end) error = %v", err)
+		}
+	}
+	// 2.压缩事件：保留尾部 2 条消息，压缩点落盘且 FirstKeptEntryID 指向第三条消息
+	err := sink(llm.CompactionEndEvent{
+		Reason:           "auto",
+		Summary:          "session summary",
+		KeptMessageCount: 2,
+		TokensBefore:     9000,
+		Usage:            llm.Usage{InputTokens: 10, OutputTokens: 5},
+	})
+	if err != nil {
+		t.Fatalf("sink(CompactionEndEvent) error = %v", err)
+	}
+	reloaded := reloadSession(t, dir)
+	ctx := reloaded.BuildContext()
+	// 3.回放结果应为 [摘要 user 消息, 第三条, 第四条]
+	if len(ctx.Messages) != 3 {
+		t.Fatalf("replayed messages = %d, want 3", len(ctx.Messages))
+	}
+	if !strings.Contains(replayText(t, ctx.Messages[0]), "session summary") {
+		t.Errorf("messages[0] = %#v, want wrapped summary", ctx.Messages[0])
+	}
+	if replayText(t, ctx.Messages[1]) != "more" {
+		t.Errorf("messages[1] = %q, want kept message", replayText(t, ctx.Messages[1]))
+	}
+	if ctx.LastSummary != "session summary" {
+		t.Errorf("LastSummary = %q, want session summary", ctx.LastSummary)
+	}
+	// 4.第二次压缩：镜像已重置，保留 1 条时 FirstKeptEntryID 应跳过摘要占位
+	if err := sink(llm.MessageEndEvent{Message: userMsg("after")}); err != nil {
+		t.Fatalf("sink(message_end) after compaction error = %v", err)
+	}
+	if err := sink(llm.CompactionEndEvent{Reason: "auto", Summary: "second", KeptMessageCount: 2, TokensBefore: 100}); err != nil {
+		t.Fatalf("second compaction error = %v", err)
+	}
+	reloaded = reloadSession(t, dir)
+	ctx = reloaded.BuildContext()
+	if len(ctx.Messages) != 3 {
+		t.Fatalf("second replay messages = %d, want 3 (summary, done, after)", len(ctx.Messages))
+	}
+	if ctx.LastSummary != "second" {
+		t.Errorf("second LastSummary = %q, want second", ctx.LastSummary)
+	}
+}
+
+func TestSinkCompactionWithoutUsageOmitsUsage(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	sink := Sink(m, nil)
+	if err := sink(llm.MessageEndEvent{Message: userMsg("hi")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink(llm.CompactionEndEvent{Reason: "manual", Summary: "s", KeptMessageCount: 0}); err != nil {
+		t.Fatal(err)
+	}
+	// 零保留：FirstKeptEntryID 存压缩点自身 ID，回放只剩摘要
+	reloaded := reloadSession(t, dir)
+	ctx := reloaded.BuildContext()
+	if len(ctx.Messages) != 1 {
+		t.Fatalf("replayed messages = %d, want 1", len(ctx.Messages))
+	}
+	for _, e := range reloaded.entries {
+		if c, ok := e.(*CompactionEntry); ok {
+			if c.Usage != nil {
+				t.Errorf("usage = %+v, want omitted", c.Usage)
+			}
+			if c.FirstKeptEntryID != c.ID {
+				t.Errorf("FirstKeptEntryID = %q, want self %q for retain-none", c.FirstKeptEntryID, c.ID)
+			}
+		}
+	}
+}
+
+func reloadSession(t *testing.T, dir string) *SessionManager {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("jsonl files = %v, want exactly 1", matches)
+	}
+	m, err := Open(matches[0], "/project")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	return m
+}
+
+func replayText(t *testing.T, msg llm.Message) string {
+	t.Helper()
+	switch m := msg.(type) {
+	case llm.UserMessage:
+		if text, ok := m.Content[0].(llm.TextContent); ok {
+			return text.Text
+		}
+	case llm.AssistantMessage:
+		if text, ok := m.Content[0].(llm.TextContent); ok {
+			return text.Text
+		}
+	}
+	t.Fatalf("unexpected message %#v", msg)
+	return ""
+}
+
+func TestSinkRecordsOmissionMarker(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	sink := Sink(m, nil)
+	// 1.两条消息落盘后，溢出失败的尝试作为第三条消息落盘并立即被省略
+	for _, msg := range []llm.Message{
+		userMsg("hi"),
+		assistantMsg("plan"),
+		assistantMsg("overflow attempt"),
+	} {
+		if err := sink(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatalf("sink(message_end) error = %v", err)
+		}
+	}
+	if err := sink(llm.CompactionOmitEvent{}); err != nil {
+		t.Fatalf("sink(CompactionOmitEvent) error = %v", err)
+	}
+	// 2.压缩保留 1 条消息：被省略的尝试不参与 FirstKeptEntryID 解析
+	if err := sink(llm.CompactionEndEvent{Reason: "overflow", Summary: "recovered", KeptMessageCount: 1}); err != nil {
+		t.Fatalf("sink(CompactionEndEvent) error = %v", err)
+	}
+	reloaded := reloadSession(t, dir)
+	// 磁盘上保留被省略的条目与空 replacement 标记
+	omitted := 0
+	for _, e := range reloaded.entries {
+		if edit, ok := e.(*ContextEditEntry); ok && edit.Replacement == nil {
+			omitted++
+		}
+	}
+	if omitted != 1 {
+		t.Fatalf("omission markers = %d, want 1", omitted)
+	}
+	// 投影中被省略的尝试消失
+	ctx := reloaded.BuildContext()
+	if len(ctx.Messages) != 2 {
+		t.Fatalf("replayed messages = %d, want 2 (summary, kept plan)", len(ctx.Messages))
+	}
+	if replayText(t, ctx.Messages[0]) != "The conversation history before this point was compacted into the following summary:\n\n<summary>\nrecovered\n</summary>" {
+		t.Errorf("messages[0] = %q, want wrapped summary", replayText(t, ctx.Messages[0]))
+	}
+	if replayText(t, ctx.Messages[1]) != "plan" {
+		t.Errorf("messages[1] = %q, want kept message", replayText(t, ctx.Messages[1]))
+	}
+}
+
+func TestSinkSkipsFailedCompaction(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	var forwarded []string
+	sink := Sink(m, func(event llm.AgentEvent) error {
+		forwarded = append(forwarded, event.Type())
+		return nil
+	})
+	if err := sink(llm.MessageEndEvent{Message: userMsg("hi")}); err != nil {
+		t.Fatal(err)
+	}
+	// 带 Error 的压缩结束事件只转发，不落盘
+	if err := sink(llm.CompactionEndEvent{Reason: "auto", Error: "摘要为空"}); err != nil {
+		t.Fatalf("sink(failed compaction) error = %v", err)
+	}
+	if len(forwarded) != 2 || forwarded[0] != llm.AgentEventMessageEnd || forwarded[1] != llm.AgentEventCompactionEnd {
+		t.Fatalf("forwarded = %v, want message_end and compaction_end forwarded", forwarded)
+	}
+	for _, e := range m.entries {
+		if _, ok := e.(*CompactionEntry); ok {
+			t.Fatal("failed compaction must not be persisted")
+		}
 	}
 }
