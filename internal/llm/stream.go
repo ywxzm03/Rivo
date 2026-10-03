@@ -136,6 +136,8 @@ const (
 	AgentEventToolExecutionStart  = "tool_execution_start"
 	AgentEventToolExecutionUpdate = "tool_execution_update"
 	AgentEventToolExecutionEnd    = "tool_execution_end"
+	AgentEventCompactionStart     = "compaction_start"
+	AgentEventCompactionEnd       = "compaction_end"
 )
 
 // AgentEvent 的消费者主要是TUI渲染，自动压缩等Agent级事件
@@ -219,6 +221,29 @@ type ToolExecutionEndEvent struct {
 
 func (ToolExecutionEndEvent) Type() string { return AgentEventToolExecutionEnd }
 func (ToolExecutionEndEvent) agentEvent()  {}
+
+// CompactionStartEvent 上下文压缩开始；Reason 取 auto（阈值触发）/ overflow（溢出恢复）/ manual（手动 /compact）
+type CompactionStartEvent struct {
+	Reason       string
+	TokensBefore int
+}
+
+func (CompactionStartEvent) Type() string { return AgentEventCompactionStart }
+func (CompactionStartEvent) agentEvent()  {}
+
+// CompactionEndEvent 上下文压缩完成；KeptMessageCount 为保留未压缩的尾部消息数，
+// 摘要消息本身经 CompactionEntry 回放产出，不发 message_end、不持久化为消息 entry
+type CompactionEndEvent struct {
+	Reason           string
+	Summary          string
+	KeptMessageCount int
+	TokensBefore     int
+	TokensAfter      int
+	Usage            Usage
+}
+
+func (CompactionEndEvent) Type() string { return AgentEventCompactionEnd }
+func (CompactionEndEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 

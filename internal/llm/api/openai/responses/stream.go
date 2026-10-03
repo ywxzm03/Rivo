@@ -153,17 +153,17 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 			case "response.failed":
 				terminal = true
 				errResp := ev.Response.Error
-				send(llm.AssistantMessageErrorEvent{Err: apiError("openai: 请求失败", string(errResp.Code), errResp.Message)})
+				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai: 请求失败", string(errResp.Code), errResp.Message)})
 				return
 			case "error":
 				terminal = true
-				send(llm.AssistantMessageErrorEvent{Err: apiError("openai", ev.Code, ev.Message)})
+				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai", ev.Code, ev.Message)})
 				return
 			}
 		}
 		if !terminal {
 			if err := stream.Err(); err != nil {
-				send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 流中断: %w", err)})
+				send(llm.AssistantMessageErrorEvent{Err: classifyStreamError("openai: 流中断", err)})
 			} else {
 				send(llm.AssistantMessageErrorEvent{Err: errors.New("openai: 流在终止事件前结束")})
 			}
@@ -443,4 +443,38 @@ func apiError(prefix, code, message string) error {
 		return fmt.Errorf("%s: %s: %s", prefix, code, message)
 	}
 	return fmt.Errorf("%s: %s", prefix, message)
+}
+
+// classifyAPIError 按错误码与消息给 API 错误分类，上下文溢出包上 ErrContextOverflow 供上层做压缩恢复
+func classifyAPIError(prefix, code, message string) error {
+	err := apiError(prefix, code, message)
+	if isContextOverflowSignature(code, message) {
+		return fmt.Errorf("%w: %v", llm.ErrContextOverflow, err)
+	}
+	return err
+}
+
+// classifyStreamError 给流中断错误分类，检测原始 API 错误文本中的溢出签名
+func classifyStreamError(prefix string, err error) error {
+	if isContextOverflowSignature("", err.Error()) {
+		return fmt.Errorf("%w: %s: %v", llm.ErrContextOverflow, prefix, err)
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+// isContextOverflowSignature 判断错误码或消息是否为上下文溢出类签名
+func isContextOverflowSignature(code, message string) bool {
+	text := strings.ToLower(code + " " + message)
+	for _, signature := range []string{
+		"context_length_exceeded",
+		"above_model_max_context_tokens",
+		"maximum context length",
+		"context window",
+		"too many input tokens",
+	} {
+		if strings.Contains(text, signature) {
+			return true
+		}
+	}
+	return false
 }
