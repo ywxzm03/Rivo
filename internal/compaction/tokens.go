@@ -59,7 +59,7 @@ func MessageTokens(msg llm.Message) int {
 
 // ContextTokens 估算当前上下文的 token 数：以最后一条 assistant 消息的真实 usage.input_tokens 为基准，
 // 它本身就包含 system prompt、tools 与全部历史，其后新增的消息（通常是工具结果）按 chars/4 估算；
-// 没有任何 assistant 消息时全量估算兜底
+// usage 缺失（provider 未返回或为 0）时回退到全量估算，避免阈值判断塌缩
 func ContextTokens(messages []llm.Message) int {
 	last := -1
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -69,17 +69,26 @@ func ContextTokens(messages []llm.Message) int {
 		}
 	}
 	if last < 0 {
-		total := 0
-		for _, msg := range messages {
-			total += MessageTokens(msg)
-		}
-		return total
+		return EstimateContextTokens(messages)
 	}
 	base := messages[last].(llm.AssistantMessage).Usage.InputTokens
+	if base <= 0 {
+		return EstimateContextTokens(messages)
+	}
 	for _, msg := range messages[last+1:] {
 		base += MessageTokens(msg)
 	}
 	return base
+}
+
+// EstimateContextTokens 纯消息体估算全部消息的 token 数，不使用任何真实 usage；
+// 压缩后保留尾部的 usage 反映的是压缩前的大上下文，属于陈旧数据，此时应改用本函数
+func EstimateContextTokens(messages []llm.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += MessageTokens(msg)
+	}
+	return total
 }
 
 // ShouldCompact 判断是否达到压缩阈值：上下文占用超过窗口减去预留量；窗口未知时不触发

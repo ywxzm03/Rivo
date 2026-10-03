@@ -83,3 +83,14 @@ func TestShouldCompact(t *testing.T) {
 		t.Error("8001 above threshold should trigger")
 	}
 }
+
+func TestContextTokensZeroUsageFallsBackToEstimate(t *testing.T) {
+	messages := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "abcdefgh"}}},
+		// provider 未返回 usage 时不得塌缩为 0，回退全量估算
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "abcdefgh"}}},
+	}
+	if got := ContextTokens(messages); got != 4 {
+		t.Errorf("ContextTokens = %d, want 4", got)
+	}
+}

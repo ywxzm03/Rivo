@@ -35,6 +35,8 @@ type Compactor struct {
 	StreamFn llm.StreamFn
 	Model    llm.Model
 	Config   Config
+	// Retry 为零值时不重试；摘要调用的瞬时错误经此策略有界重试
+	Retry RetryPolicy
 }
 
 // Result 一次压缩的产出：Summary 为最终摘要文本，CutIndex/KeptCount 告知调用方如何截断保留
@@ -122,39 +124,48 @@ func (c *Compactor) summarizeRegion(ctx context.Context, messages []llm.Message,
 	return c.summarizeOnce(ctx, prompt)
 }
 
-// summarizeOnce 发起一次无工具的独立 LLM 调用并取回完整文本
+// summarizeOnce 发起一次无工具的独立 LLM 调用并取回完整文本；
+// 瞬时错误按重试策略退避重试，响应先经质量校验——截断、报错或携带工具调用的摘要绝不返回
 func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, llm.Usage, error) {
 	modelCtx := llm.Context{
 		SystemPrompt: SummarizerSystemPrompt,
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: prompt}}}},
 	}
-	events, err := c.StreamFn(ctx, c.Model, modelCtx, llm.Options{})
-	if err != nil {
-		return "", llm.Usage{}, fmt.Errorf("compaction: 摘要调用失败: %w", err)
-	}
-	var text string
-	var usage llm.Usage
-	for event := range events {
-		switch ev := event.(type) {
-		case llm.AssistantMessageDoneEvent:
-			if ev.Message == nil {
-				continue
-			}
-			usage = ev.Message.Usage
-			if ev.Message.StopReason == llm.StopReasonLength {
-				return "", usage, fmt.Errorf("compaction: 摘要被输出长度截断")
-			}
-			text = summaryText(ev.Message.Content)
-		case llm.AssistantMessageErrorEvent:
-			if ev.Err != nil {
-				return "", usage, fmt.Errorf("compaction: 摘要调用失败: %w", ev.Err)
+	produce := func() (string, llm.Usage, error) {
+		events, err := c.StreamFn(ctx, c.Model, modelCtx, llm.Options{})
+		if err != nil {
+			return "", llm.Usage{}, fmt.Errorf("compaction: 摘要调用失败: %w", err)
+		}
+		var final *llm.AssistantMessage
+		var usage llm.Usage
+		for event := range events {
+			switch ev := event.(type) {
+			case llm.AssistantMessageDoneEvent:
+				if ev.Message != nil {
+					final, usage = ev.Message, ev.Message.Usage
+				}
+			case llm.AssistantMessageErrorEvent:
+				if ev.Err != nil {
+					// 上游中断必须显式报错，避免流关闭后被误报成「摘要为空」
+					return "", usage, fmt.Errorf("compaction: 摘要调用失败: %w", ev.Err)
+				}
+				return "", usage, fmt.Errorf("compaction: 摘要调用失败: 模型流返回空错误")
 			}
 		}
+		if final == nil {
+			return "", usage, fmt.Errorf("compaction: 摘要调用失败: 流已结束但未收到最终消息")
+		}
+		// 摘要质量校验：宁可放弃本次压缩，也不让坏摘要变成会话检查点
+		if err := validateSummary(final); err != nil {
+			return "", usage, err
+		}
+		text := summaryText(final.Content)
+		if text == "" {
+			return "", usage, fmt.Errorf("compaction: 摘要为空")
+		}
+		return text, usage, nil
 	}
-	if text == "" {
-		return "", usage, fmt.Errorf("compaction: 摘要为空")
-	}
-	return text, usage, nil
+	return retrySummarize(ctx, c.Retry, produce)
 }
 
 // summaryText 拼接摘要消息中的文本块
