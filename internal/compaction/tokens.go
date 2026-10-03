@@ -1,0 +1,91 @@
+// Package compaction 提供上下文压缩的纯逻辑：阈值判断、切割点定位、对话序列化、
+// 摘要提示词与摘要调用；会话 I/O 由 session 层负责，压缩结果由 agent 回插到内存上下文
+package compaction
+
+import (
+	"encoding/json"
+
+	"github.com/ywxzm03/Rivo/internal/llm"
+)
+
+// imageTokenEstimate 图片按固定 token 数估算
+const imageTokenEstimate = 1200
+
+// EstimateTokens 按 chars/4 粗估文本 token 数；CJK 场景会低估，仅在没有真实 usage 时兜底
+func EstimateTokens(text string) int {
+	n := len([]rune(text))
+	if n == 0 {
+		return 0
+	}
+	return (n + 3) / 4
+}
+
+// contentTokens 估算单个内容块：文本按 chars/4，图片按固定值，工具调用按参数 JSON 估算，thinking 不计
+func contentTokens(content llm.Content) int {
+	switch c := content.(type) {
+	case llm.TextContent:
+		return EstimateTokens(c.Text)
+	case llm.ImageContent:
+		return imageTokenEstimate
+	case llm.ToolCall:
+		data, _ := json.Marshal(c.Arguments)
+		return EstimateTokens(c.Name) + EstimateTokens(string(data))
+	default:
+		return 0
+	}
+}
+
+// MessageTokens 估算单条消息的 token 数
+func MessageTokens(msg llm.Message) int {
+	total := 0
+	switch m := msg.(type) {
+	case llm.UserMessage:
+		for _, c := range m.Content {
+			total += contentTokens(c)
+		}
+	case llm.AssistantMessage:
+		for _, c := range m.Content {
+			total += contentTokens(c)
+		}
+	case llm.ToolResultMessage:
+		for _, c := range m.Content {
+			if t, ok := c.(llm.TextContent); ok {
+				total += EstimateTokens(t.Text)
+			}
+		}
+	}
+	return total
+}
+
+// ContextTokens 估算当前上下文的 token 数：以最后一条 assistant 消息的真实 usage.input_tokens 为基准，
+// 它本身就包含 system prompt、tools 与全部历史，其后新增的消息（通常是工具结果）按 chars/4 估算；
+// 没有任何 assistant 消息时全量估算兜底
+func ContextTokens(messages []llm.Message) int {
+	last := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if _, ok := messages[i].(llm.AssistantMessage); ok {
+			last = i
+			break
+		}
+	}
+	if last < 0 {
+		total := 0
+		for _, msg := range messages {
+			total += MessageTokens(msg)
+		}
+		return total
+	}
+	base := messages[last].(llm.AssistantMessage).Usage.InputTokens
+	for _, msg := range messages[last+1:] {
+		base += MessageTokens(msg)
+	}
+	return base
+}
+
+// ShouldCompact 判断是否达到压缩阈值：上下文占用超过窗口减去预留量；窗口未知时不触发
+func ShouldCompact(contextTokens, contextWindow, reserveTokens int) bool {
+	if contextWindow <= 0 {
+		return false
+	}
+	return contextTokens > contextWindow-reserveTokens
+}
