@@ -11,7 +11,8 @@ type SessionContext struct {
 	Provider      string
 	Model         string
 	ThinkingLevel string
-	// LastSummary 为最近一次压缩的原始摘要文本，供恢复会话后的增量合并使用
+	// LastSummary 为最近一次压缩的原始摘要文本；会话恢复（resume）尚未实现，
+	// 当前仅由 BuildContext 填充，待恢复路径落地后接回 Agent 的压缩增量合并
 	LastSummary string
 }
 

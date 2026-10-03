@@ -64,7 +64,11 @@ func (s *sessionSink) recordOmission() error {
 // 压缩把 Agent 上下文重排为 [摘要, 保留尾部...]，摘要消息由 CompactionEntry 回放产出，
 // 镜像相应重置为空占位 + 保留区间的 entry ID，空占位让下一次压缩跳过它取 FirstKeptEntryID
 func (s *sessionSink) recordCompaction(e llm.CompactionEndEvent) error {
+	// KeptMessageCount 是公开事件字段，两端都钳制防越界
 	count := e.KeptMessageCount
+	if count < 0 {
+		count = 0
+	}
 	if count > len(s.liveIDs) {
 		count = len(s.liveIDs)
 	}
