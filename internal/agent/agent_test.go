@@ -1095,3 +1095,74 @@ func TestAgentCompactNowDisabled(t *testing.T) {
 		t.Fatal("CompactNow without Compactor should fail")
 	}
 }
+
+// TestAgentRunCompactionPersistsSessionTree 验证压缩经 session.Sink 落盘后可完整回放
+func TestAgentRunCompactionPersistsSessionTree(t *testing.T) {
+	dir := t.TempDir()
+	sm := session.New("/project", dir)
+
+	runCalls := 0
+	streamFn := doneStreamFn(&runCalls,
+		llm.AssistantMessage{
+			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
+			StopReason: llm.StopReasonToolUse,
+			Usage:      llm.Usage{InputTokens: 9800, OutputTokens: 10},
+		},
+		llm.AssistantMessage{
+			Content:    []llm.Content{llm.TextContent{Text: "done"}},
+			StopReason: llm.StopReasonStop,
+			Usage:      llm.Usage{InputTokens: 30, OutputTokens: 5},
+		},
+	)
+	compactCalls := 0
+	a := NewAgent(
+		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
+		streamFn,
+		session.Sink(sm, nil),
+	)
+	a.Compactor = newCompactor(&compactCalls)
+	if _, err := a.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("session files = %v, want exactly 1", matches)
+	}
+	reloaded, err := session.Open(matches[0], "/project")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	// 回放应为 [摘要, 保留的 tool-call assistant, tool result, 压缩后新增的 final assistant]
+	ctx := reloaded.BuildContext()
+	if len(ctx.Messages) != 4 {
+		t.Fatalf("replayed messages = %d, want 4", len(ctx.Messages))
+	}
+	if text := replaySummaryText(t, ctx.Messages[0]); !strings.Contains(text, "COMPACT-SUMMARY") {
+		t.Errorf("messages[0] = %q, want wrapped COMPACT-SUMMARY", text)
+	}
+	if _, ok := ctx.Messages[1].(llm.AssistantMessage); !ok {
+		t.Errorf("messages[1] = %#v, want kept assistant message", ctx.Messages[1])
+	}
+	final, ok := ctx.Messages[3].(llm.AssistantMessage)
+	if !ok || len(final.Content) != 1 {
+		t.Fatalf("messages[3] = %#v, want final assistant", ctx.Messages[3])
+	}
+	if text, ok := final.Content[0].(llm.TextContent); !ok || text.Text != "done" {
+		t.Errorf("final assistant = %#v, want done", final.Content)
+	}
+	if ctx.LastSummary != "COMPACT-SUMMARY" {
+		t.Errorf("LastSummary = %q, want COMPACT-SUMMARY", ctx.LastSummary)
+	}
+}
+
+func replaySummaryText(t *testing.T, msg llm.Message) string {
+	t.Helper()
+	user, ok := msg.(llm.UserMessage)
+	if !ok || len(user.Content) != 1 {
+		t.Fatalf("message = %#v, want user message", msg)
+	}
+	text, _ := user.Content[0].(llm.TextContent)
+	return text.Text
+}

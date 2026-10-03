@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
+	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tool"
@@ -61,19 +62,27 @@ func newApp(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		tools = append(tools, &tool.PowerShell{})
 	}
 
-	return &App{
-		agent: agent.NewAgent(
-			llm.AgentConfig{Model: model},
-			llm.Context{
-				SystemPrompt: systemPrompt,
-				Tools:        tools,
-			},
-			streamFn,
-			onEvent,
-		),
-	}, nil
+	ag := agent.NewAgent(
+		llm.AgentConfig{Model: model},
+		llm.Context{
+			SystemPrompt: systemPrompt,
+			Tools:        tools,
+		},
+		streamFn,
+		onEvent,
+	)
+	// 模型窗口已知时启用上下文压缩
+	if model.ContextWindow > 0 {
+		ag.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow)}
+	}
+	return &App{agent: ag}, nil
 }
 
 func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	return a.agent.Run(ctx, input)
+}
+
+// Compact 手动触发一次上下文压缩，instructions 为聚焦指令
+func (a *App) Compact(ctx context.Context, instructions string) error {
+	return a.agent.CompactNow(ctx, instructions)
 }

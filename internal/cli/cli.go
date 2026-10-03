@@ -37,6 +37,16 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 				return err
 			}
 		}
+		// 压缩完成打印一行反馈，覆盖自动、溢出与手动三种来源
+		if end, ok := ev.(llm.CompactionEndEvent); ok {
+			preview := end.Summary
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+			if _, err := fmt.Fprintf(stdout, "\n[context compacted (%s): %d -> %d tokens]\n%s\n", end.Reason, end.TokensBefore, end.TokensAfter, preview); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -51,10 +61,10 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout)
 		}
 		return err
-	})
+	}, a.Compact)
 }
 
-func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error) int {
+func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error, compact func(context.Context, string) error) int {
 	reader := bufio.NewReader(stdin)
 	for {
 		if _, err := fmt.Fprint(stdout, "> "); err != nil {
@@ -76,6 +86,14 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 		}
 		if input == "/exit" || input == "/quit" {
 			return 0
+		}
+		// /compact [instructions] 手动触发上下文压缩
+		if input == "/compact" || strings.HasPrefix(input, "/compact ") {
+			instructions := strings.TrimSpace(strings.TrimPrefix(input, "/compact"))
+			if err := compact(context.Background(), instructions); err != nil {
+				fmt.Fprintf(stderr, "Rivo: %v\n", err)
+			}
+			continue
 		}
 		if err := run(context.Background(), input); err != nil {
 			fmt.Fprintf(stderr, "Rivo: %v\n", err)
