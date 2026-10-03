@@ -18,6 +18,8 @@ type Model struct {
 	ReasoningEffort ReasoningEffort
 	// ContextWindow 是模型上下文窗口 token 数，0 表示未知，未知时不触发自动压缩
 	ContextWindow int
+	// MaxTokens 是模型单次输出的最大 token 数，0 表示未知；用于区分输出截断与上下文耗尽
+	MaxTokens int
 }
 
 // ReasoningEffort 表示模型 reasoning 的计算强度

@@ -138,6 +138,7 @@ const (
 	AgentEventToolExecutionEnd    = "tool_execution_end"
 	AgentEventCompactionStart     = "compaction_start"
 	AgentEventCompactionEnd       = "compaction_end"
+	AgentEventCompactionOmit      = "compaction_omit"
 )
 
 // AgentEvent 的消费者主要是TUI渲染，自动压缩等Agent级事件
@@ -232,7 +233,8 @@ func (CompactionStartEvent) Type() string { return AgentEventCompactionStart }
 func (CompactionStartEvent) agentEvent()  {}
 
 // CompactionEndEvent 上下文压缩完成；KeptMessageCount 为保留未压缩的尾部消息数，
-// 摘要消息本身经 CompactionEntry 回放产出，不发 message_end、不持久化为消息 entry
+// 摘要消息本身经 CompactionEntry 回放产出，不发 message_end、不持久化为消息 entry。
+// Error 非空表示压缩失败：会话与内存上下文均未被修改，该事件仅用于通知，消费者不得落盘
 type CompactionEndEvent struct {
 	Reason           string
 	Summary          string
@@ -240,10 +242,18 @@ type CompactionEndEvent struct {
 	TokensBefore     int
 	TokensAfter      int
 	Usage            Usage
+	Error            string
 }
 
 func (CompactionEndEvent) Type() string { return AgentEventCompactionEnd }
 func (CompactionEndEvent) agentEvent()  {}
+
+// CompactionOmitEvent 溢出恢复时把刚落盘的失败尝试从模型投影中移除：
+// 会话文件只追加，持久层保留原始条目供审计回放，投影层经 context_edit(replacement=null) 排除
+type CompactionOmitEvent struct{}
+
+func (CompactionOmitEvent) Type() string { return AgentEventCompactionOmit }
+func (CompactionOmitEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 
