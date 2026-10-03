@@ -165,3 +165,13 @@ func TestValidateSummary(t *testing.T) {
 		t.Error("summary with tool call should be rejected")
 	}
 }
+
+func TestIsRetryableErrorBoundedStatusCodes(t *testing.T) {
+	// 数字签名带词边界：错误文本恰好含 "15000" 不得误判为 500
+	if isRetryableError(errors.New("invalid request: 15000 tokens")) {
+		t.Error("bare numeric substring should not match")
+	}
+	if !isRetryableError(errors.New("openai: 500: internal error")) {
+		t.Error("real status code should match")
+	}
+}
