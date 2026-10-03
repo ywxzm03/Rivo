@@ -45,10 +45,17 @@ func TestFindCutPointAtTurnBoundary(t *testing.T) {
 
 func TestFindCutPointNeverLandsOnToolResult(t *testing.T) {
 	messages := turnFixture()
-	// 预算 50：从尾部累计第一条就是工具结果，切点必须滑过它，最终零保留
+	// 预算 50：从尾部累计第一条就是工具结果，其后没有合法切点时回退到最后一个切点，
+	// 保留尾部为完整的 [assistant, tool result] 配对，绝不零保留
 	plan := FindCutPoint(messages, 0, 50)
-	if plan.CutIndex != len(messages) {
-		t.Fatalf("CutIndex = %d, want %d (retain none)", plan.CutIndex, len(messages))
+	if plan.CutIndex != 4 {
+		t.Fatalf("CutIndex = %d, want 4", plan.CutIndex)
+	}
+	if _, ok := messages[plan.CutIndex].(llm.AssistantMessage); !ok {
+		t.Fatalf("CutIndex = %d lands on %T, want assistant", plan.CutIndex, messages[plan.CutIndex])
+	}
+	if _, ok := messages[len(messages)-1].(llm.ToolResultMessage); !ok {
+		t.Fatal("fixture tail should be a tool result")
 	}
 }
 
@@ -79,15 +86,15 @@ func TestFindCutPointRespectsStartOffset(t *testing.T) {
 	}
 }
 
-func TestFindCutPointSmallHistoryDegradesToKeepLast(t *testing.T) {
+func TestFindCutPointSmallHistoryCutsAtEarliestBoundary(t *testing.T) {
 	messages := []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
 	}
-	// 历史总量小于保留预算却仍要求压缩：只保留最新一条，保证有历史可摘要
+	// 历史总量小于保留预算：切在最早合法切点上，摘要区为空时由调用方放弃压缩
 	plan := FindCutPoint(messages, 0, 20000)
-	if plan.CutIndex != 2 {
-		t.Fatalf("CutIndex = %d, want 2", plan.CutIndex)
+	if plan.CutIndex != 0 {
+		t.Fatalf("CutIndex = %d, want 0", plan.CutIndex)
 	}
 }

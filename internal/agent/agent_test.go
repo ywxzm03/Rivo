@@ -905,7 +905,7 @@ func summaryStreamFn(calls *int, text string) llm.StreamFn {
 func newCompactor(calls *int) *compaction.Compactor {
 	return &compaction.Compactor{
 		StreamFn: summaryStreamFn(calls, "COMPACT-SUMMARY"),
-		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 5},
+		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
 }
 
@@ -948,12 +948,17 @@ func TestAgentRunAutoCompactionBeforeNextTurn(t *testing.T) {
 	if runCalls != 2 || compactCalls != 1 {
 		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
 	}
-	// 压缩后上下文应为 [摘要, 最终 assistant]，旧历史被替换
-	if len(a.AgentContext.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(a.AgentContext.Messages))
+	// 压缩后上下文应为 [摘要, 保留的 a1, tr, 最终 assistant]
+	if len(a.AgentContext.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
 	}
 	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
 		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
+	}
+	if last, ok := a.AgentContext.Messages[3].(llm.AssistantMessage); !ok {
+		t.Errorf("messages[3] = %#v, want final assistant", a.AgentContext.Messages[3])
+	} else if text := last.Content[0].(llm.TextContent).Text; text != "done" {
+		t.Errorf("final = %q, want done", text)
 	}
 	// 事件序：工具结果之后先压缩再发起新一轮
 	sawCompactionStart, sawCompactionEnd := false, false
@@ -966,7 +971,7 @@ func TestAgentRunAutoCompactionBeforeNextTurn(t *testing.T) {
 			sawCompactionStart = true
 		case llm.CompactionEndEvent:
 			sawCompactionEnd = true
-			if e.Summary != "COMPACT-SUMMARY" || e.KeptMessageCount != 0 {
+			if e.Summary != "COMPACT-SUMMARY" || e.KeptMessageCount != 2 {
 				t.Errorf("compaction end = %+v", e)
 			}
 		}
@@ -995,6 +1000,12 @@ func TestAgentRunOverflowRetriesOnce(t *testing.T) {
 	compactCalls := 0
 	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
 	a.Compactor = newCompactor(&compactCalls)
+	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
+	seed := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -1002,9 +1013,9 @@ func TestAgentRunOverflowRetriesOnce(t *testing.T) {
 	if runCalls != 2 || compactCalls != 1 {
 		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
 	}
-	// 失败尝试不进入上下文：只剩摘要与重试成功后的 assistant 消息
-	if len(a.AgentContext.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(a.AgentContext.Messages))
+	// 失败尝试不进入上下文：摘要替换历史后保留 [a0, u1]，重试成功追加 done
+	if len(a.AgentContext.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
 	}
 	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
 		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
@@ -1023,6 +1034,12 @@ func TestAgentRunSecondOverflowFails(t *testing.T) {
 	compactCalls := 0
 	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
 	a.Compactor = newCompactor(&compactCalls)
+	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
+	seed := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
 
 	message, err := a.Run(context.Background(), "hi")
 	if err == nil {
@@ -1046,6 +1063,12 @@ func TestAgentRunLengthStopRetriesOnce(t *testing.T) {
 	compactCalls := 0
 	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{}, streamFn, nil)
 	a.Compactor = newCompactor(&compactCalls)
+	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
+	seed := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -1336,8 +1359,21 @@ func TestAgentOverflowRecoveryPersistsOmission(t *testing.T) {
 		return ch, nil
 	}
 	compactCalls := 0
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, session.Sink(sm, nil))
+	sink := session.Sink(sm, nil)
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, sink)
 	a.Compactor = newCompactor(&compactCalls)
+	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史；
+	// 预置消息同样经 sink 落盘，保持消息序与镜像对齐
+	seed := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
+	}
+	for _, msg := range seed {
+		if err := sink(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -1373,12 +1409,12 @@ func TestAgentOverflowRecoveryPersistsOmission(t *testing.T) {
 	}
 	// 回放后失败尝试在投影中消失
 	ctx := reloaded.BuildContext()
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("replayed messages = %d, want 2 (summary, done)", len(ctx.Messages))
+	if len(ctx.Messages) != 4 {
+		t.Fatalf("replayed messages = %d, want 4 (summary, a0, u1, done)", len(ctx.Messages))
 	}
-	final, ok := ctx.Messages[1].(llm.AssistantMessage)
+	final, ok := ctx.Messages[3].(llm.AssistantMessage)
 	if !ok {
-		t.Fatalf("messages[1] = %T, want done assistant", ctx.Messages[1])
+		t.Fatalf("messages[3] = %T, want done assistant", ctx.Messages[3])
 	}
 	if text, _ := final.Content[0].(llm.TextContent); text.Text != "done" {
 		t.Errorf("final = %#v, want done", final.Content)
