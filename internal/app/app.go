@@ -71,9 +71,9 @@ func newApp(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		streamFn,
 		onEvent,
 	)
-	// 模型窗口已知时启用上下文压缩
+	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
-		ag.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow)}
+		ag.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
 	}
 	return &App{agent: ag}, nil
 }
