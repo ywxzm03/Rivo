@@ -230,8 +230,8 @@ func TestClassifyAPIErrorWrapsContextOverflow(t *testing.T) {
 		{name: "context_length_exceeded code", code: "context_length_exceeded", message: "input too long", want: true},
 		{name: "max context tokens code", code: "above_model_max_context_tokens", message: "", want: true},
 		{name: "maximum context length message", code: "", message: "This model's maximum context length is 128000 tokens", want: true},
-		{name: "context window message", code: "", message: "prompt exceeds the model context window", want: true},
 		{name: "too many input tokens", code: "invalid_request_error", message: "Too many input tokens", want: true},
+		{name: "loose phrase in echoed content", code: "", message: "user asked about the context window of gpt-4", want: false},
 		{name: "unrelated error", code: "invalid_request_error", message: "bad json body", want: false},
 		{name: "empty error", code: "", message: "", want: false},
 	}

@@ -449,7 +449,8 @@ func apiError(prefix, code, message string) error {
 func classifyAPIError(prefix, code, message string) error {
 	err := apiError(prefix, code, message)
 	if isContextOverflowSignature(code, message) {
-		return fmt.Errorf("%w: %v", llm.ErrContextOverflow, err)
+		// 双重 %w 保留溢出标记与原始错误链，便于上游按错误码 errors.As 提取细节
+		return fmt.Errorf("%w: %w", llm.ErrContextOverflow, err)
 	}
 	return err
 }
@@ -457,19 +458,19 @@ func classifyAPIError(prefix, code, message string) error {
 // classifyStreamError 给流中断错误分类，检测原始 API 错误文本中的溢出签名
 func classifyStreamError(prefix string, err error) error {
 	if isContextOverflowSignature("", err.Error()) {
-		return fmt.Errorf("%w: %s: %v", llm.ErrContextOverflow, prefix, err)
+		return fmt.Errorf("%w: %s: %w", llm.ErrContextOverflow, prefix, err)
 	}
 	return fmt.Errorf("%s: %w", prefix, err)
 }
 
-// isContextOverflowSignature 判断错误码或消息是否为上下文溢出类签名
+// isContextOverflowSignature 判断错误码或消息是否为上下文溢出类签名。
+// 错误文本可能回显请求内容，因此只保留足够具体的签名，宽泛短语（如 "context window"）不参与匹配
 func isContextOverflowSignature(code, message string) bool {
 	text := strings.ToLower(code + " " + message)
 	for _, signature := range []string{
 		"context_length_exceeded",
 		"above_model_max_context_tokens",
 		"maximum context length",
-		"context window",
 		"too many input tokens",
 	} {
 		if strings.Contains(text, signature) {
