@@ -37,8 +37,14 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 				return err
 			}
 		}
-		// 压缩完成打印一行反馈，覆盖自动、溢出与手动三种来源
+		// 压缩完成打印一行反馈，覆盖自动、溢出与手动三种来源；失败打印到 stderr
 		if end, ok := ev.(llm.CompactionEndEvent); ok {
+			if end.Error != "" {
+				if _, err := fmt.Fprintf(stderr, "[context compaction failed (%s): %s]\n", end.Reason, end.Error); err != nil {
+					return err
+				}
+				return nil
+			}
 			preview := end.Summary
 			if len(preview) > 80 {
 				preview = preview[:80] + "..."

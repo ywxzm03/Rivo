@@ -24,7 +24,15 @@ func (s *sessionSink) handle(event llm.AgentEvent) error {
 			return err
 		}
 		s.liveIDs = append(s.liveIDs, s.m.LastEntryID())
+	case llm.CompactionOmitEvent:
+		if err := s.recordOmission(); err != nil {
+			return err
+		}
 	case llm.CompactionEndEvent:
+		// 失败的压缩未改动会话，仅转发通知，不落盘
+		if e.Error != "" {
+			break
+		}
 		if err := s.recordCompaction(e); err != nil {
 			return err
 		}
@@ -33,6 +41,23 @@ func (s *sessionSink) handle(event llm.AgentEvent) error {
 		return nil
 	}
 	return s.next(event)
+}
+
+// recordOmission 为刚落盘的失败尝试追加上下文省略标记：磁盘上保留原始条目供审计回放，
+// 模型投影中经 context_edit(replacement=null) 排除；该条目不属于 Agent 内存上下文，
+// 从镜像中移除以保持镜像与内存消息一一同序对应
+func (s *sessionSink) recordOmission() error {
+	target := s.m.LastEntryID()
+	if target == "" {
+		return nil
+	}
+	if err := s.m.AppendContextEdit(target, nil); err != nil {
+		return err
+	}
+	if n := len(s.liveIDs); n > 0 {
+		s.liveIDs = s.liveIDs[:n-1]
+	}
+	return nil
 }
 
 // recordCompaction 解析保留区间首条消息的 entry ID 并落盘压缩点。

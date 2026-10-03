@@ -183,3 +183,73 @@ func replayText(t *testing.T, msg llm.Message) string {
 	t.Fatalf("unexpected message %#v", msg)
 	return ""
 }
+
+func TestSinkRecordsOmissionMarker(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	sink := Sink(m, nil)
+	// 1.两条消息落盘后，溢出失败的尝试作为第三条消息落盘并立即被省略
+	for _, msg := range []llm.Message{
+		userMsg("hi"),
+		assistantMsg("plan"),
+		assistantMsg("overflow attempt"),
+	} {
+		if err := sink(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatalf("sink(message_end) error = %v", err)
+		}
+	}
+	if err := sink(llm.CompactionOmitEvent{}); err != nil {
+		t.Fatalf("sink(CompactionOmitEvent) error = %v", err)
+	}
+	// 2.压缩保留 1 条消息：被省略的尝试不参与 FirstKeptEntryID 解析
+	if err := sink(llm.CompactionEndEvent{Reason: "overflow", Summary: "recovered", KeptMessageCount: 1}); err != nil {
+		t.Fatalf("sink(CompactionEndEvent) error = %v", err)
+	}
+	reloaded := reloadSession(t, dir)
+	// 磁盘上保留被省略的条目与空 replacement 标记
+	omitted := 0
+	for _, e := range reloaded.entries {
+		if edit, ok := e.(*ContextEditEntry); ok && edit.Replacement == nil {
+			omitted++
+		}
+	}
+	if omitted != 1 {
+		t.Fatalf("omission markers = %d, want 1", omitted)
+	}
+	// 投影中被省略的尝试消失
+	ctx := reloaded.BuildContext()
+	if len(ctx.Messages) != 2 {
+		t.Fatalf("replayed messages = %d, want 2 (summary, kept plan)", len(ctx.Messages))
+	}
+	if replayText(t, ctx.Messages[0]) != "The conversation history before this point was compacted into the following summary:\n\n<summary>\nrecovered\n</summary>" {
+		t.Errorf("messages[0] = %q, want wrapped summary", replayText(t, ctx.Messages[0]))
+	}
+	if replayText(t, ctx.Messages[1]) != "plan" {
+		t.Errorf("messages[1] = %q, want kept message", replayText(t, ctx.Messages[1]))
+	}
+}
+
+func TestSinkSkipsFailedCompaction(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/project", dir)
+	var forwarded []string
+	sink := Sink(m, func(event llm.AgentEvent) error {
+		forwarded = append(forwarded, event.Type())
+		return nil
+	})
+	if err := sink(llm.MessageEndEvent{Message: userMsg("hi")}); err != nil {
+		t.Fatal(err)
+	}
+	// 带 Error 的压缩结束事件只转发，不落盘
+	if err := sink(llm.CompactionEndEvent{Reason: "auto", Error: "摘要为空"}); err != nil {
+		t.Fatalf("sink(failed compaction) error = %v", err)
+	}
+	if len(forwarded) != 2 || forwarded[0] != llm.AgentEventMessageEnd || forwarded[1] != llm.AgentEventCompactionEnd {
+		t.Fatalf("forwarded = %v, want message_end and compaction_end forwarded", forwarded)
+	}
+	for _, e := range m.entries {
+		if _, ok := e.(*CompactionEntry); ok {
+			t.Fatal("failed compaction must not be persisted")
+		}
+	}
+}
