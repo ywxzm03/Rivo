@@ -4,6 +4,7 @@ package compaction
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -28,7 +29,11 @@ func contentTokens(content llm.Content) int {
 	case llm.ImageContent:
 		return imageTokenEstimate
 	case llm.ToolCall:
-		data, _ := json.Marshal(c.Arguments)
+		data, err := json.Marshal(c.Arguments)
+		if err != nil {
+			// 不可序列化的参数以 fmt.Sprint 兜底，避免静默丢数据
+			return EstimateTokens(c.Name) + EstimateTokens(fmt.Sprint(c.Arguments))
+		}
 		return EstimateTokens(c.Name) + EstimateTokens(string(data))
 	default:
 		return 0
@@ -75,6 +80,9 @@ func ContextTokens(messages []llm.Message) int {
 	if base <= 0 {
 		return EstimateContextTokens(messages)
 	}
+	// 下一轮请求会把这条 assistant 的输出计入历史，基线需补上它自身的体积，
+	// 大回复或大工具参数才不会漏判溢出
+	base += MessageTokens(messages[last])
 	for _, msg := range messages[last+1:] {
 		base += MessageTokens(msg)
 	}
@@ -91,10 +99,15 @@ func EstimateContextTokens(messages []llm.Message) int {
 	return total
 }
 
-// ShouldCompact 判断是否达到压缩阈值：上下文占用超过窗口减去预留量；窗口未知时不触发
+// ShouldCompact 判断是否达到压缩阈值：上下文占用超过窗口减去预留量；
+// 窗口未知时不触发，预留量大于窗口时阈值收敛到 0，避免任意非空上下文都触发
 func ShouldCompact(contextTokens, contextWindow, reserveTokens int) bool {
 	if contextWindow <= 0 {
 		return false
 	}
-	return contextTokens > contextWindow-reserveTokens
+	threshold := contextWindow - reserveTokens
+	if threshold < 0 {
+		threshold = 0
+	}
+	return contextTokens > threshold
 }

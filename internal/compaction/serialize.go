@@ -32,8 +32,13 @@ func SerializeMessages(messages []llm.Message) string {
 						text = append(text, c.Text)
 					}
 				case llm.ToolCall:
-					data, _ := json.Marshal(c.Arguments)
-					calls = append(calls, c.Name+"("+string(data)+")")
+					data, err := json.Marshal(c.Arguments)
+					rendered := string(data)
+					if err != nil {
+						// 不可序列化的参数以 fmt.Sprint 兜底标注，避免静默丢失
+						rendered = fmt.Sprint(c.Arguments)
+					}
+					calls = append(calls, c.Name+"("+rendered+")")
 				}
 			}
 			if len(thinking) > 0 {
