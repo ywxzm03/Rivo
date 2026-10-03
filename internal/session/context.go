@@ -1,6 +1,9 @@
 package session
 
-import "github.com/ywxzm03/Rivo/internal/llm"
+import (
+	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/llm"
+)
 
 // SessionContext 从当前叶子恢复出的 LLM 上下文与设置
 type SessionContext struct {
@@ -8,13 +11,9 @@ type SessionContext struct {
 	Provider      string
 	Model         string
 	ThinkingLevel string
+	// LastSummary 为最近一次压缩的原始摘要文本，供恢复会话后的增量合并使用
+	LastSummary string
 }
-
-// compaction 摘要进 LLM 上下文时的包装文本
-const (
-	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
-	compactionSummarySuffix = "\n</summary>"
-)
 
 // BuildContext 从当前叶子沿父链回溯构建 LLM 上下文：
 // 1.取活跃路径；2.应用最近的 compaction 替换历史；3.应用 context_edit 投影；4.转换为 LLM 消息
@@ -55,6 +54,7 @@ func (m *SessionManager) BuildContext() SessionContext {
 	}
 	if compaction != nil {
 		selected = []Entry{compaction}
+		ctx.LastSummary = compaction.Summary
 		kept := false
 		for _, e := range path[:compactionIdx] {
 			if e.base().ID == compaction.FirstKeptEntryID {
@@ -94,7 +94,7 @@ func (m *SessionManager) BuildContext() SessionContext {
 				continue
 			}
 			ctx.Messages = append(ctx.Messages, llm.UserMessage{
-				Content: []llm.Content{llm.TextContent{Text: compactionSummaryPrefix + e.Summary + compactionSummarySuffix}},
+				Content: []llm.Content{llm.TextContent{Text: compact.WrappedSummary(e.Summary)}},
 			})
 		}
 	}

@@ -98,6 +98,14 @@ func Open(path, cwd string) (*SessionManager, error) {
 	return m, nil
 }
 
+// LastEntryID 返回最近追加的 entry ID；还没有任何 entry 时返回空串
+func (m *SessionManager) LastEntryID() string {
+	if len(m.entries) == 0 {
+		return ""
+	}
+	return m.entries[len(m.entries)-1].base().ID
+}
+
 // AppendMessage 追加一条消息，以当前 leaf 为父节点并推进 leaf
 func (m *SessionManager) AppendMessage(msg llm.Message) error {
 	return m.appendEntry(&MessageEntry{Message: msg})
