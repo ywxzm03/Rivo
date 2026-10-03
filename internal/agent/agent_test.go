@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // fakeTool 是测试用的工具，记录每次收到的参数
@@ -813,5 +815,70 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 	}
 	if len(a.AgentContext.Messages) != 0 {
 		t.Fatalf("messages = %d, want 0", len(a.AgentContext.Messages))
+	}
+}
+
+// TestAgentRunPersistsSessionTree 验证完整运行后事件经 session.Sink 落盘，重载可恢复上下文
+func TestAgentRunPersistsSessionTree(t *testing.T) {
+	dir := t.TempDir()
+	sm := session.New("/project", dir)
+
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{
+			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
+			StopReason: llm.StopReasonToolUse,
+		},
+		llm.AssistantMessage{
+			Content: []llm.Content{
+				llm.ThinkingContent{Thinking: "想一下", ThinkingSignature: "sig-1"},
+				llm.TextContent{Text: "done"},
+			},
+			StopReason: llm.StopReasonStop,
+			Usage:      llm.Usage{InputTokens: 7, OutputTokens: 3},
+		},
+	)
+	a := NewAgent(
+		llm.AgentConfig{Model: llm.Model{ID: "gpt-test", Provider: "openai", API: llm.APIOpenAIResponses}},
+		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
+		streamFn,
+		session.Sink(sm, nil),
+	)
+	if _, err := a.Run(context.Background(), "hello"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// 找到落盘的会话文件并重载
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("session files = %v, want exactly 1", matches)
+	}
+	reloaded, err := session.Open(matches[0], "/project")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	ctx := reloaded.BuildContext()
+	if len(ctx.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4 (user, tool-call assistant, toolResult, final assistant)", len(ctx.Messages))
+	}
+	if _, ok := ctx.Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("first message type = %T, want UserMessage", ctx.Messages[0])
+	}
+	final, ok := ctx.Messages[3].(llm.AssistantMessage)
+	if !ok {
+		t.Fatalf("last message type = %T, want AssistantMessage", ctx.Messages[3])
+	}
+	if final.Provider != "openai" || final.Model != "gpt-test" {
+		t.Errorf("final assistant model = %s/%s, want openai/gpt-test", final.Provider, final.Model)
+	}
+	if len(final.Content) != 2 {
+		t.Fatalf("final content blocks = %d, want 2 (thinking, text)", len(final.Content))
+	}
+	thinking, ok := final.Content[0].(llm.ThinkingContent)
+	if !ok || thinking.Thinking != "想一下" || thinking.ThinkingSignature != "sig-1" {
+		t.Errorf("thinking block = %#v, want thinking with signature preserved", final.Content[0])
+	}
+	if ctx.Provider != "openai" || ctx.Model != "gpt-test" {
+		t.Errorf("context model = %s/%s, want openai/gpt-test", ctx.Provider, ctx.Model)
 	}
 }
