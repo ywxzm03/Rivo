@@ -46,8 +46,9 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 				return nil
 			}
 			preview := end.Summary
-			if len(preview) > 80 {
-				preview = preview[:80] + "..."
+			// 按 rune 截断，避免把多字节字符从中间切开输出乱码
+			if runes := []rune(preview); len(runes) > 80 {
+				preview = string(runes[:80]) + "..."
 			}
 			if _, err := fmt.Fprintf(stdout, "\n[context compacted (%s): %d -> %d tokens]\n%s\n", end.Reason, end.TokensBefore, end.TokensAfter, preview); err != nil {
 				return err
