@@ -169,3 +169,28 @@ func TestCompactRejectsEmptyRegion(t *testing.T) {
 		t.Fatal("compacting empty messages should fail")
 	}
 }
+
+func TestCompactSplitTurnEmptyHistoryKeepsPreviousSummary(t *testing.T) {
+	streamFn, seen := recordingStreamFn("PREFIX")
+	c := &Compactor{StreamFn: streamFn, Config: Config{KeepRecentTokens: 99}}
+	// messages[0] 是上次回插的摘要消息，被截断轮次的 user 紧贴序列化起点：历史区为空，
+	// 上次摘要必须作为合并基线保留，而不是被轮次前缀摘要取代
+	messages := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped previous"}}},
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
+	}
+	result, err := c.Compact(context.Background(), messages, "old summary", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsSplitTurn {
+		t.Fatalf("expected split turn, got %+v", result)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("summarize calls = %d, want 1 (history region empty)", len(*seen))
+	}
+	if result.Summary != "old summary\n\n---\n\n**Turn Context (split turn):**\n\nPREFIX" {
+		t.Errorf("summary = %q, want previous summary merged with prefix", result.Summary)
+	}
+}

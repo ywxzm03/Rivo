@@ -73,13 +73,15 @@ func (c *Compactor) Compact(ctx context.Context, messages []llm.Message, previou
 		turnPrefix := messages[plan.TurnStartIndex:plan.CutIndex]
 		var summary string
 		var usage llm.Usage
-		// 1.先摘历史；轮次起点紧贴序列化起点时历史区为空，跳过
+		// 1.先摘历史；历史区为空时以上次摘要为合并基线，绝不丢弃已整合的历史
 		if len(history) > 0 {
 			historySummary, historyUsage, err := c.summarizeRegion(ctx, history, previousSummary, instructions, false)
 			if err != nil {
 				return Result{}, err
 			}
 			summary, usage = historySummary, historyUsage
+		} else if previousSummary != "" {
+			summary = previousSummary
 		}
 		// 2.再摘轮次前缀并合并
 		prefixSummary, prefixUsage, err := c.summarizeRegion(ctx, turnPrefix, "", "", true)
