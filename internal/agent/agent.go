@@ -64,16 +64,8 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 	defer release()
 
-	// cancels 收集运行期间派生的全部 ctx，返回时统一取消；溢出恢复会重新派生 ctx，
-	// 因为错误事件分支可能已取消当前 ctx，带着已取消的 ctx 压缩必然失败
-	baseCtx, cancel := context.WithCancel(ctx)
-	cancels := []context.CancelFunc{cancel}
-	defer func() {
-		for _, cancel := range cancels {
-			cancel()
-		}
-	}()
-	ctx = baseCtx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	firstMessageIndex := len(a.AgentContext.Messages)
 	// overflowRetried 限制每次运行最多做一次溢出恢复，防止压缩后仍溢出时死循环
 	overflowRetried := false
@@ -101,7 +93,8 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		// 压缩失败降级为失败事件，以原上下文继续运行，真实溢出由后续请求自然暴露
 		if reason, ok := a.pendingCompactionReason(); ok {
 			if err := a.runCompaction(ctx, reason, ""); err != nil {
-				if errors.Is(err, context.Canceled) {
+				// 中止（取消或超时）直接结束运行，带着失效的 ctx 继续没有意义
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil, err
 				}
 			} else {
@@ -114,7 +107,9 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
 			return nil, err
 		}
-		events, streamErr := a.StreamFn(ctx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
+		// 每轮单独派生 stream ctx：错误事件分支只取消它，溢出恢复仍能拿到存活的运行级 ctx
+		streamCtx, streamCancel := context.WithCancel(ctx)
+		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
 
 		var final *llm.AssistantMessage
 		toolCallArguments := make(map[int]string)
@@ -137,7 +132,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 						Message:               cloneAssistantMessage(partial),
 						AssistantMessageEvent: ev,
 					}); err != nil {
-						cancel()
+						streamCancel()
 						return nil, err
 					}
 				case llm.AssistantMessageDoneEvent:
@@ -147,13 +142,16 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 					if streamErr == nil {
 						streamErr = errors.New("agent: 模型流返回空错误")
 					}
-					cancel()
+					// 只取消本轮流，运行级 ctx 保持存活供溢出恢复使用
+					streamCancel()
 				}
 				if streamErr != nil {
 					break
 				}
 			}
 		}
+		// 本轮流已结束（正常关闭或已中止），统一收尾
+		streamCancel()
 		if streamErr == nil && final == nil {
 			streamErr = errors.New("agent: 流已结束但未收到最终消息")
 		}
@@ -162,8 +160,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			// 同一次运行第二次溢出按普通错误收场
 			if a.Compactor != nil && !overflowRetried && llm.IsContextOverflow(streamErr) {
 				overflowRetried = true
-				ctx, cancel = context.WithCancel(baseCtx)
-				cancels = append(cancels, cancel)
 				if err := a.recoverFromOverflow(ctx, streamErr, nil); err != nil {
 					// 恢复失败按原始溢出错误收场，压缩失败事件已在 runCompaction 内发出
 					return a.finishModelError(firstMessageIndex, streamErr)
@@ -177,9 +173,9 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		// 输出在达到模型上限前被截断说明上下文已耗尽，走溢出恢复；达到上限的截断是正常输出限制
 		if a.Compactor != nil && !overflowRetried && isRecoverableLength(*final, a.AgentConfig.Model) {
 			overflowRetried = true
-			ctx, cancel = context.WithCancel(baseCtx)
-			cancels = append(cancels, cancel)
 			lengthErr := errors.New("agent: 上下文溢出：输出在达到模型上限前被截断")
+			// 落盘的失败尝试与正常提交路径一致带上模型元数据
+			setAssistantMetadata(final, a.AgentConfig.Model)
 			if err := a.recoverFromOverflow(ctx, lengthErr, final); err != nil {
 				// 恢复失败按普通错误收场，被截断的尝试已落盘并省略
 				return a.finishModelError(firstMessageIndex, lengthErr)
