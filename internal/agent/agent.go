@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -15,6 +16,11 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
+	// Compactor 为 nil 时禁用上下文压缩；独立于 AgentConfig 是为了避免 llm 包反向依赖 compaction
+	Compactor *compaction.Compactor
+
+	// lastSummary 记录最近一次压缩的摘要，供下一次压缩增量合并
+	lastSummary string
 
 	runGuardOnce sync.Once
 	runGuard     chan struct{}
@@ -58,6 +64,8 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	firstMessageIndex := len(a.AgentContext.Messages)
+	// overflowRetried 限制每次运行最多做一次溢出恢复，防止压缩后仍溢出时死循环
+	overflowRetried := false
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
 		return nil, err
 	}
@@ -78,6 +86,14 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 
 	for {
+		// 1.5.自动压缩检查：上下文逼近窗口时先压缩再发起本轮模型调用
+		if a.shouldAutoCompact() {
+			if err := a.runCompaction(ctx, compactionReasonAuto, ""); err != nil {
+				return a.finishModelError(firstMessageIndex, err)
+			}
+			// 压缩重排了消息，运行起点改记压缩后的上下文长度，保证 agent_end 汇总不越界
+			firstMessageIndex = len(a.AgentContext.Messages)
+		}
 		// 2.消费模型流并同步发出 assistant partial 更新
 		partial := a.newAssistantMessage()
 		if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
@@ -127,9 +143,27 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			streamErr = errors.New("agent: 流已结束但未收到最终消息")
 		}
 		if streamErr != nil {
+			// 溢出恢复：省略失败尝试，压缩后重试本轮一次；同一次运行第二次溢出按普通错误收场
+			if !overflowRetried && llm.IsContextOverflow(streamErr) {
+				overflowRetried = true
+				if err := a.runCompaction(ctx, compactionReasonOverflow, ""); err != nil {
+					return a.finishModelError(firstMessageIndex, err)
+				}
+				firstMessageIndex = len(a.AgentContext.Messages)
+				continue
+			}
 			return a.finishModelError(firstMessageIndex, streamErr)
 		}
 		// 3.提交最终 assistant 消息，并检查是否需要执行工具
+		// 输出被长度截断同样视为上下文溢出，走压缩后重试一次的恢复路径
+		if !overflowRetried && final.StopReason == llm.StopReasonLength {
+			overflowRetried = true
+			if err := a.runCompaction(ctx, compactionReasonOverflow, ""); err != nil {
+				return a.finishModelError(firstMessageIndex, err)
+			}
+			firstMessageIndex = len(a.AgentContext.Messages)
+			continue
+		}
 		setAssistantMetadata(final, a.AgentConfig.Model)
 		a.AgentContext.Messages = append(a.AgentContext.Messages, *final)
 		if err := a.emit(llm.MessageEndEvent{Message: *final}); err != nil {
@@ -175,6 +209,65 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			return nil, err
 		}
 	}
+}
+
+// 压缩原因，随 compaction 事件暴露给消费者
+const (
+	compactionReasonAuto     = "auto"
+	compactionReasonOverflow = "overflow"
+	compactionReasonManual   = "manual"
+)
+
+// shouldAutoCompact 判断是否达到自动压缩阈值
+func (a *Agent) shouldAutoCompact() bool {
+	if a.Compactor == nil {
+		return false
+	}
+	cfg := a.Compactor.Config
+	return compaction.ShouldCompact(compaction.ContextTokens(a.AgentContext.Messages), cfg.ContextWindow, cfg.ReserveTokens)
+}
+
+// runCompaction 执行一次压缩：1.发出开始事件；2.生成摘要；3.截断内存上下文并回插摘要消息；
+// 4.记录摘要供增量合并；5.发出结束事件。摘要消息经 session 的 CompactionEntry 回放产出，
+// 不发 message_end，也不会持久化为普通消息
+func (a *Agent) runCompaction(ctx context.Context, reason, instructions string) error {
+	if a.Compactor == nil {
+		return errors.New("agent: 未启用上下文压缩")
+	}
+	tokensBefore := compaction.ContextTokens(a.AgentContext.Messages)
+	if err := a.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
+		return err
+	}
+	result, err := a.Compactor.Compact(ctx, a.AgentContext.Messages, a.lastSummary, instructions)
+	if err != nil {
+		return fmt.Errorf("agent: 压缩失败: %w", err)
+	}
+	kept := append([]llm.Message(nil), a.AgentContext.Messages[result.CutIndex:]...)
+	messages := make([]llm.Message, 0, len(kept)+1)
+	messages = append(messages, llm.UserMessage{
+		Content: []llm.Content{llm.TextContent{Text: compaction.WrappedSummary(result.Summary)}},
+	})
+	messages = append(messages, kept...)
+	a.AgentContext.Messages = messages
+	a.lastSummary = result.Summary
+	return a.emit(llm.CompactionEndEvent{
+		Reason:           reason,
+		Summary:          result.Summary,
+		KeptMessageCount: len(kept),
+		TokensBefore:     tokensBefore,
+		TokensAfter:      compaction.ContextTokens(a.AgentContext.Messages),
+		Usage:            result.Usage,
+	})
+}
+
+// CompactNow 手动触发一次压缩，instructions 为聚焦指令；与 Run 共用运行守卫避免交错
+func (a *Agent) CompactNow(ctx context.Context, instructions string) error {
+	release, err := a.acquireRunGuard(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return a.runCompaction(ctx, compactionReasonManual, instructions)
 }
 
 func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
