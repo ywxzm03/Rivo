@@ -231,10 +231,12 @@ func handleResume(reader *bufio.Reader, stdout, stderr io.Writer, listSessions f
 	return true
 }
 
-// relativeTime 把修改时间格式化为中文相对时间，超过一个月退回日期
+// relativeTime 把修改时间格式化为中文相对时间；未来时间与时钟回拨场景退回日期，超过一个月也退回日期
 func relativeTime(t time.Time) string {
 	d := time.Since(t)
 	switch {
+	case d < 0:
+		return t.Format("2006-01-02")
 	case d < time.Minute:
 		return "刚刚"
 	case d < time.Hour:

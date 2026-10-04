@@ -196,3 +196,10 @@ func TestRunREPLResumeListErrorStaysInSession(t *testing.T) {
 		t.Errorf("stderr = %q, want list failure", stderr.String())
 	}
 }
+
+func TestRelativeTimeFutureFallsBackToDate(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	if got := relativeTime(future); got != future.Format("2006-01-02") {
+		t.Errorf("relativeTime(future) = %q, want date %q", got, future.Format("2006-01-02"))
+	}
+}
