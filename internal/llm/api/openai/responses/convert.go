@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	sdk "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // BuildParams 将 Rivo 上下文和模型配置转换为 Responses 请求参数
-func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.ResponseNewParams, error) {
+func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.ResponseNewParams, error) {
 	items, err := BuildInputItems(c)
 	if err != nil {
 		return responses.ResponseNewParams{}, err
@@ -20,6 +21,9 @@ func BuildParams(model llm.Model, c llm.Context, _ llm.Options) (responses.Respo
 	params := responses.ResponseNewParams{
 		Model: model.ID,
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
+	}
+	if opts.MaxTokens > 0 {
+		params.MaxOutputTokens = param.NewOpt(int64(opts.MaxTokens))
 	}
 	if model.Reasoning {
 		effort := model.ReasoningEffort

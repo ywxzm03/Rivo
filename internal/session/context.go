@@ -7,13 +7,18 @@ import (
 
 // SessionContext 从当前叶子恢复出的 LLM 上下文与设置
 type SessionContext struct {
+	// Messages 与 EntryIDs 一一同序：每条 LLM 消息对应其来源 entry（摘要消息对应 compaction entry），
+	// 压缩在会话树上定位切点后经 EntryIDs 取 FirstKeptEntryID
 	Messages      []llm.Message
+	EntryIDs      []string
 	Provider      string
 	Model         string
 	ThinkingLevel string
-	// LastSummary 为最近一次压缩的原始摘要文本；会话恢复（resume）尚未实现，
-	// 当前仅由 BuildContext 填充，待恢复路径落地后接回 Agent 的压缩增量合并
+	// LastSummary 为最近一次压缩的原始摘要文本，供压缩增量合并与会话恢复使用
 	LastSummary string
+	// UsageStale 表示最后一条 assistant 消息位于最近一次压缩之前，其 usage 反映压缩前的大上下文，
+	// 此时 token 计费应改用纯消息体估算
+	UsageStale bool
 }
 
 // BuildContext 从当前叶子沿父链回溯构建 LLM 上下文：
@@ -77,6 +82,13 @@ func (m *SessionManager) BuildContext() SessionContext {
 	}
 
 	// 4.转换消息：compaction 与被省略的目标有特殊处理，其余类型不产出消息
+	pathIdx := make(map[string]int, len(path))
+	for i, e := range path {
+		pathIdx[e.base().ID] = i
+	}
+	// lastAssistantStale 记录最后一条 assistant 的 entry 是否早于最近一次压缩，
+	// 与消息在投影中的先后无关（保留尾部的 assistant 在投影里排在摘要之后）
+	lastAssistantStale := false
 	for _, e := range selected {
 		switch e := e.(type) {
 		case *MessageEntry:
@@ -86,9 +98,14 @@ func (m *SessionManager) BuildContext() SessionContext {
 					continue
 				}
 				ctx.Messages = append(ctx.Messages, withReplacedContent(e.Message, edit.Replacement.Content))
-				continue
+				ctx.EntryIDs = append(ctx.EntryIDs, e.base().ID)
+			} else {
+				ctx.Messages = append(ctx.Messages, e.Message)
+				ctx.EntryIDs = append(ctx.EntryIDs, e.base().ID)
 			}
-			ctx.Messages = append(ctx.Messages, e.Message)
+			if _, ok := ctx.Messages[len(ctx.Messages)-1].(llm.AssistantMessage); ok {
+				lastAssistantStale = compaction != nil && pathIdx[e.base().ID] < compactionIdx
+			}
 		case *CompactionEntry:
 			// 保留区间内可能残留更早的 compaction，只有最新的这个产出摘要
 			if compaction != nil && e != compaction {
@@ -97,8 +114,10 @@ func (m *SessionManager) BuildContext() SessionContext {
 			ctx.Messages = append(ctx.Messages, llm.UserMessage{
 				Content: []llm.Content{llm.TextContent{Text: compact.WrappedSummary(e.Summary)}},
 			})
+			ctx.EntryIDs = append(ctx.EntryIDs, e.base().ID)
 		}
 	}
+	ctx.UsageStale = lastAssistantStale
 	return ctx
 }
 

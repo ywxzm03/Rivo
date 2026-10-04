@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -16,17 +15,21 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
-	// Compactor 为 nil 时禁用上下文压缩；独立于 AgentConfig 是为了避免 llm 包反向依赖 compaction
-	Compactor *compaction.Compactor
-
-	// lastSummary 记录最近一次压缩的摘要，供下一次压缩增量合并
-	lastSummary string
-	// usageStale 表示上下文里最后一条 assistant 的 usage 反映的是压缩前的大上下文，
-	// 此期间阈值判断改用纯估算，防止压缩刚结束就重复触发
-	usageStale bool
+	// Coordinator 为压缩编排层回调：循环顶的阈值压缩与溢出通知经它交给编排层处理，
+	// Agent 自身不做压缩决策与持久化；nil 时禁用压缩
+	Coordinator CompactionCoordinator
 
 	runGuardOnce sync.Once
 	runGuard     chan struct{}
+}
+
+// CompactionCoordinator 由编排层实现（session 包），Agent 在轮次边界回调；
+// 持久化与投影重建都在编排层完成，Agent 用替换后的消息序列继续运行
+type CompactionCoordinator interface {
+	// CompactIfNeeded 评估会话投影的阈值与静默溢出，需要时压缩、重建并替换内存，返回是否发生了压缩
+	CompactIfNeeded(ctx context.Context) (compacted bool, err error)
+	// NotifyOverflow 通知编排层本轮以可恢复的上下文溢出收场（显式溢出错误或可恢复的长度截断）
+	NotifyOverflow()
 }
 
 func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
@@ -67,8 +70,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	firstMessageIndex := len(a.AgentContext.Messages)
-	// overflowRetried 限制每次运行最多做一次溢出恢复，防止压缩后仍溢出时死循环
-	overflowRetried := false
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
 		return nil, err
 	}
@@ -88,16 +89,47 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		return nil, err
 	}
 
+	return a.runLoop(ctx, cancel, firstMessageIndex)
+}
+
+// Continue 在不追加用户消息的情况下重入运行循环，供编排层在溢出恢复后重试该轮
+func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
+	release, err := a.acquireRunGuard(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	firstMessageIndex := len(a.AgentContext.Messages)
+	if err := a.emit(llm.AgentStartEvent{}); err != nil {
+		return nil, err
+	}
+	if err := a.emit(llm.TurnStartEvent{}); err != nil {
+		return nil, err
+	}
+	return a.runLoop(ctx, cancel, firstMessageIndex)
+}
+
+// ReplaceMessages 用编排层提供的投影消息替换内存消息序列（SystemPrompt 与 Tools 不变）
+func (a *Agent) ReplaceMessages(messages []llm.Message) {
+	a.AgentContext.Messages = messages
+}
+
+// runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
+func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int) (*llm.AssistantMessage, error) {
 	for {
-		// 1.5.压缩检查：响应成功但 usage 已超窗（静默溢出）或逼近阈值时，先压缩再发起本轮模型调用；
+		// 1.压缩检查：由编排层在会话投影上评估并执行（静默溢出优先于阈值），压缩后内存已被替换；
 		// 压缩失败降级为失败事件，以原上下文继续运行，真实溢出由后续请求自然暴露
-		if reason, ok := a.pendingCompactionReason(); ok {
-			if err := a.runCompaction(ctx, reason, ""); err != nil {
+		if a.Coordinator != nil {
+			compacted, err := a.Coordinator.CompactIfNeeded(ctx)
+			if err != nil {
 				// 中止（取消或超时）直接结束运行，带着失效的 ctx 继续没有意义
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil, err
 				}
-			} else {
+			} else if compacted {
 				// 压缩重排了消息，运行起点改记压缩后的上下文长度，保证 agent_end 汇总不越界
 				firstMessageIndex = len(a.AgentContext.Messages)
 			}
@@ -107,7 +139,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
 			return nil, err
 		}
-		// 每轮单独派生 stream ctx：错误事件分支只取消它，溢出恢复仍能拿到存活的运行级 ctx
+		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
 		streamCtx, streamCancel := context.WithCancel(ctx)
 		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
 
@@ -142,7 +174,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 					if streamErr == nil {
 						streamErr = errors.New("agent: 模型流返回空错误")
 					}
-					// 只取消本轮流，运行级 ctx 保持存活供溢出恢复使用
+					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
 				}
 				if streamErr != nil {
@@ -156,37 +188,15 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 			streamErr = errors.New("agent: 流已结束但未收到最终消息")
 		}
 		if streamErr != nil {
-			// 溢出恢复：失败的尝试照常落盘并追加省略标记（投影上删除、磁盘上保留），压缩后重试本轮一次；
-			// 同一次运行第二次溢出按普通错误收场
-			if a.Compactor != nil && !overflowRetried && llm.IsContextOverflow(streamErr) {
-				overflowRetried = true
-				if err := a.recoverFromOverflow(ctx, streamErr, nil); err != nil {
-					// 恢复失败按原始溢出错误收场，压缩失败事件已在 runCompaction 内发出
-					return a.finishModelError(firstMessageIndex, streamErr)
-				}
-				firstMessageIndex = len(a.AgentContext.Messages)
-				continue
+			// 可恢复的溢出：通知编排层驱动轮外恢复（它会标注 willRetry 并省略失败尝试），本轮按错误收场
+			if a.Coordinator != nil && llm.IsContextOverflow(streamErr) {
+				a.Coordinator.NotifyOverflow()
 			}
 			return a.finishModelError(firstMessageIndex, streamErr)
 		}
 		// 3.提交最终 assistant 消息，并检查是否需要执行工具
-		// 输出在达到模型上限前被截断说明上下文已耗尽，走溢出恢复；达到上限的截断是正常输出限制
-		if a.Compactor != nil && !overflowRetried && isRecoverableLength(*final, a.AgentConfig.Model) {
-			overflowRetried = true
-			lengthErr := errors.New("agent: 上下文溢出：输出在达到模型上限前被截断")
-			// 落盘的失败尝试与正常提交路径一致带上模型元数据
-			setAssistantMetadata(final, a.AgentConfig.Model)
-			if err := a.recoverFromOverflow(ctx, lengthErr, final); err != nil {
-				// 恢复失败按普通错误收场，被截断的尝试已落盘并省略
-				return a.finishModelError(firstMessageIndex, lengthErr)
-			}
-			firstMessageIndex = len(a.AgentContext.Messages)
-			continue
-		}
 		setAssistantMetadata(final, a.AgentConfig.Model)
 		a.AgentContext.Messages = append(a.AgentContext.Messages, *final)
-		// 新 assistant 携带本次请求的真实 usage，陈旧标记就此解除
-		a.usageStale = false
 		if err := a.emit(llm.MessageEndEvent{Message: *final}); err != nil {
 			cancel()
 			return nil, err
@@ -199,6 +209,22 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 				continue
 			}
 			toolCalls = append(toolCalls, tc)
+		}
+		// 3.5.输出在达到模型上限前被截断说明上下文已耗尽：跳过截断消息里的工具调用，
+		// 正常提交本轮后通知编排层驱动溢出恢复；达到上限的截断是正常输出限制
+		if isRecoverableLength(*final, a.AgentConfig.Model) {
+			if a.Coordinator != nil {
+				a.Coordinator.NotifyOverflow()
+			}
+			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
+				cancel()
+				return nil, err
+			}
+			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+				cancel()
+				return nil, err
+			}
+			return final, nil
 		}
 		if len(toolCalls) == 0 {
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
@@ -232,53 +258,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 }
 
-// 压缩原因，随 compaction 事件暴露给消费者
-const (
-	compactionReasonAuto     = "auto"
-	compactionReasonOverflow = "overflow"
-	compactionReasonManual   = "manual"
-)
-
-// pendingCompactionReason 判断循环顶部是否需要压缩及原因：
-// 静默溢出（响应成功但 usage 已超窗）优先于阈值触发，陈旧 usage 期间改用纯估算
-func (a *Agent) pendingCompactionReason() (string, bool) {
-	if a.Compactor == nil {
-		return "", false
-	}
-	window := a.Compactor.Config.ContextWindow
-	if window <= 0 {
-		return "", false
-	}
-	if !a.usageStale {
-		if msg := a.lastAssistant(); msg != nil && msg.Usage.InputTokens > window {
-			return compactionReasonOverflow, true
-		}
-	}
-	if compaction.ShouldCompact(a.contextTokens(), window, a.Compactor.Config.ReserveTokens) {
-		return compactionReasonAuto, true
-	}
-	return "", false
-}
-
-// contextTokens 按 usage 是否陈旧选择估算方式：压缩后保留尾部的 usage 反映压缩前的大上下文，
-// 此时改用纯消息体估算，防止压缩刚结束就重复触发
-func (a *Agent) contextTokens() int {
-	if a.usageStale {
-		return compaction.EstimateContextTokens(a.AgentContext.Messages)
-	}
-	return compaction.ContextTokens(a.AgentContext.Messages)
-}
-
-// lastAssistant 返回上下文中最后一条 assistant 消息
-func (a *Agent) lastAssistant() *llm.AssistantMessage {
-	for i := len(a.AgentContext.Messages) - 1; i >= 0; i-- {
-		if msg, ok := a.AgentContext.Messages[i].(llm.AssistantMessage); ok {
-			return &msg
-		}
-	}
-	return nil
-}
-
 // isRecoverableLength 输出在达到模型输出上限之前被截断，说明截断来自上下文耗尽而非输出上限；
 // 输出上限未知的模型无法判定，不触发恢复
 func isRecoverableLength(message llm.AssistantMessage, model llm.Model) bool {
@@ -286,92 +265,6 @@ func isRecoverableLength(message llm.AssistantMessage, model llm.Model) bool {
 		return false
 	}
 	return message.Usage.OutputTokens < model.MaxTokens
-}
-
-// runCompaction 执行一次压缩：1.发出开始事件；2.生成摘要（全部易失步骤集中在此）；
-// 3.发出结束事件驱动 session 落盘压缩点；4.落盘成功后才替换内存上下文与 lastSummary。
-// 任一步失败都会话与内存保持原样（失败不落盘），并发带 Error 的结束事件通知消费者；
-// 中止（ctx 取消）静默返回，不打扰 UI
-func (a *Agent) runCompaction(ctx context.Context, reason, instructions string) error {
-	if a.Compactor == nil {
-		return errors.New("agent: 未启用上下文压缩")
-	}
-	tokensBefore := a.contextTokens()
-	if err := a.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
-		return err
-	}
-	result, err := a.Compactor.Compact(ctx, a.AgentContext.Messages, a.lastSummary, instructions)
-	if err != nil {
-		return a.emitCompactionFailed(reason, tokensBefore, err)
-	}
-	kept := append([]llm.Message(nil), a.AgentContext.Messages[result.CutIndex:]...)
-	// TokensAfter 以摘要与保留尾部的纯估算给出：保留尾部的旧 usage 是压缩前数据，不可复用
-	tokensAfter := compaction.EstimateTokens(compaction.WrappedSummary(result.Summary))
-	for _, msg := range kept {
-		tokensAfter += compaction.MessageTokens(msg)
-	}
-	// 结束事件驱动 session 落盘压缩点，失败时内存尚未改动，会话与内存保持一致
-	err = a.emit(llm.CompactionEndEvent{
-		Reason:           reason,
-		Summary:          result.Summary,
-		KeptMessageCount: len(kept),
-		TokensBefore:     tokensBefore,
-		TokensAfter:      tokensAfter,
-		Usage:            result.Usage,
-	})
-	if err != nil {
-		return err
-	}
-	// 落盘成功后提交内存替换
-	messages := make([]llm.Message, 0, len(kept)+1)
-	messages = append(messages, llm.UserMessage{
-		Content: []llm.Content{llm.TextContent{Text: compaction.WrappedSummary(result.Summary)}},
-	})
-	messages = append(messages, kept...)
-	a.AgentContext.Messages = messages
-	a.lastSummary = result.Summary
-	a.usageStale = true
-	return nil
-}
-
-// emitCompactionFailed 发出带 Error 的压缩结束事件通知消费者后返回原错误；中止时静默不打扰
-func (a *Agent) emitCompactionFailed(reason string, tokensBefore int, err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	if emitErr := a.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()}); emitErr != nil {
-		return emitErr
-	}
-	return err
-}
-
-// recoverFromOverflow 溢出恢复的公共流程：落盘失败尝试并追加省略标记，再压缩重试。
-// attempt 为 nil 时（流式错误路径）合成一条 error assistant 消息；失败尝试不进入内存上下文
-func (a *Agent) recoverFromOverflow(ctx context.Context, streamErr error, attempt *llm.AssistantMessage) error {
-	if attempt == nil {
-		message := a.newAssistantMessage()
-		message.StopReason = llm.StopReasonError
-		message.Content = []llm.Content{llm.TextContent{Text: streamErr.Error()}}
-		attempt = &message
-	}
-	if err := a.emit(llm.MessageEndEvent{Message: *attempt}); err != nil {
-		return err
-	}
-	// 会话文件只追加：省略标记让失败尝试在模型投影中消失，磁盘上仍可审计回放
-	if err := a.emit(llm.CompactionOmitEvent{}); err != nil {
-		return err
-	}
-	return a.runCompaction(ctx, compactionReasonOverflow, "")
-}
-
-// CompactNow 手动触发一次压缩，instructions 为聚焦指令；与 Run 共用运行守卫避免交错
-func (a *Agent) CompactNow(ctx context.Context, instructions string) error {
-	release, err := a.acquireRunGuard(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return a.runCompaction(ctx, compactionReasonManual, instructions)
 }
 
 func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
