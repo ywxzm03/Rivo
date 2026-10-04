@@ -69,9 +69,12 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 	return infos, nil
 }
 
+// summaryLineLimit 限制摘要扫描的单行缓冲；超长行（如内嵌 base64 图片的 user 消息）不进内存直接跳过
+const summaryLineLimit = 1 << 20
+
 // firstUserSummary 逐行扫描会话文件，返回首条用户消息折叠空白后的截断摘要；
-// 读取失败或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史；
-// 用 ReadString 而非 Scanner，单行长度不限（user 消息内嵌 base64 图片时单行可能极大）
+// 读取失败、行超限或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史；
+// 读行有界，超限记录跳过，内存占用不随会话内容增长
 func firstUserSummary(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -80,24 +83,48 @@ func firstUserSummary(path string) string {
 	defer f.Close()
 	reader := bufio.NewReader(f)
 	for {
-		line, err := reader.ReadString('\n')
-		trimmed := bytes.TrimSpace([]byte(line))
-		if len(trimmed) > 0 {
-			var probe entryLine
-			if json.Unmarshal(trimmed, &probe) == nil && probe.Type != TypeSession {
-				entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
-				if decodeErr == nil {
-					if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
-						// 1.多行输入折叠为单空格，避免破坏编号列表排版
-						return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
+		line, oversize, readErr := readBoundedLine(reader)
+		if !oversize {
+			trimmed := bytes.TrimSpace(line)
+			if len(trimmed) > 0 {
+				var probe entryLine
+				if json.Unmarshal(trimmed, &probe) == nil && probe.Type != TypeSession {
+					entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
+					if decodeErr == nil {
+						if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
+							// 1.多行输入折叠为单空格，避免破坏编号列表排版
+							return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
+						}
 					}
 				}
 			}
 		}
-		if err != nil {
+		if readErr != nil {
 			// 2.EOF 或读取错误均停止：EOF 前已处理完剩余内容
 			return ""
 		}
+	}
+}
+
+// readBoundedLine 从 reader 读取一行；缓冲超过 summaryLineLimit 时放弃缓冲、
+// 继续消费到行尾并标记 oversize。oversize 为 true 时 line 无效
+func readBoundedLine(reader *bufio.Reader) (line []byte, oversize bool, err error) {
+	var buf []byte
+	for {
+		chunk, readErr := reader.ReadSlice('\n')
+		if !oversize {
+			if len(buf)+len(chunk) > summaryLineLimit {
+				oversize = true
+				buf = nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		if readErr == bufio.ErrBufferFull {
+			// 1.行未结束：oversize 时继续空转消费直到行尾，未超限时继续累积
+			continue
+		}
+		return buf, oversize, readErr
 	}
 }
 

@@ -159,17 +159,57 @@ func TestListSessionsUsesDefaultDir(t *testing.T) {
 	}
 }
 
-func TestListSessionsOversizedLineStillSummarized(t *testing.T) {
+func TestListSessionsSkipsOversizedLine(t *testing.T) {
 	dir := t.TempDir()
-	// 单行超过旧 Scanner 4MB 上限的 user 消息（如内嵌 base64 图片）也必须产出摘要
-	huge := strings.Repeat("图", 4*1024*1024)
+	// 超过 summaryLineLimit 的首条 user 消息（如内嵌 base64 图片）不缓冲，摘要为空且不阻塞扫描
+	huge := strings.Repeat("图", summaryLineLimit+100)
 	newSessionFile(t, dir, "/tmp/proj", huge)
 
 	infos, err := listSessionsInDir(dir)
 	if err != nil {
 		t.Fatalf("listSessionsInDir() error = %v", err)
 	}
-	want := strings.Repeat("图", summaryMaxRunes) + "..."
+	if infos[0].Summary != "" {
+		t.Errorf("summary = %q, want empty for oversized record", infos[0].Summary)
+	}
+}
+
+func TestListSessionsOversizedLineThenNormalMessage(t *testing.T) {
+	dir := t.TempDir()
+	m := New("/tmp/proj", dir)
+	huge := strings.Repeat("图", summaryLineLimit+100)
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: huge}}}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "正常消息"}}}); err != nil {
+		t.Fatalf("AppendMessage() error = %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("ReadDir(%s) = %v, %d entries, want one session file", dir, err, 1)
+	}
+
+	infos, err := listSessionsInDir(dir)
+	if err != nil {
+		t.Fatalf("listSessionsInDir() error = %v", err)
+	}
+	// 超限记录被跳过后继续扫描，后续 user 消息正常产出摘要
+	if infos[0].Summary != "正常消息" {
+		t.Errorf("summary = %q, want the later user message", infos[0].Summary)
+	}
+}
+
+func TestListSessionsLineAtLimitStillSummarized(t *testing.T) {
+	dir := t.TempDir()
+	// 未超限（不超过 summaryLineLimit）的长文本仍正常产出摘要
+	big := strings.Repeat("长", summaryLineLimit/6) // 每个 rune 3 字节，加上 JSON 字段开销后仍在上限内
+	newSessionFile(t, dir, "/tmp/proj", big)
+
+	infos, err := listSessionsInDir(dir)
+	if err != nil {
+		t.Fatalf("listSessionsInDir() error = %v", err)
+	}
+	want := strings.Repeat("长", summaryMaxRunes) + "..."
 	if infos[0].Summary != want {
 		t.Errorf("summary = %d runes, want %d runes with ellipsis", len([]rune(infos[0].Summary)), len([]rune(want)))
 	}
