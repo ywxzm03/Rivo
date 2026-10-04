@@ -304,3 +304,90 @@ func messageText(t *testing.T, msg llm.Message) string {
 	}
 	return ""
 }
+
+func TestBuildContextProjectionEntryIDs(t *testing.T) {
+	m := New("/project", t.TempDir())
+	var ids []string
+	for _, msg := range []llm.Message{userMsg("u1"), assistantMsg("a1"), userMsg("u2"), assistantMsg("a2")} {
+		if err := m.AppendMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, m.leafID)
+	}
+	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	compactionID := m.leafID
+	if err := m.AppendMessage(userMsg("u3")); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := m.BuildContext()
+	// 消息与 entry ID 一一同序：[摘要(compaction), u2, a2, u3]
+	if len(ctx.Messages) != len(ctx.EntryIDs) {
+		t.Fatalf("messages = %d, entryIDs = %d, want same length", len(ctx.Messages), len(ctx.EntryIDs))
+	}
+	want := []string{compactionID, ids[2], ids[3], m.leafID}
+	for i, id := range want {
+		if ctx.EntryIDs[i] != id {
+			t.Errorf("EntryIDs[%d] = %q, want %q", i, ctx.EntryIDs[i], id)
+		}
+	}
+	if ctx.LastSummary != "early chat summarized" {
+		t.Errorf("LastSummary = %q", ctx.LastSummary)
+	}
+}
+
+func TestBuildContextStaleUsage(t *testing.T) {
+	t.Run("assistant before compaction is stale", func(t *testing.T) {
+		m := New("/project", t.TempDir())
+		var ids []string
+		for _, msg := range []llm.Message{userMsg("u1"), assistantMsg("a1")} {
+			if err := m.AppendMessage(msg); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, m.leafID)
+		}
+		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		// 压缩后只有 user 消息，最后一条 assistant 仍带着压缩前的 usage
+		if err := m.AppendMessage(userMsg("u2")); err != nil {
+			t.Fatal(err)
+		}
+		if !m.BuildContext().UsageStale {
+			t.Error("UsageStale = false, want true (assistant predates compaction)")
+		}
+	})
+	t.Run("assistant after compaction is fresh", func(t *testing.T) {
+		m := New("/project", t.TempDir())
+		var ids []string
+		for _, msg := range []llm.Message{userMsg("u1"), assistantMsg("a1")} {
+			if err := m.AppendMessage(msg); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, m.leafID)
+		}
+		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.AppendMessage(assistantMsg("a2")); err != nil {
+			t.Fatal(err)
+		}
+		if m.BuildContext().UsageStale {
+			t.Error("UsageStale = true, want false (fresh assistant after compaction)")
+		}
+	})
+	t.Run("no compaction never stale", func(t *testing.T) {
+		m := New("/project", t.TempDir())
+		if err := m.AppendMessage(userMsg("u1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.AppendMessage(assistantMsg("a1")); err != nil {
+			t.Fatal(err)
+		}
+		if m.BuildContext().UsageStale {
+			t.Error("UsageStale = true, want false without compaction")
+		}
+	})
+}

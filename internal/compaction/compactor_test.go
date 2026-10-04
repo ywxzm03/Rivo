@@ -194,3 +194,39 @@ func TestCompactSplitTurnEmptyHistoryKeepsPreviousSummary(t *testing.T) {
 		t.Errorf("summary = %q, want previous summary merged with prefix", result.Summary)
 	}
 }
+
+func TestSummaryMaxTokens(t *testing.T) {
+	// 预留量 20000 的八成为 16000，低于模型上限时取前者
+	c := &Compactor{Config: Config{ReserveTokens: 20000}, Model: llm.Model{MaxTokens: 128000}}
+	if got := c.summaryMaxTokens(); got != 16000 {
+		t.Errorf("summaryMaxTokens = %d, want 16000", got)
+	}
+	// 模型上限更小时取模型上限
+	c = &Compactor{Config: Config{ReserveTokens: 20000}, Model: llm.Model{MaxTokens: 8192}}
+	if got := c.summaryMaxTokens(); got != 8192 {
+		t.Errorf("summaryMaxTokens = %d, want 8192", got)
+	}
+	// 模型上限未知时只按预留量收缩
+	c = &Compactor{Config: Config{ReserveTokens: 20000}}
+	if got := c.summaryMaxTokens(); got != 16000 {
+		t.Errorf("summaryMaxTokens = %d, want 16000", got)
+	}
+}
+
+func TestSummarizeOncePassesMaxTokensOption(t *testing.T) {
+	var got llm.Options
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		got = opts
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "SUMMARY"}}}}
+		close(ch)
+		return ch, nil
+	}
+	c := &Compactor{StreamFn: streamFn, Config: Config{ReserveTokens: 20000}, Model: llm.Model{MaxTokens: 8192}}
+	if _, _, err := c.summarizeOnce(context.Background(), "prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxTokens != 8192 {
+		t.Errorf("MaxTokens = %d, want 8192", got.MaxTokens)
+	}
+}

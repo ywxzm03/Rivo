@@ -14,8 +14,9 @@ import (
 )
 
 type App struct {
-	agent   *agent.Agent
-	session *session.SessionManager
+	agent       *agent.Agent
+	session     *session.SessionManager
+	coordinator *session.Coordinator
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
@@ -36,16 +37,11 @@ func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App
 		}
 	}
 	sm := session.New(cwd, dir)
-	app, err := newApp(cfg, session.Sink(sm, onEvent))
-	if err != nil {
-		return nil, err
-	}
-	app.session = sm
-	return app, nil
+	return newApp(cfg, sm, onEvent)
 }
 
-// newApp 组装 Agent，onEvent 已包含会话持久化的 sink
-func newApp(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
+// newApp 组装编排层与 Agent：事件经编排层落盘，压缩与溢出恢复由编排层驱动
+func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
 	spec, err := lookupProvider(cfg.ProviderID)
 	if err != nil {
 		return nil, err
@@ -62,6 +58,12 @@ func newApp(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		tools = append(tools, &tool.PowerShell{})
 	}
 
+	coord := session.NewCoordinator(sm, onEvent)
+	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
+	if model.ContextWindow > 0 {
+		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
+	}
+
 	ag := agent.NewAgent(
 		llm.AgentConfig{Model: model},
 		llm.Context{
@@ -69,20 +71,19 @@ func newApp(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 			Tools:        tools,
 		},
 		streamFn,
-		onEvent,
+		coord.Handle,
 	)
-	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
-	if model.ContextWindow > 0 {
-		ag.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
-	}
-	return &App{agent: ag}, nil
+	ag.Coordinator = coord
+	coord.Agent = ag
+	return &App{agent: ag, session: sm, coordinator: coord}, nil
 }
 
+// Run 经编排层驱动一次运行，溢出恢复由编排层负责
 func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
-	return a.agent.Run(ctx, input)
+	return a.coordinator.Run(ctx, input)
 }
 
 // Compact 手动触发一次上下文压缩，instructions 为聚焦指令
 func (a *App) Compact(ctx context.Context, instructions string) error {
-	return a.agent.CompactNow(ctx, instructions)
+	return a.coordinator.Compact(ctx, instructions)
 }

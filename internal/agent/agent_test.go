@@ -1,21 +1,15 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // fakeTool 是测试用的工具，记录每次收到的参数
@@ -823,600 +817,234 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 	}
 }
 
-// TestAgentRunPersistsSessionTree 验证完整运行后事件经 session.Sink 落盘，重载可恢复上下文
-func TestAgentRunPersistsSessionTree(t *testing.T) {
-	dir := t.TempDir()
-	sm := session.New("/project", dir)
+// recordingCoordinator 记录回调调用的假编排层
+type recordingCoordinator struct {
+	compactions int
+	notifies    int
+	// replace 内部执行内存替换，模拟编排层压缩后的投影提交
+	replace    func()
+	compactErr error
+}
 
+func (c *recordingCoordinator) CompactIfNeeded(_ context.Context) (bool, error) {
+	c.compactions++
+	if c.compactErr != nil {
+		return false, c.compactErr
+	}
+	if c.replace != nil {
+		// 触发的测试用例通过闭包替换 Agent 内存
+		replace := c.replace
+		c.replace = nil
+		replace()
+		return true, nil
+	}
+	return false, nil
+}
+
+func (c *recordingCoordinator) NotifyOverflow() { c.notifies++ }
+
+// TestAgentContinueContinuesWithoutUserMessage 验证续接不追加用户消息，事件序列与运行同构
+func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
+	var events []llm.AgentEvent
+	calls := 0
+	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "resumed"}}, StopReason: llm.StopReasonStop})
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	a.AgentContext.Messages = append(a.AgentContext.Messages,
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier"}}},
+	)
+
+	reply, err := a.Continue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("stream calls = %d, want 1", calls)
+	}
+	// 不追加用户消息：只有预置历史 + 本轮 assistant 回复
+	if got := len(a.AgentContext.Messages); got != 2 {
+		t.Fatalf("messages = %d, want 2", got)
+	}
+	if _, ok := a.AgentContext.Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("messages[0] = %T, want seeded user message", a.AgentContext.Messages[0])
+	}
+	wantTypes := []string{
+		llm.AgentEventAgentStart,
+		llm.AgentEventTurnStart,
+		llm.AgentEventMessageStart,
+		llm.AgentEventMessageEnd,
+		llm.AgentEventTurnEnd,
+		llm.AgentEventAgentEnd,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type() != want {
+			t.Errorf("events[%d] = %q, want %q", i, events[i].Type(), want)
+		}
+	}
+	if text := reply.Content[0].(llm.TextContent).Text; text != "resumed" {
+		t.Errorf("reply = %q, want resumed", text)
+	}
+}
+
+// TestAgentCompactIfNeededReplacesMemory 验证循环顶压缩回调替换内存后，agent_end 汇总不越界
+func TestAgentCompactIfNeededReplacesMemory(t *testing.T) {
 	calls := 0
 	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-		},
-		llm.AssistantMessage{
-			Content: []llm.Content{
-				llm.ThinkingContent{Thinking: "想一下", ThinkingSignature: "sig-1"},
-				llm.TextContent{Text: "done"},
-			},
-			StopReason: llm.StopReasonStop,
-			Usage:      llm.Usage{InputTokens: 7, OutputTokens: 3},
-		},
-	)
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "gpt-test", Provider: "openai", API: llm.APIOpenAIResponses}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		session.Sink(sm, nil),
-	)
-	if _, err := a.Run(context.Background(), "hello"); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	// 找到落盘的会话文件并重载
-	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(matches) != 1 {
-		t.Fatalf("session files = %v, want exactly 1", matches)
-	}
-	reloaded, err := session.Open(matches[0], "/project")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	ctx := reloaded.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4 (user, tool-call assistant, toolResult, final assistant)", len(ctx.Messages))
-	}
-	if _, ok := ctx.Messages[0].(llm.UserMessage); !ok {
-		t.Errorf("first message type = %T, want UserMessage", ctx.Messages[0])
-	}
-	final, ok := ctx.Messages[3].(llm.AssistantMessage)
-	if !ok {
-		t.Fatalf("last message type = %T, want AssistantMessage", ctx.Messages[3])
-	}
-	if final.Provider != "openai" || final.Model != "gpt-test" {
-		t.Errorf("final assistant model = %s/%s, want openai/gpt-test", final.Provider, final.Model)
-	}
-	if len(final.Content) != 2 {
-		t.Fatalf("final content blocks = %d, want 2 (thinking, text)", len(final.Content))
-	}
-	thinking, ok := final.Content[0].(llm.ThinkingContent)
-	if !ok || thinking.Thinking != "想一下" || thinking.ThinkingSignature != "sig-1" {
-		t.Errorf("thinking block = %#v, want thinking with signature preserved", final.Content[0])
-	}
-	if ctx.Provider != "openai" || ctx.Model != "gpt-test" {
-		t.Errorf("context model = %s/%s, want openai/gpt-test", ctx.Provider, ctx.Model)
-	}
-}
-
-// summaryStreamFn 造一个始终返回固定摘要文本的假 StreamFn，供 Compactor 使用
-func summaryStreamFn(calls *int, text string) llm.StreamFn {
-	return func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		*calls++
-		ch := make(chan llm.AssistantMessageEvent, 1)
-		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
-			Content: []llm.Content{llm.TextContent{Text: text}},
-			Usage:   llm.Usage{InputTokens: 10, OutputTokens: 5},
-		}}
-		close(ch)
-		return ch, nil
-	}
-}
-
-func newCompactor(calls *int) *compaction.Compactor {
-	return &compaction.Compactor{
-		StreamFn: summaryStreamFn(calls, "COMPACT-SUMMARY"),
-		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
-	}
-}
-
-func isWrappedSummaryMessage(msg llm.Message) bool {
-	user, ok := msg.(llm.UserMessage)
-	if !ok || len(user.Content) != 1 {
-		return false
-	}
-	text, ok := user.Content[0].(llm.TextContent)
-	return ok && strings.Contains(text.Text, "<summary>") && strings.Contains(text.Text, "COMPACT-SUMMARY")
-}
-
-func TestAgentRunAutoCompactionBeforeNextTurn(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-			// 大额 usage 触发第二轮开始前的自动压缩
-			Usage: llm.Usage{InputTokens: 9800, OutputTokens: 10},
-		},
+		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonToolUse},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
-	compactCalls := 0
 	var events []llm.AgentEvent
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		func(event llm.AgentEvent) error {
-			events = append(events, event)
-			return nil
-		},
-	)
-	a.Compactor = newCompactor(&compactCalls)
+	coord := &recordingCoordinator{}
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	coord.replace = func() {
+		// 模拟编排层压缩：内存替换为摘要 + 保留尾部，只在首轮压缩一次
+		summary := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped summary"}}}
+		a.AgentContext.Messages = append([]llm.Message{summary}, a.AgentContext.Messages...)
+		coord.replace = nil
+	}
+	a.Coordinator = coord
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
+	if coord.compactions < 1 {
+		t.Fatalf("compactions = %d, want >= 1", coord.compactions)
 	}
-	// 压缩后上下文应为 [摘要, 保留的 a1, tr, 最终 assistant]
-	if len(a.AgentContext.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
-	}
-	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
-		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
-	}
-	if last, ok := a.AgentContext.Messages[3].(llm.AssistantMessage); !ok {
-		t.Errorf("messages[3] = %#v, want final assistant", a.AgentContext.Messages[3])
-	} else if text := last.Content[0].(llm.TextContent).Text; text != "done" {
-		t.Errorf("final = %q, want done", text)
-	}
-	// 事件序：工具结果之后先压缩再发起新一轮
-	sawCompactionStart, sawCompactionEnd := false, false
-	for _, event := range events {
-		switch e := event.(type) {
-		case llm.CompactionStartEvent:
-			if e.Reason != "auto" {
-				t.Errorf("compaction reason = %q, want auto", e.Reason)
-			}
-			sawCompactionStart = true
-		case llm.CompactionEndEvent:
-			sawCompactionEnd = true
-			if e.Summary != "COMPACT-SUMMARY" || e.KeptMessageCount != 2 {
-				t.Errorf("compaction end = %+v", e)
-			}
+	// 压缩后 agent_end 只汇总压缩后的新增消息，不越界
+	var agentEnd *llm.AgentEndEvent
+	for i := range events {
+		if e, ok := events[i].(llm.AgentEndEvent); ok {
+			agentEnd = &e
 		}
 	}
-	if !sawCompactionStart || !sawCompactionEnd {
-		t.Errorf("compaction events missing: start=%v end=%v", sawCompactionStart, sawCompactionEnd)
+	if agentEnd == nil {
+		t.Fatal("agent_end event missing")
+	}
+	// agent_end 汇总压缩后的新增消息：工具调用 assistant、工具结果、最终回复
+	if len(agentEnd.Messages) != 3 {
+		t.Errorf("agent_end messages = %d, want 3", len(agentEnd.Messages))
 	}
 }
 
-func TestAgentRunOverflowRetriesOnce(t *testing.T) {
-	runCalls := 0
+// TestAgentNotifiesOverflowOnError 验证显式溢出错误经 finishModelError 收场前通知编排层
+func TestAgentNotifiesOverflowOnError(t *testing.T) {
+	calls := 0
 	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		i := runCalls
-		runCalls++
-		ch := make(chan llm.AssistantMessageEvent, 1)
-		if i == 0 {
-			ch <- llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)}
-		} else {
-			ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
-				Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop,
-			}}
-		}
-		close(ch)
-		return ch, nil
-	}
-	compactCalls := 0
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	a.Compactor = newCompactor(&compactCalls)
-	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
-	seed := []llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
-	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
-
-	if _, err := a.Run(context.Background(), "hi"); err != nil {
-		t.Fatal(err)
-	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
-	}
-	// 失败尝试不进入上下文：摘要替换历史后保留 [a0, u1]，重试成功追加 done
-	if len(a.AgentContext.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
-	}
-	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
-		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
-	}
-}
-
-func TestAgentRunSecondOverflowFails(t *testing.T) {
-	runCalls := 0
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		runCalls++
+		calls++
 		ch := make(chan llm.AssistantMessageEvent, 1)
 		ch <- llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)}
 		close(ch)
 		return ch, nil
 	}
-	compactCalls := 0
+	coord := &recordingCoordinator{}
 	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	a.Compactor = newCompactor(&compactCalls)
-	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
-	seed := []llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
-	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
+	a.Coordinator = coord
 
 	message, err := a.Run(context.Background(), "hi")
 	if err == nil {
-		t.Fatal("second overflow should fail the run")
+		t.Fatal("overflow error should end the run")
 	}
 	if message == nil || message.StopReason != llm.StopReasonError {
 		t.Fatalf("message = %+v, want error assistant", message)
 	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
+	if coord.notifies != 1 {
+		t.Errorf("notifies = %d, want 1", coord.notifies)
+	}
+	// 失败尝试照常提交进上下文
+	if got := len(a.AgentContext.Messages); got != 2 {
+		t.Errorf("messages = %d, want 2", got)
 	}
 }
 
-func TestAgentRunLengthStopRetriesOnce(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		// 输出 50 token 远小于上限 100，截断来自上下文耗尽，可恢复
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "partial"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
+// TestAgentNotifiesOverflowOnRecoverableLength 验证可恢复的长度截断提交消息后通知编排层，且不执行工具
+func TestAgentNotifiesOverflowOnRecoverableLength(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
 	)
-	compactCalls := 0
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{}, streamFn, nil)
-	a.Compactor = newCompactor(&compactCalls)
-	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史
-	seed := []llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
-	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
+	coord := &recordingCoordinator{}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, nil)
+	a.Coordinator = coord
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
+	if coord.notifies != 1 {
+		t.Errorf("notifies = %d, want 1", coord.notifies)
 	}
-	for _, msg := range a.AgentContext.Messages {
-		if assistant, ok := msg.(llm.AssistantMessage); ok && assistant.StopReason == llm.StopReasonLength {
-			t.Error("length-stopped attempt should not stay in context")
-		}
-	}
-	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
-		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
+	// 截断消息正常提交进上下文
+	if got := len(a.AgentContext.Messages); got != 2 {
+		t.Errorf("messages = %d, want 2", got)
 	}
 }
 
-func TestAgentCompactNowManual(t *testing.T) {
-	compactCalls := 0
-	compactor := newCompactor(&compactCalls)
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil)
-	a.Compactor = compactor
-	// 手工注入一段历史，压缩应把它替换为摘要
-	longText := strings.Repeat("a", 200)
-	a.AgentContext.Messages = append(a.AgentContext.Messages,
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: longText}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: longText}}},
-	)
-
-	if err := a.CompactNow(context.Background(), "focus on tests"); err != nil {
-		t.Fatal(err)
-	}
-	if compactCalls != 1 {
-		t.Fatalf("compact calls = %d, want 1", compactCalls)
-	}
-	// 保留预算极小但仍会保留最后一条消息：[摘要, assistant]
-	if len(a.AgentContext.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(a.AgentContext.Messages))
-	}
-	if !isWrappedSummaryMessage(a.AgentContext.Messages[0]) {
-		t.Errorf("messages[0] = %#v, want wrapped summary", a.AgentContext.Messages[0])
-	}
-	if _, ok := a.AgentContext.Messages[1].(llm.AssistantMessage); !ok {
-		t.Errorf("messages[1] = %#v, want kept assistant message", a.AgentContext.Messages[1])
-	}
-}
-
-func TestAgentCompactNowDisabled(t *testing.T) {
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil)
-	if err := a.CompactNow(context.Background(), ""); err == nil {
-		t.Fatal("CompactNow without Compactor should fail")
-	}
-}
-
-// TestAgentRunCompactionPersistsSessionTree 验证压缩经 session.Sink 落盘后可完整回放
-func TestAgentRunCompactionPersistsSessionTree(t *testing.T) {
-	dir := t.TempDir()
-	sm := session.New("/project", dir)
-
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-			Usage:      llm.Usage{InputTokens: 9800, OutputTokens: 10},
-		},
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.TextContent{Text: "done"}},
-			StopReason: llm.StopReasonStop,
-			Usage:      llm.Usage{InputTokens: 30, OutputTokens: 5},
-		},
-	)
-	compactCalls := 0
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		session.Sink(sm, nil),
-	)
-	a.Compactor = newCompactor(&compactCalls)
-	if _, err := a.Run(context.Background(), "hello"); err != nil {
-		t.Fatal(err)
-	}
-
-	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(matches) != 1 {
-		t.Fatalf("session files = %v, want exactly 1", matches)
-	}
-	reloaded, err := session.Open(matches[0], "/project")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	// 回放应为 [摘要, 保留的 tool-call assistant, tool result, 压缩后新增的 final assistant]
-	ctx := reloaded.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("replayed messages = %d, want 4", len(ctx.Messages))
-	}
-	if text := replaySummaryText(t, ctx.Messages[0]); !strings.Contains(text, "COMPACT-SUMMARY") {
-		t.Errorf("messages[0] = %q, want wrapped COMPACT-SUMMARY", text)
-	}
-	if _, ok := ctx.Messages[1].(llm.AssistantMessage); !ok {
-		t.Errorf("messages[1] = %#v, want kept assistant message", ctx.Messages[1])
-	}
-	final, ok := ctx.Messages[3].(llm.AssistantMessage)
-	if !ok || len(final.Content) != 1 {
-		t.Fatalf("messages[3] = %#v, want final assistant", ctx.Messages[3])
-	}
-	if text, ok := final.Content[0].(llm.TextContent); !ok || text.Text != "done" {
-		t.Errorf("final assistant = %#v, want done", final.Content)
-	}
-	if ctx.LastSummary != "COMPACT-SUMMARY" {
-		t.Errorf("LastSummary = %q, want COMPACT-SUMMARY", ctx.LastSummary)
-	}
-}
-
-func replaySummaryText(t *testing.T, msg llm.Message) string {
-	t.Helper()
-	user, ok := msg.(llm.UserMessage)
-	if !ok || len(user.Content) != 1 {
-		t.Fatalf("message = %#v, want user message", msg)
-	}
-	text, _ := user.Content[0].(llm.TextContent)
-	return text.Text
-}
-
-func TestAgentRunLengthAtMaxTokensNotRecovered(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		// 输出达到上限 100，截断来自输出限制而非上下文耗尽，按正常消息提交
+// TestAgentLengthAtMaxTokensNotRecovered 验证达到输出上限的截断不通知编排层
+func TestAgentLengthAtMaxTokensNotRecovered(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "capped"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 100}},
 	)
-	compactCalls := 0
+	coord := &recordingCoordinator{}
 	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{}, streamFn, nil)
-	a.Compactor = newCompactor(&compactCalls)
+	a.Coordinator = coord
 
 	reply, err := a.Run(context.Background(), "hi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runCalls != 1 || compactCalls != 0 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 1 and 0", runCalls, compactCalls)
+	if coord.notifies != 0 {
+		t.Errorf("notifies = %d, want 0", coord.notifies)
 	}
 	if reply.StopReason != llm.StopReasonLength {
 		t.Errorf("reply stop reason = %q, want length", reply.StopReason)
 	}
-	if got := len(a.AgentContext.Messages); got != 2 {
-		t.Errorf("messages = %d, want 2 (length message stays)", got)
+}
+
+// TestAgentCompactionDeadlineEndsRun 验证压缩回调超时中止直接结束运行
+func TestAgentCompactionDeadlineEndsRun(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	coord := &recordingCoordinator{compactErr: context.DeadlineExceeded}
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	a.Coordinator = coord
+
+	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
+	}
+	if calls != 0 {
+		t.Errorf("stream calls = %d, want 0 (expired ctx must not reach the model)", calls)
 	}
 }
 
-// TestAgentSilentOverflowCompaction 验证响应成功但 usage 超窗时按 overflow 原因压缩
-func TestAgentSilentOverflowCompaction(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-			Usage:      llm.Usage{InputTokens: 20000},
-		},
+// TestAgentRecoverableLengthWithoutCoordinatorRunsTools 验证未启用编排层时，
+// 可恢复的长度截断不跳过工具执行（与旧行为一致）
+func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
-	compactCalls := 0
-	var reasons []string
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		func(event llm.AgentEvent) error {
-			if end, ok := event.(llm.CompactionEndEvent); ok {
-				reasons = append(reasons, end.Reason)
-			}
-			return nil
-		},
-	)
-	a.Compactor = newCompactor(&compactCalls)
+	ping := &fakeTool{name: "ping"}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, streamFn, nil)
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
+	if len(ping.arguments) != 1 {
+		t.Errorf("tool calls = %d, want 1 (tools must run without a coordinator)", len(ping.arguments))
 	}
-	if len(reasons) != 1 || reasons[0] != "overflow" {
-		t.Errorf("compaction reasons = %v, want [overflow]", reasons)
+	if calls != 2 {
+		t.Errorf("stream calls = %d, want 2", calls)
 	}
-}
-
-// TestAgentNoRepeatedCompactionAfterStaleUsage 验证压缩后陈旧 usage 不会立刻再次触发压缩
-func TestAgentNoRepeatedCompactionAfterStaleUsage(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-			// 大额 usage 触发阈值压缩，且压缩后保留尾部仍带着它
-			Usage: llm.Usage{InputTokens: 9800},
-		},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
-	)
-	compactCalls := 0
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		nil,
-	)
-	a.Compactor = newCompactor(&compactCalls)
-
-	if _, err := a.Run(context.Background(), "hi"); err != nil {
-		t.Fatal(err)
-	}
-	// 若无陈旧防护，压缩后保留尾部的 9800 usage 会让第二轮循环再次压缩
-	if compactCalls != 1 {
-		t.Fatalf("compact calls = %d, want 1 (no repeated compaction)", compactCalls)
-	}
-}
-
-// TestAgentCompactionFailureDegrades 验证压缩失败降级为失败事件，运行以原上下文继续
-func TestAgentCompactionFailureDegrades(t *testing.T) {
-	runCalls := 0
-	streamFn := doneStreamFn(&runCalls,
-		llm.AssistantMessage{
-			Content:    []llm.Content{llm.ToolCall{ID: "c1", Name: "ping", Arguments: map[string]any{}}},
-			StopReason: llm.StopReasonToolUse,
-			Usage:      llm.Usage{InputTokens: 9800},
-		},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
-	)
-	// 摘要恒定失败且不可重试
-	compactCalls := 0
-	failStreamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		compactCalls++
-		ch := make(chan llm.AssistantMessageEvent, 1)
-		ch <- llm.AssistantMessageErrorEvent{Err: errors.New("provider down")}
-		close(ch)
-		return ch, nil
-	}
-	var failEvents []llm.CompactionEndEvent
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}},
-		streamFn,
-		func(event llm.AgentEvent) error {
-			if end, ok := event.(llm.CompactionEndEvent); ok && end.Error != "" {
-				failEvents = append(failEvents, end)
-			}
-			return nil
-		},
-	)
-	a.Compactor = &compaction.Compactor{StreamFn: failStreamFn, Config: newCompactor(&compactCalls).Config}
-
-	reply, err := a.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatalf("Run should degrade instead of failing: %v", err)
-	}
-	if text, ok := reply.Content[0].(llm.TextContent); !ok || text.Text != "done" {
-		t.Errorf("reply = %#v, want done", reply.Content)
-	}
-	if runCalls != 2 || compactCalls != 1 {
-		t.Fatalf("run calls = %d, compact calls = %d, want 2 and 1", runCalls, compactCalls)
-	}
-	if len(failEvents) != 1 || failEvents[0].Reason != "auto" || failEvents[0].Error == "" {
-		t.Fatalf("failure events = %+v, want one auto failure", failEvents)
-	}
-	// 失败不落盘不换内存：上下文仍是完整历史
 	if got := len(a.AgentContext.Messages); got != 4 {
-		t.Errorf("messages = %d, want 4 (compaction did not apply)", got)
-	}
-}
-
-// TestAgentOverflowRecoveryPersistsOmission 验证溢出恢复把失败尝试落盘并追加省略标记
-func TestAgentOverflowRecoveryPersistsOmission(t *testing.T) {
-	dir := t.TempDir()
-	sm := session.New("/project", dir)
-	runCalls := 0
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		i := runCalls
-		runCalls++
-		ch := make(chan llm.AssistantMessageEvent, 1)
-		if i == 0 {
-			ch <- llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)}
-		} else {
-			ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
-				Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop,
-			}}
-		}
-		close(ch)
-		return ch, nil
-	}
-	compactCalls := 0
-	sink := session.Sink(sm, nil)
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, sink)
-	a.Compactor = newCompactor(&compactCalls)
-	// 预置一轮历史：溢出恢复需要首条消息之前有可摘要的历史；
-	// 预置消息同样经 sink 落盘，保持消息序与镜像对齐
-	seed := []llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier context"}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
-	}
-	for _, msg := range seed {
-		if err := sink(llm.MessageEndEvent{Message: msg}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
-
-	if _, err := a.Run(context.Background(), "hi"); err != nil {
-		t.Fatal(err)
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(matches) != 1 {
-		t.Fatalf("session files = %v, want exactly 1", matches)
-	}
-	reloaded, err := session.Open(matches[0], "/project")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 磁盘上保留失败尝试与省略标记，供审计回放
-	data, err := os.ReadFile(matches[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	hasOmittedAttempt := false
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		var obj struct {
-			Type        string           `json:"type"`
-			Replacement *json.RawMessage `json:"replacement"`
-		}
-		if json.Unmarshal(line, &obj) != nil {
-			continue
-		}
-		if obj.Type == "context_edit" && obj.Replacement == nil {
-			hasOmittedAttempt = true
-		}
-	}
-	if !hasOmittedAttempt {
-		t.Fatal("session file should contain a context_edit omission marker")
-	}
-	// 回放后失败尝试在投影中消失
-	ctx := reloaded.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("replayed messages = %d, want 4 (summary, a0, u1, done)", len(ctx.Messages))
-	}
-	final, ok := ctx.Messages[3].(llm.AssistantMessage)
-	if !ok {
-		t.Fatalf("messages[3] = %T, want done assistant", ctx.Messages[3])
-	}
-	if text, _ := final.Content[0].(llm.TextContent); text.Text != "done" {
-		t.Errorf("final = %#v, want done", final.Content)
+		t.Errorf("messages = %d, want 4", got)
 	}
 }

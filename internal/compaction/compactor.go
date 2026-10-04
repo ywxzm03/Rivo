@@ -127,14 +127,16 @@ func (c *Compactor) summarizeRegion(ctx context.Context, messages []llm.Message,
 }
 
 // summarizeOnce 发起一次无工具的独立 LLM 调用并取回完整文本；
+// 输出上限取 min(0.8 × ReserveTokens, Model.MaxTokens)，防止摘要跑满输出上限被截断；
 // 瞬时错误按重试策略退避重试，响应先经质量校验——截断、报错或携带工具调用的摘要绝不返回
 func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, llm.Usage, error) {
 	modelCtx := llm.Context{
 		SystemPrompt: SummarizerSystemPrompt,
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: prompt}}}},
 	}
+	opts := llm.Options{MaxTokens: c.summaryMaxTokens()}
 	produce := func() (string, llm.Usage, error) {
-		events, err := c.StreamFn(ctx, c.Model, modelCtx, llm.Options{})
+		events, err := c.StreamFn(ctx, c.Model, modelCtx, opts)
 		if err != nil {
 			return "", llm.Usage{}, fmt.Errorf("compaction: 摘要调用失败: %w", err)
 		}
@@ -168,6 +170,15 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 		return text, usage, nil
 	}
 	return retrySummarize(ctx, c.Retry, produce)
+}
+
+// summaryMaxTokens 计算摘要调用的输出上限：预留量的八成与模型输出上限取小者
+func (c *Compactor) summaryMaxTokens() int {
+	maxTokens := c.Config.ReserveTokens * 4 / 5
+	if modelMax := c.Model.MaxTokens; modelMax > 0 && modelMax < maxTokens {
+		maxTokens = modelMax
+	}
+	return maxTokens
 }
 
 // summaryText 拼接摘要消息中的文本块

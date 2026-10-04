@@ -138,7 +138,6 @@ const (
 	AgentEventToolExecutionEnd    = "tool_execution_end"
 	AgentEventCompactionStart     = "compaction_start"
 	AgentEventCompactionEnd       = "compaction_end"
-	AgentEventCompactionOmit      = "compaction_omit"
 )
 
 // AgentEvent 的消费者主要是TUI渲染，自动压缩等Agent级事件
@@ -154,6 +153,8 @@ func (AgentStartEvent) agentEvent()  {}
 
 type AgentEndEvent struct {
 	Messages []Message
+	// WillRetry 由编排层在转发时标注：本轮以可恢复的上下文溢出收场且即将续接重试
+	WillRetry bool
 }
 
 func (AgentEndEvent) Type() string { return AgentEventAgentEnd }
@@ -247,13 +248,6 @@ type CompactionEndEvent struct {
 
 func (CompactionEndEvent) Type() string { return AgentEventCompactionEnd }
 func (CompactionEndEvent) agentEvent()  {}
-
-// CompactionOmitEvent 溢出恢复时把刚落盘的失败尝试从模型投影中移除：
-// 会话文件只追加，持久层保留原始条目供审计回放，投影层经 context_edit(replacement=null) 排除
-type CompactionOmitEvent struct{}
-
-func (CompactionOmitEvent) Type() string { return AgentEventCompactionOmit }
-func (CompactionOmitEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 
