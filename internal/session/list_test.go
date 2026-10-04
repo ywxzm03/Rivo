@@ -158,3 +158,19 @@ func TestListSessionsUsesDefaultDir(t *testing.T) {
 		t.Fatalf("ListSessions() = %+v, want the session under DefaultDir", infos)
 	}
 }
+
+func TestListSessionsOversizedLineStillSummarized(t *testing.T) {
+	dir := t.TempDir()
+	// 单行超过旧 Scanner 4MB 上限的 user 消息（如内嵌 base64 图片）也必须产出摘要
+	huge := strings.Repeat("图", 4*1024*1024)
+	newSessionFile(t, dir, "/tmp/proj", huge)
+
+	infos, err := listSessionsInDir(dir)
+	if err != nil {
+		t.Fatalf("listSessionsInDir() error = %v", err)
+	}
+	want := strings.Repeat("图", summaryMaxRunes) + "..."
+	if infos[0].Summary != want {
+		t.Errorf("summary = %d runes, want %d runes with ellipsis", len([]rune(infos[0].Summary)), len([]rune(want)))
+	}
+}

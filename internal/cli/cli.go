@@ -119,7 +119,7 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("app: 获取工作目录失败: %w", err)
+		return nil, fmt.Errorf("获取工作目录失败: %w", err)
 	}
 	infos, err := session.ListSessions(cwd)
 	if err != nil {
@@ -176,13 +176,17 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.解析参数：--continue 与 --resume 本阶段同路径，恢复最近会话；--help 一旦出现即优先
+	// 1.先扫描 --help：一旦出现即优先展示帮助，不再校验其余参数
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			fmt.Fprint(stdout, helpText)
+			return 0
+		}
+	}
+	// 2.解析恢复参数：--continue 与 --resume 本阶段同路径，恢复最近会话
 	continueRecent := false
-	helpRequested := false
 	for _, arg := range args {
 		switch arg {
-		case "--help", "-h":
-			helpRequested = true
 		case "--continue", "--resume":
 			continueRecent = true
 		default:
@@ -190,10 +194,6 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "请运行 'Rivo --help' 查看用法。")
 			return 2
 		}
-	}
-	if helpRequested {
-		fmt.Fprint(stdout, helpText)
-		return 0
 	}
 	return repl(continueRecent, stdin, stdout, stderr)
 }

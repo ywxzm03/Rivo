@@ -70,40 +70,35 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 }
 
 // firstUserSummary 逐行扫描会话文件，返回首条用户消息折叠空白后的截断摘要；
-// 读取失败或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史
+// 读取失败或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史；
+// 用 ReadString 而非 Scanner，单行长度不限（user 消息内嵌 base64 图片时单行可能极大）
 func firstUserSummary(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	// 会话单行可能很长，放宽扫描缓冲上限
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadString('\n')
+		trimmed := bytes.TrimSpace([]byte(line))
+		if len(trimmed) > 0 {
+			var probe entryLine
+			if json.Unmarshal(trimmed, &probe) == nil && probe.Type != TypeSession {
+				entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
+				if decodeErr == nil {
+					if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
+						// 1.多行输入折叠为单空格，避免破坏编号列表排版
+						return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
+					}
+				}
+			}
 		}
-		var probe entryLine
-		if err := json.Unmarshal(line, &probe); err != nil {
-			continue
-		}
-		if probe.Type == TypeSession {
-			continue
-		}
-		entry, err := decodeEntry(probe.Type, string(line))
 		if err != nil {
-			continue
+			// 2.EOF 或读取错误均停止：EOF 前已处理完剩余内容
+			return ""
 		}
-		me, ok := entry.(*MessageEntry)
-		if !ok || messageRole(me.Message) != "user" {
-			continue
-		}
-		// 1.多行输入折叠为单空格，避免破坏编号列表排版
-		return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
 	}
-	return ""
 }
 
 // userText 拼接用户消息中的全部文本块

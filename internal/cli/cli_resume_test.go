@@ -203,3 +203,18 @@ func TestRelativeTimeFutureFallsBackToDate(t *testing.T) {
 		t.Errorf("relativeTime(future) = %q, want date %q", got, future.Format("2006-01-02"))
 	}
 }
+
+func TestRunUnknownArgBeforeHelpStillShowsHelp(t *testing.T) {
+	useTestEnv(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--bad", "--help"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "Usage") {
+		t.Errorf("stdout = %q, want help text", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}

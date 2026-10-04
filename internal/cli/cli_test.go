@@ -63,8 +63,8 @@ func TestRun(t *testing.T) {
 		{
 			name:       "help with unknown option",
 			args:       []string{"--help", "--unknown"},
-			wantCode:   2,
-			wantStderr: "Rivo: 不支持的参数 \"--unknown\"\n请运行 'Rivo --help' 查看用法。\n",
+			wantCode:   0,
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
 		},
 		{
 			name:       "version is not implemented",
