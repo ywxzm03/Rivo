@@ -18,6 +18,8 @@ func TestRunREPL(t *testing.T) {
 		return nil
 	},
 		nil,
+		nil,
+		nil,
 	)
 
 	if code != 0 {
@@ -46,6 +48,8 @@ func TestRunREPLLineBeyondScannerLimit(t *testing.T) {
 		return nil
 	},
 		nil,
+		nil,
+		nil,
 	)
 
 	if code != 0 {
@@ -73,6 +77,8 @@ func TestRunREPLContinuesAfterAgentError(t *testing.T) {
 		return sentinel
 	},
 		nil,
+		nil,
+		nil,
 	)
 
 	if code != 0 {
@@ -98,6 +104,8 @@ func TestRunREPLEOF(t *testing.T) {
 		inputs = append(inputs, input)
 		return nil
 	},
+		nil,
+		nil,
 		nil,
 	)
 
@@ -130,7 +138,9 @@ func TestRunREPLCompactCommand(t *testing.T) {
 		func(_ context.Context, instruction string) error {
 			instructions = append(instructions, instruction)
 			return nil
-		})
+		},
+		nil,
+		nil)
 
 	if code != 0 {
 		t.Fatalf("runREPL() code = %d, want 0", code)
@@ -158,7 +168,9 @@ func TestRunREPLCompactErrorContinues(t *testing.T) {
 		},
 		func(_ context.Context, _ string) error {
 			return sentinel
-		})
+		},
+		nil,
+		nil)
 
 	if code != 0 {
 		t.Fatalf("runREPL() code = %d, want 0", code)
