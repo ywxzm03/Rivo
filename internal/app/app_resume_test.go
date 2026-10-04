@@ -56,6 +56,17 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	if a.agent.AgentConfig.Model.ID != openai.DefaultModel {
 		t.Errorf("agent model = %q, want %q", a.agent.AgentConfig.Model.ID, openai.DefaultModel)
 	}
+	// 2.投影消息已注入 Agent 内存上下文，恢复的会话真正接上历史
+	if len(a.agent.AgentContext.Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
+	}
+	if u, ok := a.agent.AgentContext.Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("agent message[0] type = %T, want UserMessage", a.agent.AgentContext.Messages[0])
+	} else {
+		if text, ok := u.Content[0].(llm.TextContent); !ok || text.Text != "hello resume" {
+			t.Errorf("agent message[0] = %+v, want the restored user message", u)
+		}
+	}
 	// 3.恢复后的会话即时落盘，继续追加写入同一文件
 	if err := a.session.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "after resume"}}}); err != nil {
 		t.Fatalf("AppendMessage() error = %v", err)
@@ -89,7 +100,11 @@ func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
 		t.Errorf("agent model = %q, want fallback %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
 	}
-	// 2.会话内容不受模型回退影响
+	// 2.模型回退不影响历史上下文注入
+	if len(a.agent.AgentContext.Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
+	}
+	// 3.会话内容不受模型回退影响
 	if ctx := a.session.BuildContext(); len(ctx.Messages) != 1 {
 		t.Fatalf("projection messages = %d, want 1", len(ctx.Messages))
 	}
@@ -129,6 +144,10 @@ func TestOpenWithoutModelRecordUsesEnvConfig(t *testing.T) {
 	}
 	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
 		t.Errorf("agent model = %q, want env default %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
+	}
+	// 无模型记录的会话（仅有 user 消息）历史同样注入
+	if len(a.agent.AgentContext.Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
 	}
 }
 

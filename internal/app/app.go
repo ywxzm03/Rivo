@@ -38,28 +38,47 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		return nil, err
 	}
 	proj := sm.BuildContext()
+	a, warning, err := assembleResume(cfg, proj, sm, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	// 1.投影消息注入运行期上下文，恢复的会话才真正接上历史
+	if len(proj.Messages) > 0 {
+		a.agent.ReplaceMessages(proj.Messages)
+	}
+	a.modelFallback = warning
+	return a, nil
+}
+
+// assembleResume 按投影模型装配运行链，解析失败回退 env 默认模型并返回回退警告
+func assembleResume(cfg Config, proj session.SessionContext, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
 	if proj.Provider == "" || proj.Model == "" {
-		return newApp(cfg, sm, onEvent)
+		a, err := newApp(cfg, sm, onEvent)
+		return a, "", err
 	}
 	a, err := newAppWithModel(cfg, proj.Provider, proj.Model, sm, onEvent)
 	if err == nil {
-		return a, nil
+		return a, "", nil
 	}
 	// 1.投影模型解析失败回退 env 默认模型，env 也失败按启动失败处理
+	a, err = newApp(cfg, sm, onEvent)
+	if err != nil {
+		return nil, "", err
+	}
+	return a, fallbackWarning(cfg, proj), nil
+}
+
+// fallbackWarning 拼回退警告文案；newApp 装配已成功，说明 env 厂商必然有效
+func fallbackWarning(cfg Config, proj session.SessionContext) string {
 	spec, err := lookupProvider(cfg.ProviderID)
 	if err != nil {
-		return nil, err
+		return ""
 	}
 	modelID := cfg.ModelID
 	if modelID == "" {
 		modelID = spec.defaultModel
 	}
-	a, err = newAppWithModel(cfg, spec.id, modelID, sm, onEvent)
-	if err != nil {
-		return nil, err
-	}
-	a.modelFallback = fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, spec.id, modelID)
-	return a, nil
+	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, spec.id, modelID)
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
@@ -96,6 +115,9 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 
 	models, streamFn := spec.new(cfg.APIKey, cfg.BaseURL)
+	if modelID == "" {
+		modelID = spec.defaultModel
+	}
 	model, err := findModel(spec.id, models, modelID)
 	if err != nil {
 		return nil, err
