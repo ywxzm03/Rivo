@@ -54,7 +54,7 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if modelID == "" {
 		modelID = spec.defaultModel
 	}
-	a, err = newApp(cfg, sm, onEvent)
+	a, err = newAppWithModel(cfg, spec.id, modelID, sm, onEvent)
 	if err != nil {
 		return nil, err
 	}

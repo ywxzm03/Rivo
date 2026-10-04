@@ -132,6 +132,26 @@ func TestOpenWithoutModelRecordUsesEnvConfig(t *testing.T) {
 	}
 }
 
+func TestOpenFallsBackToDefaultModelWhenEnvModelEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
+
+	// env 未配 MODEL 时回退装配用厂商默认模型，而不是拿空 modelID 去匹配失败
+	a, err := Open(path, Config{
+		ProviderID: deepseek.ProviderID,
+		APIKey:     "test-key",
+	}, nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
+		t.Errorf("agent model = %q, want default %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
+	}
+	if !strings.Contains(a.ModelFallbackMessage(), "Using "+deepseek.ProviderID+"/"+deepseek.DefaultModel) {
+		t.Errorf("ModelFallbackMessage() = %q, want it to name the default model", a.ModelFallbackMessage())
+	}
+}
+
 func TestOpenErrorsWhenFallbackModelUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")

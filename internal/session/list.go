@@ -1,6 +1,9 @@
 package session
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,27 +59,49 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 			Summary: firstUserSummary(path),
 		})
 	}
-	// 1.修改时间倒序，最新的排最前，恢复取第一项
-	sort.Slice(infos, func(i, j int) bool { return infos[i].ModTime.After(infos[j].ModTime) })
+	// 1.修改时间倒序，最新的排最前，恢复取第一项；同时间戳按路径保证顺序确定
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].ModTime.Equal(infos[j].ModTime) {
+			return infos[i].Path < infos[j].Path
+		}
+		return infos[i].ModTime.After(infos[j].ModTime)
+	})
 	return infos, nil
 }
 
-// firstUserSummary 读取会话文件并返回首条用户消息的截断摘要；读取失败或无对话内容时返回空串
+// firstUserSummary 逐行扫描会话文件，返回首条用户消息折叠空白后的截断摘要；
+// 读取失败或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史
 func firstUserSummary(path string) string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	_, entries, err := parseFile(data)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		me, ok := e.(*MessageEntry)
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	// 会话单行可能很长，放宽扫描缓冲上限
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var probe entryLine
+		if err := json.Unmarshal(line, &probe); err != nil {
+			continue
+		}
+		if probe.Type == TypeSession {
+			continue
+		}
+		entry, err := decodeEntry(probe.Type, string(line))
+		if err != nil {
+			continue
+		}
+		me, ok := entry.(*MessageEntry)
 		if !ok || messageRole(me.Message) != "user" {
 			continue
 		}
-		return truncateRunes(userText(me.Message), summaryMaxRunes)
+		// 1.多行输入折叠为单空格，避免破坏编号列表排版
+		return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
 	}
 	return ""
 }

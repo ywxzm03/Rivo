@@ -85,6 +85,44 @@ func TestListSessionsTruncatesSummary(t *testing.T) {
 	}
 }
 
+func TestListSessionsCollapsesMultilineSummary(t *testing.T) {
+	dir := t.TempDir()
+	newSessionFile(t, dir, "/tmp/proj", "第一行\n第二行\t第三行")
+
+	infos, err := listSessionsInDir(dir)
+	if err != nil {
+		t.Fatalf("listSessionsInDir() error = %v", err)
+	}
+	want := "第一行 第二行 第三行"
+	if infos[0].Summary != want {
+		t.Errorf("summary = %q, want %q", infos[0].Summary, want)
+	}
+}
+
+func TestListSessionsBreaksModTimeTiesByPath(t *testing.T) {
+	dir := t.TempDir()
+	first := newSessionFile(t, dir, "/tmp/proj", "aaa")
+	second := newSessionFile(t, dir, "/tmp/proj", "bbb")
+	// 文件名含时间戳与随机 ID，路径序与创建序不保证一致；把修改时间强制对齐后顺序必须只由路径决定
+	when := time.Now()
+	for _, p := range []string{first, second} {
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	infos, err := listSessionsInDir(dir)
+	if err != nil {
+		t.Fatalf("listSessionsInDir() error = %v", err)
+	}
+	if len(infos) != 2 {
+		t.Fatalf("listSessionsInDir() = %d sessions, want 2", len(infos))
+	}
+	if infos[0].Path >= infos[1].Path {
+		t.Errorf("paths not ascending on tie: %q then %q", infos[0].Path, infos[1].Path)
+	}
+}
+
 func TestListSessionsEmptyFileHasEmptySummary(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "2026_empty_session.jsonl")

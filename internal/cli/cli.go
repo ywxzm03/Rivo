@@ -93,7 +93,10 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout)
 		}
 		return err
-	}, a.Compact, func() ([]session.SessionInfo, error) {
+	}, func(ctx context.Context, instructions string) error {
+		// 经闭包取当前 a，保证 /resume 替换实例后压缩作用于新会话
+		return a.Compact(ctx, instructions)
+	}, func() ([]session.SessionInfo, error) {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, err
@@ -173,22 +176,22 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.解析参数：--continue 与 --resume 本阶段同路径，恢复最近会话
+	// 1.解析参数：--continue 与 --resume 本阶段同路径，恢复最近会话；--help 一旦出现即优先
 	continueRecent := false
-	helpOnly := len(args) > 0
+	helpRequested := false
 	for _, arg := range args {
 		switch arg {
 		case "--help", "-h":
+			helpRequested = true
 		case "--continue", "--resume":
 			continueRecent = true
-			helpOnly = false
 		default:
 			fmt.Fprintf(stderr, "Rivo: 不支持的参数 %q\n", arg)
 			fmt.Fprintln(stderr, "请运行 'Rivo --help' 查看用法。")
 			return 2
 		}
 	}
-	if helpOnly {
+	if helpRequested {
 		fmt.Fprint(stdout, helpText)
 		return 0
 	}

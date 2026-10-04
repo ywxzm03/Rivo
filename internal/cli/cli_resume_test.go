@@ -46,16 +46,19 @@ func TestRunContinueWithoutSessionsStartsNewRepl(t *testing.T) {
 	}
 }
 
-func TestRunContinueAcceptsHelpFlagOnly(t *testing.T) {
+func TestRunHelpTakesPrecedenceOverContinue(t *testing.T) {
 	useTestEnv(t)
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"--help", "--continue"}, strings.NewReader(""), &stdout, &stderr)
-	// --continue 与 --help 同时出现时以恢复模式启动，忽略 help
+	// 显式请求帮助时优先展示 help，不进入 REPL
 	if code != 0 {
 		t.Fatalf("Run() code = %d, want 0", code)
 	}
-	if strings.Contains(stdout.String(), "Usage") {
-		t.Errorf("stdout = %q, want REPL output instead of help", stdout.String())
+	if !strings.Contains(stdout.String(), "Usage") {
+		t.Errorf("stdout = %q, want help text", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "> ") {
+		t.Errorf("stdout = %q, want no REPL prompt", stdout.String())
 	}
 }
 
