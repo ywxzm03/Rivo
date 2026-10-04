@@ -17,6 +17,10 @@ func useConfigHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("RIVO_AGENT_DIR", dir)
+	// 清除本机可能导出的内置 provider 凭据，保证解析链测试不受开发环境干扰；
+	// 需要凭据的测试在调用本 helper 之后自行设置
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	return dir
 }
 

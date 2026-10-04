@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/config"
@@ -74,7 +75,11 @@ func Load() (Config, error) {
 		return cfg, nil
 	}
 	// 3.3 首个有凭据的 provider：models.json 文件顺序优先，其后内置 openai
-	for _, id := range append(order, openai.ProviderID) {
+	// （models.json 已定义 openai 时不重复追加）
+	if !slices.Contains(order, openai.ProviderID) {
+		order = append(order, openai.ProviderID)
+	}
+	for _, id := range order {
 		if spec, ok := cfg.registry[id]; ok && spec.apiKey != "" {
 			cfg.ProviderID, cfg.ModelID = spec.id, spec.defaultModel
 			return cfg, nil
