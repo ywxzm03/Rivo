@@ -46,6 +46,13 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if len(proj.Messages) > 0 {
 		a.agent.ReplaceMessages(proj.Messages)
 	}
+	// 2.思考等级：settings 默认优先；未配置时投影记录的非 off 值兜底
+	// （BuildContext 以 off 为占位，无法区分「记录过 off」与「从未记录」）
+	if cfg.ThinkingLevel != "" {
+		a.agent.AgentConfig.ThinkingLevel = cfg.ThinkingLevel
+	} else if proj.ThinkingLevel != "off" {
+		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
+	}
 	a.modelFallback = warning
 	return a, nil
 }
@@ -68,17 +75,9 @@ func assembleResume(cfg Config, proj session.SessionContext, sm *session.Session
 	return a, fallbackWarning(cfg, proj), nil
 }
 
-// fallbackWarning 拼回退警告文案；newApp 装配已成功，说明 env 厂商必然有效
+// fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
 func fallbackWarning(cfg Config, proj session.SessionContext) string {
-	spec, err := lookupProvider(cfg.ProviderID)
-	if err != nil {
-		return ""
-	}
-	modelID := cfg.ModelID
-	if modelID == "" {
-		modelID = spec.defaultModel
-	}
-	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, spec.id, modelID)
+	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, cfg.ModelID)
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
@@ -109,12 +108,12 @@ func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) 
 
 // newAppWithModel 按指定厂商与模型装配编排层与 Agent：事件经编排层落盘，压缩与溢出恢复由编排层驱动
 func newAppWithModel(cfg Config, providerID, modelID string, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
-	spec, err := lookupProvider(providerID)
+	spec, err := cfg.lookupProvider(providerID)
 	if err != nil {
 		return nil, err
 	}
 
-	models, streamFn := spec.new(cfg.APIKey, cfg.BaseURL)
+	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
 	if modelID == "" {
 		modelID = spec.defaultModel
 	}

@@ -26,18 +26,16 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		params.MaxOutputTokens = param.NewOpt(int64(opts.MaxTokens))
 	}
 	if model.Reasoning {
-		effort := model.ReasoningEffort
-		if effort == "" {
-			effort = llm.ReasoningEffortMedium
+		if effort, ok := resolveReasoningEffort(model, opts); ok {
+			params.Reasoning = shared.ReasoningParam{
+				Effort:  shared.ReasoningEffort(effort),
+				Summary: shared.ReasoningSummaryAuto,
+			}
+			params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
 		}
-		if !validReasoningEffort(effort) {
-			return responses.ResponseNewParams{}, fmt.Errorf("openai: unsupported reasoning effort %q", effort)
-		}
-		params.Reasoning = shared.ReasoningParam{
-			Effort:  shared.ReasoningEffort(effort),
-			Summary: shared.ReasoningSummaryAuto,
-		}
-		params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
+	}
+	if len(model.SamplingParams) > 0 {
+		params.SetExtraFields(model.SamplingParams)
 	}
 	for _, t := range c.Tools {
 		params.Tools = append(params.Tools, responses.ToolUnionParam{
@@ -51,15 +49,108 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 	return params, nil
 }
 
-// validReasoningEffort 判断 reasoning effort 是否为支持的等级
-func validReasoningEffort(effort llm.ReasoningEffort) bool {
-	switch effort {
-	case llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh,
-		llm.ReasoningEffortXHigh, llm.ReasoningEffortMax:
-		return true
-	default:
-		return false
+// thinkingLevels 是 pi 的扩展思考等级体系，顺序从低到高
+var thinkingLevels = []llm.ThinkingLevel{
+	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
+}
+
+// resolveReasoningEffort 按 pi 语义把思考等级解析为 reasoning effort：
+// 1.无显式等级：沿用模型默认 effort（缺省 medium），保持既有行为（偏差于 pi 的 map.off??none，为兼容历史）
+// 2.有显式等级：先经 clampThinkingLevel 收敛到模型支持的最近可用等级
+// 3.收敛后为 off：发 effort "none" 或 map.off 的映射值（pi 流程中 off 经 void 后落入无等级分支）
+// 4.其余等级：命中映射用映射值，未命中原样透传
+// 返回 ok=false 表示本请求不发 reasoning 参数（仅非 reasoning 模型经外层跳过）
+func resolveReasoningEffort(model llm.Model, opts llm.Options) (llm.ReasoningEffort, bool) {
+	if opts.ThinkingLevel == "" {
+		effort := model.ReasoningEffort
+		if effort == "" {
+			effort = llm.ReasoningEffortMedium
+		}
+		return effort, true
 	}
+	level := clampThinkingLevel(model, opts.ThinkingLevel)
+	if level == llm.ThinkingLevelOff {
+		if model.ThinkingLevelMap != nil {
+			if mapped, ok := model.ThinkingLevelMap[llm.ThinkingLevelOff]; ok && mapped != nil {
+				return *mapped, true
+			}
+		}
+		return llm.ReasoningEffort("none"), true
+	}
+	if mapped, ok := model.ThinkingLevelMap[level]; ok && mapped != nil {
+		return *mapped, true
+	}
+	return llm.ReasoningEffort(level), true
+}
+
+// clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级（对齐 pi clampThinkingLevel）
+func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLevel {
+	available := supportedThinkingLevels(model)
+	for _, l := range available {
+		if l == level {
+			return level
+		}
+	}
+	requestedIndex := -1
+	for i, l := range thinkingLevels {
+		if l == level {
+			requestedIndex = i
+			break
+		}
+	}
+	// 未知等级直接落到首个可用等级
+	if requestedIndex == -1 {
+		return firstThinkingLevel(available)
+	}
+	// 先向更高等级收敛，再向更低
+	for i := requestedIndex; i < len(thinkingLevels); i++ {
+		if containsThinkingLevel(available, thinkingLevels[i]) {
+			return thinkingLevels[i]
+		}
+	}
+	for i := requestedIndex - 1; i >= 0; i-- {
+		if containsThinkingLevel(available, thinkingLevels[i]) {
+			return thinkingLevels[i]
+		}
+	}
+	return firstThinkingLevel(available)
+}
+
+// supportedThinkingLevels 返回模型支持的思考等级：非 reasoning 模型只有 off；
+// reasoning 模型默认全档可用，但显式 null 禁用该等级，xhigh/max 须显式映射才可用
+func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
+	if !model.Reasoning {
+		return []llm.ThinkingLevel{llm.ThinkingLevelOff}
+	}
+	var levels []llm.ThinkingLevel
+	for _, level := range thinkingLevels {
+		mapped, ok := model.ThinkingLevelMap[level]
+		if ok && mapped == nil {
+			continue
+		}
+		if (level == llm.ThinkingLevelXHigh || level == llm.ThinkingLevelMax) && !ok {
+			continue
+		}
+		levels = append(levels, level)
+	}
+	return levels
+}
+
+func containsThinkingLevel(levels []llm.ThinkingLevel, level llm.ThinkingLevel) bool {
+	for _, l := range levels {
+		if l == level {
+			return true
+		}
+	}
+	return false
+}
+
+func firstThinkingLevel(levels []llm.ThinkingLevel) llm.ThinkingLevel {
+	if len(levels) > 0 {
+		return levels[0]
+	}
+	return llm.ThinkingLevelOff
 }
 
 func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {

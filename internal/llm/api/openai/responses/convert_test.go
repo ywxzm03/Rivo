@@ -188,13 +188,99 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params, `{"model":"deepseek-flash","reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
 	})
 
-	t.Run("reasoning effort rejects unknown levels", func(t *testing.T) {
+	t.Run("model default effort passes through without validation", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ReasoningEffort = llm.ReasoningEffort("ultra")
-		if _, err := BuildParams(model, llm.Context{}, llm.Options{}); err == nil {
-			t.Error("BuildParams() error = nil, want unsupported effort error")
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
 		}
+		// 对齐 pi：模型默认 effort 原样透传，由后端决定是否接受
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"ultra","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("thinking level maps to configured effort", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
+			llm.ThinkingLevelMedium: effortPtr("custom-effort"),
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelMedium})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"custom-effort","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("unmapped thinking level passes through", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
+			llm.ThinkingLevelHigh: effortPtr("high-plus"),
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelLow})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"low","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("off without map sends effort none", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelOff})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"none","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("off mapped to null clamps to minimal", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
+			llm.ThinkingLevelOff: nil,
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelOff})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// pi 语义：off 被禁用时请求 off 收敛到最小可用档 minimal
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"minimal","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("xhigh without explicit mapping clamps down to high", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
+			llm.ThinkingLevelHigh: effortPtr("high-plus"),
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelMax})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// xhigh/max 须显式映射才可用：max 不可用，向上无可用档，向下收敛到 high
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"high-plus","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
+	})
+
+	t.Run("thinking level on non reasoning model sends no reasoning", func(t *testing.T) {
+		model := testModel()
+		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelHigh})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5"}`)
+	})
+
+	t.Run("sampling params merge into request", func(t *testing.T) {
+		model := testModel()
+		model.SamplingParams = map[string]any{"temperature": 0.5, "top_k": 20}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertWire(t, params, `{"model":"gpt-5","temperature":0.5,"top_k":20}`)
 	})
 
 	t.Run("assistant reasoning item replays verbatim", func(t *testing.T) {
@@ -354,4 +440,9 @@ func TestAssistantMessageReplayRoundTrip(t *testing.T) {
 		`{"model":"gpt-5","input":[`+
 			`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
 			`"content":[{"type":"output_text","text":"pi is approximately 3.14159","annotations":[]}]}]}`)
+}
+
+// effortPtr 返回 effort 字符串的指针，便于构造 thinkingLevelMap
+func effortPtr(e llm.ReasoningEffort) *llm.ReasoningEffort {
+	return &e
 }

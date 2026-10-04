@@ -5,40 +5,111 @@ import (
 	"os"
 	"strings"
 
-	"github.com/joho/godotenv"
+	"github.com/ywxzm03/Rivo/internal/config"
+	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
 
+// Config 是解析完成的运行配置：默认模型 + provider 注册表
 type Config struct {
-	ProviderID string
-	ModelID    string
-	APIKey     string
-	BaseURL    string
+	ProviderID    string
+	ModelID       string
+	ThinkingLevel llm.ThinkingLevel
+	// Warnings 是加载期的非致命警告（如配置文件解析失败被软降级），由调用方输出到 stderr
+	Warnings []string
+	// registry 是内置与 models.json 自定义 provider 的合并注册表
+	registry map[string]providerSpec
 }
 
-func ConfigFromEnv() (Config, error) {
-	if err := godotenv.Load(".env"); err != nil {
-		return Config{}, fmt.Errorf("failed to load .env: %w", err)
-	}
+// Load 从 agent dir 的 settings.json 与 models.json 解析运行配置：
+// 1.构建注册表（内置 openai/deepseek + models.json 自定义，同名时自定义覆盖内置）
+// 2.按三级链解析默认模型：settings 成对指定 → 内置默认 deepseek → 首个有凭据的 provider
+// 3.配置文件解析失败按 pi 语义软降级：记录警告、按空配置继续，最终无可用模型才报错
+func Load() (Config, error) {
+	cfg := Config{registry: builtinRegistry()}
 
-	spec, err := lookupProvider(os.Getenv(providerEnv))
+	settings, err := config.LoadSettings()
 	if err != nil {
-		return Config{}, err
+		cfg.Warnings = append(cfg.Warnings, err.Error())
+	}
+	models, err := config.LoadModels()
+	if err != nil {
+		cfg.Warnings = append(cfg.Warnings, err.Error())
 	}
 
-	apiKey := strings.TrimSpace(os.Getenv(apiKeyEnv))
-	if apiKey == "" {
-		return Config{}, fmt.Errorf("%s is not set", apiKeyEnv)
+	// 1.合并自定义 provider：文件顺序即解析顺序，同名覆盖内置
+	var order []string
+	for _, np := range models.Providers {
+		spec, err := customSpec(np.ID, np.Provider)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.registry[strings.ToLower(np.ID)] = spec
+		order = append(order, strings.ToLower(np.ID))
 	}
 
-	modelID := strings.TrimSpace(os.Getenv(modelEnv))
-	if modelID == "" {
-		modelID = spec.defaultModel
+	// 2.默认思考等级：非法值警告后忽略
+	if settings.DefaultThinkingLevel != "" {
+		if !knownThinkingLevel(settings.DefaultThinkingLevel) {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("config: unknown defaultThinkingLevel %q ignored", settings.DefaultThinkingLevel))
+		} else {
+			cfg.ThinkingLevel = llm.ThinkingLevel(settings.DefaultThinkingLevel)
+		}
 	}
 
-	return Config{
-		ProviderID: spec.id,
-		ModelID:    modelID,
-		APIKey:     apiKey,
-		BaseURL:    strings.TrimSpace(os.Getenv(baseURLEnv)),
-	}, nil
+	// 3.三级链解析默认模型
+	// 3.1 settings 成对指定：模型不存在或无凭据时软回退（对齐 pi findInitialModel）
+	if settings.DefaultProvider != "" && settings.DefaultModel != "" {
+		spec, err := cfg.lookupProvider(settings.DefaultProvider)
+		if err == nil {
+			if _, err := findModel(spec.id, spec.models, settings.DefaultModel); err == nil && spec.apiKey != "" {
+				cfg.ProviderID, cfg.ModelID = spec.id, settings.DefaultModel
+				return cfg, nil
+			}
+		}
+	}
+	// 3.2 内置默认 provider（deepseek）有凭据时用其默认模型
+	if spec, ok := cfg.registry[defaultProviderID]; ok && spec.apiKey != "" {
+		cfg.ProviderID, cfg.ModelID = spec.id, spec.defaultModel
+		return cfg, nil
+	}
+	// 3.3 首个有凭据的 provider：models.json 文件顺序优先，其后内置 openai
+	for _, id := range append(order, openai.ProviderID) {
+		if spec, ok := cfg.registry[id]; ok && spec.apiKey != "" {
+			cfg.ProviderID, cfg.ModelID = spec.id, spec.defaultModel
+			return cfg, nil
+		}
+	}
+	dir, _ := config.Dir()
+	return Config{}, fmt.Errorf("no models available: configure a provider in %s/models.json", dir)
+}
+
+// knownThinkingLevel 判断给定的思考等级是否在 pi 等级体系内
+func knownThinkingLevel(level string) bool {
+	switch llm.ThinkingLevel(level) {
+	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
+		return true
+	default:
+		return false
+	}
+}
+
+// lookupProvider 按 id 查找 provider；空 id 落到内置默认 provider
+func (c Config) lookupProvider(id string) (providerSpec, error) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		id = defaultProviderID
+	}
+	spec, ok := c.registry[id]
+	if !ok {
+		return providerSpec{}, fmt.Errorf("unknown provider %q", id)
+	}
+	return spec, nil
+}
+
+// apiKeyFromEnv 读取内置 provider 的凭据环境变量 <PROVIDER>_API_KEY，
+// 是 models.json 之外最低优先级的凭据来源（对齐 pi）
+func apiKeyFromEnv(providerID string) string {
+	return os.Getenv(strings.ToUpper(providerID) + "_API_KEY")
 }

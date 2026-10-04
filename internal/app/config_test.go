@@ -3,130 +3,217 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
-	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
 
-// useEnvFile 造一个空的 .env 并把工作目录切过去
-// 空文件保证 godotenv 不会覆盖 t.Setenv 注入的值（loadFile 是 overload=false）
-func useEnvFile(t *testing.T) {
+// useConfigHome 把 HOME 切到临时目录，隔离真实的 ~/.rivo 配置
+func useConfigHome(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
 }
 
-func TestConfigFromEnv(t *testing.T) {
-	useEnvFile(t)
-
-	tests := []struct {
-		name         string
-		env          map[string]string
-		wantErr      string
-		wantProvider string
-		wantModel    string
-		wantBase     string
-	}{
-		{
-			name:         "missing api key",
-			env:          map[string]string{},
-			wantErr:      "API_KEY is not set",
-			wantProvider: deepseek.ProviderID,
-		},
-		{
-			name:         "blank api key",
-			env:          map[string]string{apiKeyEnv: "   "},
-			wantErr:      "API_KEY is not set",
-			wantProvider: deepseek.ProviderID,
-		},
-		{
-			name:         "falls back to default provider model when PROVIDER is unset",
-			env:          map[string]string{apiKeyEnv: "test-key"},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    deepseek.DefaultModel,
-		},
-		{
-			name:         "blank model env falls back to default",
-			env:          map[string]string{apiKeyEnv: "test-key", modelEnv: "  "},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    deepseek.DefaultModel,
-		},
-		{
-			name:         "model env overrides default",
-			env:          map[string]string{apiKeyEnv: "test-key", modelEnv: "deepseek-v4-pro"},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    "deepseek-v4-pro",
-		},
-		{
-			name:         "trims api key and base url",
-			env:          map[string]string{apiKeyEnv: "  test-key  ", baseURLEnv: " https://example.test/v1 "},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    deepseek.DefaultModel,
-			wantBase:     "https://example.test/v1",
-		},
-		{
-			name:         "deepseek uses its own default model",
-			env:          map[string]string{providerEnv: "deepseek", apiKeyEnv: "test-key"},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    deepseek.DefaultModel,
-		},
-		{
-			name:         "provider is case-insensitive",
-			env:          map[string]string{providerEnv: "DeepSeek", apiKeyEnv: "test-key"},
-			wantProvider: deepseek.ProviderID,
-			wantModel:    deepseek.DefaultModel,
-		},
-		{
-			name:         "provider is trimmed of surrounding whitespace",
-			env:          map[string]string{providerEnv: "  openai  ", apiKeyEnv: "test-key"},
-			wantProvider: openai.ProviderID,
-			wantModel:    openai.DefaultModel,
-		},
-		{
-			name:    "unknown provider errors",
-			env:     map[string]string{providerEnv: "no-such-provider", apiKeyEnv: "test-key"},
-			wantErr: `unknown provider "no-such-provider"`,
-		},
+func writeAgentConfig(t *testing.T, home, name, body string) {
+	t.Helper()
+	dir := filepath.Join(home, ".rivo", "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for _, key := range []string{providerEnv, apiKeyEnv, baseURLEnv, modelEnv} {
-				t.Setenv(key, "")
-			}
-			for key, value := range tt.env {
-				t.Setenv(key, value)
-			}
+func TestLoadWithoutAnyConfigErrors(t *testing.T) {
+	useConfigHome(t)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "no models available") {
+		t.Fatalf("Load() error = %v, want no-models error", err)
+	}
+}
 
-			cfg, err := ConfigFromEnv()
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("ConfigFromEnv() error = nil, want %q", tt.wantErr)
-				}
-				if got := err.Error(); got != tt.wantErr {
-					t.Fatalf("ConfigFromEnv() error = %q, want %q", got, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ConfigFromEnv() error = %v, want nil", err)
-			}
-			if cfg.ProviderID != tt.wantProvider {
-				t.Errorf("ConfigFromEnv() ProviderID = %q, want %q", cfg.ProviderID, tt.wantProvider)
-			}
-			if cfg.ModelID != tt.wantModel {
-				t.Errorf("ConfigFromEnv() ModelID = %q, want %q", cfg.ModelID, tt.wantModel)
-			}
-			if cfg.BaseURL != tt.wantBase {
-				t.Errorf("ConfigFromEnv() BaseURL = %q, want %q", cfg.BaseURL, tt.wantBase)
-			}
-			if cfg.APIKey == "" {
-				t.Error("ConfigFromEnv() APIKey is empty")
-			}
-		})
+func TestLoadUsesBuiltinProviderEnvKey(t *testing.T) {
+	useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ProviderID != deepseek.ProviderID || cfg.ModelID != deepseek.DefaultModel {
+		t.Errorf("Load() = %s/%s, want builtin deepseek default", cfg.ProviderID, cfg.ModelID)
+	}
+}
+
+func TestLoadPrefersSettingsPairedDefault(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie","models":[{"id":"glm-5.3"}]}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ProviderID != "magpie" || cfg.ModelID != "glm-5.3" {
+		t.Errorf("Load() = %s/%s, want settings default", cfg.ProviderID, cfg.ModelID)
+	}
+}
+
+func TestLoadFallsBackWhenSettingsModelUnknown(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"gone"}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"other"}]}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// settings 指定的模型不存在时软回退到内置默认（对齐 pi）
+	if cfg.ProviderID != deepseek.ProviderID {
+		t.Errorf("Load() provider = %q, want soft fallback to deepseek", cfg.ProviderID)
+	}
+}
+
+func TestLoadFallsBackWhenSettingsProviderHasNoKey(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","models":[{"id":"glm-5.3"}]}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// provider 无凭据视同不可用（对齐 pi hasConfiguredAuth）
+	if cfg.ProviderID != deepseek.ProviderID {
+		t.Errorf("Load() provider = %q, want soft fallback to deepseek", cfg.ProviderID)
+	}
+}
+
+func TestLoadSingleSideSettingsIsIgnored(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	// 只设 defaultProvider 不生效（对齐 pi：必须成对）
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie"}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"glm-5.3"}]}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ProviderID != deepseek.ProviderID {
+		t.Errorf("Load() provider = %q, want builtin default (single-side settings ignored)", cfg.ProviderID)
+	}
+}
+
+func TestLoadSoftDegradesOnBrokenModelsFile(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "models.json", "{oops")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// 解析失败软降级：警告 + 按空配置继续走内置链
+	if len(cfg.Warnings) == 0 || !strings.Contains(cfg.Warnings[0], "invalid models file") {
+		t.Errorf("Warnings = %v, want models-file parse warning", cfg.Warnings)
+	}
+	if cfg.ProviderID != deepseek.ProviderID {
+		t.Errorf("Load() provider = %q, want builtin fallback", cfg.ProviderID)
+	}
+}
+
+func TestLoadFirstAvailableProviderInFileOrder(t *testing.T) {
+	home := useConfigHome(t)
+	writeAgentConfig(t, home, "models.json", `{"providers":{
+		"no-key": {"baseUrl":"http://a/v1","models":[{"id":"m1"}]},
+		"with-key": {"baseUrl":"http://b/v1","apiKey":"k","models":[{"id":"m2","contextWindow":1000,"maxTokens":500,"reasoning":true}]}
+	}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ProviderID != "with-key" || cfg.ModelID != "m2" {
+		t.Errorf("Load() = %s/%s, want first provider with credentials", cfg.ProviderID, cfg.ModelID)
+	}
+}
+
+func TestLoadReadsDefaultThinkingLevel(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "settings.json", `{"defaultThinkingLevel":"high"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ThinkingLevel != llm.ThinkingLevelHigh {
+		t.Errorf("ThinkingLevel = %q, want high", cfg.ThinkingLevel)
+	}
+}
+
+func TestLoadWarnsOnUnknownThinkingLevel(t *testing.T) {
+	home := useConfigHome(t)
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	writeAgentConfig(t, home, "settings.json", `{"defaultThinkingLevel":"ultra"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ThinkingLevel != "" {
+		t.Errorf("ThinkingLevel = %q, want empty for unknown level", cfg.ThinkingLevel)
+	}
+	if len(cfg.Warnings) == 0 || !strings.Contains(cfg.Warnings[0], "defaultThinkingLevel") {
+		t.Errorf("Warnings = %v, want unknown-level warning", cfg.Warnings)
+	}
+}
+
+func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
+	home := useConfigHome(t)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{
+		"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie",
+		"models":[{"id":"glm-5.3","name":"GLM","contextWindow":200000,"maxTokens":8192,"reasoning":true,
+			"thinkingLevelMap":{"off":null,"medium":"medium"},"samplingParams":{"temperature":0.7}}]
+	}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ProviderID != "magpie" {
+		t.Fatalf("Load() provider = %q, want magpie", cfg.ProviderID)
+	}
+	// 注册表里的自定义 spec 能装配出完整模型元数据
+	spec, err := cfg.lookupProvider("magpie")
+	if err != nil {
+		t.Fatalf("lookupProvider() error = %v", err)
+	}
+	if len(spec.models) != 1 {
+		t.Fatalf("models = %d, want 1", len(spec.models))
+	}
+	m := spec.models[0]
+	if m.Name != "GLM" || m.ContextWindow != 200000 || m.MaxTokens != 8192 || !m.Reasoning {
+		t.Errorf("model = %+v, want mapped metadata", m)
+	}
+	if m.ThinkingLevelMap[llm.ThinkingLevelOff] != nil {
+		t.Errorf("thinkingLevelMap[off] = %v, want disabled (nil)", m.ThinkingLevelMap[llm.ThinkingLevelOff])
+	}
+	if m.SamplingParams["temperature"] != 0.7 {
+		t.Errorf("samplingParams = %v, want temperature 0.7", m.SamplingParams)
+	}
+	// 装配出的流函数非空（openai 兼容客户端离线构造）
+	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
+	if len(models) != 1 || streamFn == nil {
+		t.Errorf("spec.new() = %d models, streamFn %v, want one model and a stream fn", len(models), streamFn)
 	}
 }

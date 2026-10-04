@@ -33,11 +33,7 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, openai.DefaultModel, "hello resume")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -84,11 +80,7 @@ func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -114,11 +106,7 @@ func TestOpenFallsBackWhenProviderUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, "no-such-provider", "some-model", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -131,11 +119,7 @@ func TestOpenWithoutModelRecordUsesEnvConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, "", "", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -156,10 +140,7 @@ func TestOpenFallsBackToDefaultModelWhenEnvModelEmpty(t *testing.T) {
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
 	// env 未配 MODEL 时回退装配用厂商默认模型，而不是拿空 modelID 去匹配失败
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -176,11 +157,7 @@ func TestOpenErrorsWhenFallbackModelUnknown(t *testing.T) {
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
 	// env 默认模型也解析不到时按启动失败处理
-	_, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    "also-missing",
-		APIKey:     "test-key",
-	}, nil)
+	_, err := Open(path, configWithBuiltin(deepseek.ProviderID, "also-missing"), nil)
 	if err == nil {
 		t.Fatal("Open() error = nil, want unknown model error")
 	}

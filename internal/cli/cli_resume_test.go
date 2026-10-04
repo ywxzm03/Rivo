@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,18 +11,11 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-// useTestEnv 造一个空的 .env 并配好最小环境变量，ConfigFromEnv 才能装配成功
+// useTestEnv 把 HOME 切到临时目录并配好内置 provider 凭据
 func useTestEnv(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	for _, key := range []string{"PROVIDER", "BASE_URL", "MODEL"} {
-		t.Setenv(key, "")
-	}
-	t.Setenv("API_KEY", "test-key")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 }
 
 func TestRunContinueWithoutSessionsStartsNewRepl(t *testing.T) {

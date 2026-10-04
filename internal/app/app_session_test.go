@@ -9,11 +9,7 @@ import (
 
 func TestNewWithSessionDirUsesInjectedDir(t *testing.T) {
 	dir := t.TempDir()
-	a, err := NewWithSessionDir(Config{
-		ProviderID: openai.ProviderID,
-		ModelID:    openai.DefaultModel,
-		APIKey:     "test-key",
-	}, dir, nil)
+	a, err := NewWithSessionDir(configWithBuiltin(openai.ProviderID, openai.DefaultModel), dir, nil)
 	if err != nil {
 		t.Fatalf("NewWithSessionDir() error = %v", err)
 	}
@@ -23,11 +19,7 @@ func TestNewWithSessionDirUsesInjectedDir(t *testing.T) {
 }
 
 func TestNewWithSessionDirAcceptsDeepSeek(t *testing.T) {
-	a, err := NewWithSessionDir(Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, t.TempDir(), nil)
+	a, err := NewWithSessionDir(configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("NewWithSessionDir() error = %v", err)
 	}

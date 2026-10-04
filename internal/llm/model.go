@@ -20,6 +20,11 @@ type Model struct {
 	ContextWindow int
 	// MaxTokens 是模型单次输出的最大 token 数，0 表示未知；用于区分输出截断与上下文耗尽
 	MaxTokens int
+	// ThinkingLevelMap 把思考等级映射为该模型的 reasoning effort；
+	// 值为 nil 表示该等级禁用；缺失的等级按 pi 语义透传或收敛（xhigh/max 须显式映射才可用）
+	ThinkingLevelMap map[ThinkingLevel]*ReasoningEffort
+	// SamplingParams 是并入请求体的自由采样参数（temperature/top_p 等），nil 表示无
+	SamplingParams map[string]any
 }
 
 // ReasoningEffort 表示模型 reasoning 的计算强度

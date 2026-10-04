@@ -33,11 +33,15 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 
 // repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建
 func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.获取到配置信息
-	cfg, err := app.ConfigFromEnv()
+	// 1.加载运行配置（settings.json + models.json）
+	cfg, err := app.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
+	}
+	// 软降级警告（如 models.json 解析失败被按空配置处理）在启动时明示
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 	}
 
 	onEvent := func(ev llm.AgentEvent) error {
