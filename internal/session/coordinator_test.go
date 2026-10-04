@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -114,14 +115,23 @@ type fakeRunner struct {
 	coord         *Coordinator
 	replaced      [][]llm.Message
 	continueCalls int
+	// runFn/contFn 非空时定制 Run/Continue 行为
+	runFn  func() (*llm.AssistantMessage, error)
+	contFn func() (*llm.AssistantMessage, error)
 }
 
 func (f *fakeRunner) Run(_ context.Context, _ string) (*llm.AssistantMessage, error) {
+	if f.runFn != nil {
+		return f.runFn()
+	}
 	return nil, nil
 }
 
 func (f *fakeRunner) Continue(_ context.Context) (*llm.AssistantMessage, error) {
 	f.continueCalls++
+	if f.contFn != nil {
+		return f.contFn()
+	}
 	return nil, nil
 }
 
@@ -483,5 +493,150 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 	if !hasCompaction {
 		t.Error("manual compaction not persisted")
+	}
+}
+
+func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
+	dir := t.TempDir()
+	// 窗口未知等场景下 Compactor 为 nil：溢出按原始错误收场，失败尝试保留，不得 panic
+	sm := New("/project", dir)
+	rec := &eventRecorder{}
+	coord := NewCoordinator(sm, rec.handle)
+	modelCalls := 0
+	streamFn := countingStreamFn(&modelCalls,
+		llm.AssistantMessage{StopReason: llm.StopReasonError},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
+	)
+	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, coord.Handle)
+	a.Coordinator = coord
+	coord.Agent = a
+	seedHistory(t, coord, a)
+
+	runner := &fakeRunner{coord: coord}
+	runner.runFn = func() (*llm.AssistantMessage, error) {
+		// 模拟真实 Agent：溢出收场时先通知编排层
+		coord.NotifyOverflow()
+		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "boom"}}, StopReason: llm.StopReasonError}
+		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}})
+		return &msg, fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)
+	}
+	runner.contFn = func() (*llm.AssistantMessage, error) {
+		t.Error("Continue should not be called without a Compactor")
+		return nil, nil
+	}
+	coord.Agent = runner
+
+	reply, err := coord.Run(context.Background(), "hi")
+	if !llm.IsContextOverflow(err) {
+		t.Fatalf("Run() error = %v, want original overflow error", err)
+	}
+	if reply == nil || reply.StopReason != llm.StopReasonError {
+		t.Errorf("reply = %+v, want error assistant", reply)
+	}
+	if runner.continueCalls != 0 {
+		t.Errorf("continue calls = %d, want 0", runner.continueCalls)
+	}
+	// 失败尝试保留在会话中，未追加省略标记
+	for _, e := range coord.m.entries {
+		if ce, ok := e.(*ContextEditEntry); ok && ce.Replacement == nil {
+			t.Fatal("omission marker should not be added without a Compactor")
+		}
+	}
+	// WillRetry 不得报告不会发生的重试
+	coord.next = rec.handle
+	coord.NotifyOverflow()
+	if err := coord.Handle(llm.AgentEndEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	var retryEnds int
+	for _, e := range rec.events {
+		if end, ok := e.(llm.AgentEndEvent); ok && end.WillRetry {
+			retryEnds++
+		}
+	}
+	if retryEnds != 0 {
+		t.Errorf("agent_end WillRetry should be false without a Compactor: %+v", rec.agentEnds())
+	}
+}
+
+func TestCoordinatorRecoveryFailureSurfacesError(t *testing.T) {
+	dir := t.TempDir()
+	summaryCalls := 0
+	summaryStreamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		summaryCalls++
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageErrorEvent{Err: errors.New("provider down")}
+		close(ch)
+		return ch, nil
+	}
+	coord, runner, _ := newTestCoordinator(t, dir, summaryStreamFn)
+	// 预置可压缩的历史，让恢复流程走到摘要调用
+	for _, msg := range []llm.Message{textMsg("u1 content"), textMsg("u2 content")} {
+		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.runFn = func() (*llm.AssistantMessage, error) {
+		// 可恢复的长度截断：正常返回无错误，恢复失败的原因必须透出
+		coord.NotifyOverflow()
+		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "truncated"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}
+		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}})
+		return &msg, nil
+	}
+
+	reply, err := coord.Run(context.Background(), "hi")
+	if err == nil || !strings.Contains(err.Error(), "provider down") {
+		t.Fatalf("Run() error = %v, want summarizer failure surfaced", err)
+	}
+	if summaryCalls != 1 {
+		t.Errorf("summary calls = %d, want 1", summaryCalls)
+	}
+	if reply == nil || reply.StopReason != llm.StopReasonLength {
+		t.Errorf("reply = %+v, want length-stopped assistant", reply)
+	}
+}
+
+func TestCoordinatorCompactSerializesWithRun(t *testing.T) {
+	dir := t.TempDir()
+	coord, runner, _ := newTestCoordinator(t, dir, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner.runFn = func() (*llm.AssistantMessage, error) {
+		started <- struct{}{}
+		<-release
+		return nil, nil
+	}
+
+	runDone := make(chan struct{})
+	go func() {
+		_, _ = coord.Run(context.Background(), "hi")
+		close(runDone)
+	}()
+	<-started
+
+	// Run 未结束前 Compact 必须被互斥阻塞
+	compactDone := make(chan struct{})
+	go func() {
+		_ = coord.Compact(context.Background(), "")
+		close(compactDone)
+	}()
+	select {
+	case <-compactDone:
+		t.Fatal("Compact should block while Run is in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	<-runDone
+	select {
+	case <-compactDone:
+	case <-time.After(time.Second):
+		t.Fatal("Compact did not complete after Run finished")
 	}
 }

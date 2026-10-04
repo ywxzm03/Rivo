@@ -1023,3 +1023,28 @@ func TestAgentCompactionDeadlineEndsRun(t *testing.T) {
 		t.Errorf("stream calls = %d, want 0 (expired ctx must not reach the model)", calls)
 	}
 }
+
+// TestAgentRecoverableLengthWithoutCoordinatorRunsTools 验证未启用编排层时，
+// 可恢复的长度截断不跳过工具执行（与旧行为一致）
+func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
+	)
+	ping := &fakeTool{name: "ping"}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, streamFn, nil)
+
+	if _, err := a.Run(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ping.arguments) != 1 {
+		t.Errorf("tool calls = %d, want 1 (tools must run without a coordinator)", len(ping.arguments))
+	}
+	if calls != 2 {
+		t.Errorf("stream calls = %d, want 2", calls)
+	}
+	if got := len(a.AgentContext.Messages); got != 4 {
+		t.Errorf("messages = %d, want 4", got)
+	}
+}

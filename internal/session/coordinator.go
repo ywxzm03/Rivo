@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -39,6 +41,8 @@ type Coordinator struct {
 	pendingRecovery bool
 	// recovered 限制每次 Run 最多做一次溢出恢复
 	recovered bool
+	// mu 串行化 Run 与手动 Compact，避免压缩与进行中的运行并发读写会话与内存
+	mu sync.Mutex
 }
 
 // NewCoordinator 创建编排层：next 为事件转发链（CLI 显示等）
@@ -50,7 +54,7 @@ func NewCoordinator(m *SessionManager, next llm.AgentEventSink) *Coordinator {
 // message_end 落盘在后，落盘失败返回错误以终止当前 Agent 调用
 func (c *Coordinator) Handle(event llm.AgentEvent) error {
 	if end, ok := event.(llm.AgentEndEvent); ok {
-		end.WillRetry = c.pendingRecovery && !c.recovered
+		end.WillRetry = c.pendingRecovery && !c.recovered && c.Compactor != nil
 		event = end
 	}
 	if err := c.emit(event); err != nil {
@@ -66,28 +70,39 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 
 // Run 驱动一次运行；本轮以可恢复的溢出收场时，省略失败尝试、压缩后重试一次
 func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.pendingRecovery, c.recovered = false, false
 	reply, runErr := c.Agent.Run(ctx, input)
-	if !c.pendingRecovery || c.recovered {
+	// 无压缩器时无法恢复（窗口未知等场景）：按原始错误收场，失败尝试保留在会话中
+	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
 		return reply, runErr
 	}
 	c.recovered = true
-	// 1.省略失败尝试：它必然是最后落盘的 entry，磁盘上保留、投影上排除
+	// 1.省略失败尝试：它必然是最后落盘的 entry，磁盘上保留、投影上排除；失败原因不吞掉
 	if oerr := c.omitLastAttempt(); oerr != nil {
+		if runErr == nil {
+			runErr = oerr
+		}
 		return reply, runErr
 	}
 	// 2.省略后立即重建内存，保持内存与投影一致（失败尝试从内存消失）
 	c.Agent.ReplaceMessages(c.m.BuildContext().Messages)
-	// 3.压缩成功才重试该轮；失败按原错误收场
+	// 3.压缩成功才重试该轮；失败按原始错误收场
 	if cerr := c.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
+		if runErr == nil {
+			runErr = cerr
+		}
 		return reply, runErr
 	}
 	c.pendingRecovery = false
 	return c.Agent.Continue(ctx)
 }
 
-// Compact 手动触发一次压缩，instructions 为聚焦指令
+// Compact 手动触发一次压缩，instructions 为聚焦指令；与 Run 互斥避免并发读写
 func (c *Coordinator) Compact(ctx context.Context, instructions string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.compact(ctx, CompactionReasonManual, instructions)
 }
 
@@ -128,6 +143,9 @@ func (c *Coordinator) NotifyOverflow() {
 // compact 执行一次压缩：1.投影上找切点并摘要；2.直调落盘压缩点；3.重建投影并替换内存。
 // 落盘成功前内存不替换，失败时会话与内存保持一致
 func (c *Coordinator) compact(ctx context.Context, reason, instructions string) error {
+	if c.Compactor == nil {
+		return errors.New("session: 未启用上下文压缩")
+	}
 	proj := c.m.BuildContext()
 	tokensBefore := contextTokens(proj)
 	if err := c.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
@@ -139,11 +157,11 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}
-	// 切点定位在投影消息上，经同序 EntryIDs 换算成会话条目
-	firstKept := ""
-	if result.CutIndex < len(proj.EntryIDs) {
-		firstKept = proj.EntryIDs[result.CutIndex]
+	// 切点定位在投影消息上，经同序 EntryIDs 换算成会话条目；不一致时显式报错，避免静默清空历史
+	if result.CutIndex >= len(proj.EntryIDs) {
+		return fmt.Errorf("session: 切点 %d 超出投影条目数 %d，消息与条目不一致", result.CutIndex, len(proj.EntryIDs))
 	}
+	firstKept := proj.EntryIDs[result.CutIndex]
 	var usage *llm.Usage
 	if result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 {
 		usage = &result.Usage

@@ -210,9 +210,10 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			}
 			toolCalls = append(toolCalls, tc)
 		}
-		// 3.5.输出在达到模型上限前被截断说明上下文已耗尽：跳过截断消息里的工具调用，
-		// 正常提交本轮后通知编排层驱动溢出恢复；达到上限的截断是正常输出限制
-		if isRecoverableLength(*final, a.AgentConfig.Model) {
+		// 3.5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
+		// 正常提交本轮后通知编排层驱动溢出恢复；未启用编排层时按旧语义继续执行工具；
+		// 达到上限的截断是正常输出限制
+		if a.Coordinator != nil && isRecoverableLength(*final, a.AgentConfig.Model) {
 			if a.Coordinator != nil {
 				a.Coordinator.NotifyOverflow()
 			}
