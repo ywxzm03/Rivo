@@ -172,7 +172,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				case llm.AssistantMessageErrorEvent:
 					streamErr = ev.Err
 					if streamErr == nil {
-						streamErr = errors.New("agent: 模型流返回空错误")
+						streamErr = errors.New("agent: model stream returned empty error")
 					}
 					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
@@ -185,7 +185,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		// 本轮流已结束（正常关闭或已中止），统一收尾
 		streamCancel()
 		if streamErr == nil && final == nil {
-			streamErr = errors.New("agent: 流已结束但未收到最终消息")
+			streamErr = errors.New("agent: stream ended without a final message")
 		}
 		if streamErr != nil {
 			// 可恢复的溢出：通知编排层驱动轮外恢复（它会标注 willRetry 并省略失败尝试），本轮按错误收场

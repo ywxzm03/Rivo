@@ -35,7 +35,7 @@ func TestBuildParamsRejectsInvalidReasoningSignature(t *testing.T) {
 			llm.ThinkingContent{ThinkingSignature: "not-json"},
 		}},
 	}}, llm.Options{})
-	if err == nil || !strings.Contains(err.Error(), "解析 reasoning item") {
+	if err == nil || !strings.Contains(err.Error(), "parse reasoning item") {
 		t.Fatalf("BuildParams() error = %v, want reasoning item parse error", err)
 	}
 }
@@ -219,9 +219,9 @@ func TestStreamTerminalErrorEvents(t *testing.T) {
 		sse  string
 		want string
 	}{
-		{name: "failed response", sse: `{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"bad","message":"failed"}}}`, want: "openai: 请求失败: bad: failed"},
+		{name: "failed response", sse: `{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"bad","message":"failed"}}}`, want: "openai: request failed: bad: failed"},
 		{name: "error event", sse: `{"type":"error","code":"bad","message":"failed"}`, want: "openai: bad: failed"},
-		{name: "incomplete response", sse: `{"type":"response.incomplete","response":{"id":"r","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}}`, want: "openai: 响应未完成: content_filter"},
+		{name: "incomplete response", sse: `{"type":"response.incomplete","response":{"id":"r","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}}`, want: "openai: response incomplete: content_filter"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,7 +326,7 @@ func TestIncompleteResponseErrorAllowsMaxOutputTokens(t *testing.T) {
 func TestStreamRejectsUnsupportedAPI(t *testing.T) {
 	client := NewClient("test-key", "")
 	_, err := client.Stream(context.Background(), llm.Model{API: "chat-completions"}, llm.Context{}, llm.Options{})
-	if err == nil || !strings.Contains(err.Error(), "暂不支持协议") {
+	if err == nil || !strings.Contains(err.Error(), "not supported yet") {
 		t.Fatalf("Stream() error = %v, want unsupported protocol", err)
 	}
 }

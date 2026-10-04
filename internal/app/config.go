@@ -17,7 +17,7 @@ type Config struct {
 
 func ConfigFromEnv() (Config, error) {
 	if err := godotenv.Load(".env"); err != nil {
-		return Config{}, fmt.Errorf("加载 .env 失败: %w", err)
+		return Config{}, fmt.Errorf("failed to load .env: %w", err)
 	}
 
 	spec, err := lookupProvider(os.Getenv(providerEnv))
@@ -27,7 +27,7 @@ func ConfigFromEnv() (Config, error) {
 
 	apiKey := strings.TrimSpace(os.Getenv(apiKeyEnv))
 	if apiKey == "" {
-		return Config{}, fmt.Errorf("%s 未设置", apiKeyEnv)
+		return Config{}, fmt.Errorf("%s is not set", apiKeyEnv)
 	}
 
 	modelID := strings.TrimSpace(os.Getenv(modelEnv))

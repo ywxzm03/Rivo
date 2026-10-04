@@ -146,7 +146,7 @@ func TestFlushMidWriteWedgeOnExistingFile(t *testing.T) {
 
 func TestAppendLineFailureRetriesSameEntry(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("依赖 Unix 文件权限模型")
+		t.Skip("requires the Unix file permission model")
 	}
 	dir := t.TempDir()
 	m := New("/project", dir)

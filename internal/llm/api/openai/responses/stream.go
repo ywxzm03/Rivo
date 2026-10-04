@@ -39,7 +39,7 @@ func NewClient(apiKey, baseURL string) *Client {
 // Stream 将 Responses SSE 事件转换为带 content index 的统一模型事件
 func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 	if model.API != llm.APIOpenAIResponses {
-		return nil, fmt.Errorf("openai: 暂不支持协议 %q", model.API)
+		return nil, fmt.Errorf("openai: protocol %q not supported yet", model.API)
 	}
 	params, err := BuildParams(model, c, opts)
 	if err != nil {
@@ -153,7 +153,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 			case "response.failed":
 				terminal = true
 				errResp := ev.Response.Error
-				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai: 请求失败", string(errResp.Code), errResp.Message)})
+				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai: request failed", string(errResp.Code), errResp.Message)})
 				return
 			case "error":
 				terminal = true
@@ -163,9 +163,9 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		}
 		if !terminal {
 			if err := stream.Err(); err != nil {
-				send(llm.AssistantMessageErrorEvent{Err: classifyStreamError("openai: 流中断", err)})
+				send(llm.AssistantMessageErrorEvent{Err: classifyStreamError("openai: stream interrupted", err)})
 			} else {
-				send(llm.AssistantMessageErrorEvent{Err: errors.New("openai: 流在终止事件前结束")})
+				send(llm.AssistantMessageErrorEvent{Err: errors.New("openai: stream ended before a terminal event")})
 			}
 		}
 	}()
@@ -268,9 +268,9 @@ func incompleteResponseError(response responses.Response) error {
 		return nil
 	}
 	if response.IncompleteDetails.Reason == "" {
-		return errors.New("openai: 响应未完成")
+		return errors.New("openai: response incomplete")
 	}
-	return fmt.Errorf("openai: 响应未完成: %s", response.IncompleteDetails.Reason)
+	return fmt.Errorf("openai: response incomplete: %s", response.IncompleteDetails.Reason)
 }
 
 // addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
@@ -295,7 +295,7 @@ func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]output
 		}
 		return send(llm.AssistantMessageToolCallStartEvent{ContentIndex: idx, ToolCall: call})
 	default:
-		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: unsupported response output item type %q", item.Type)})
 		return false
 	}
 }
@@ -315,7 +315,7 @@ func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 	case "reasoning_text":
 		kind, content = llm.EventThinkingStart, llm.ThinkingContent{}
 	default:
-		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 content part 类型 %q", partType)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: unsupported response content part type %q", partType)})
 		return false
 	}
 	partial.Content = append(partial.Content, content)
@@ -370,7 +370,7 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]out
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
 		return send(llm.AssistantMessageToolCallEndEvent{ContentIndex: slot.contentIdx, ToolCall: call})
 	default:
-		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)})
+		send(llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: unsupported response output item type %q", item.Type)})
 		return false
 	}
 }

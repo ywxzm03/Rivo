@@ -41,7 +41,7 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("session: 读取会话目录失败: %w", err)
+		return nil, fmt.Errorf("session: failed to read session directory: %w", err)
 	}
 	infos := make([]SessionInfo, 0, len(files))
 	for _, f := range files {

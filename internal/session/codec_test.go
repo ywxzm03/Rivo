@@ -11,7 +11,7 @@ import (
 
 func TestMessageRoundtrip(t *testing.T) {
 	user := llm.UserMessage{Content: []llm.Content{
-		llm.TextContent{Text: "你好"},
+		llm.TextContent{Text: "hello"},
 		llm.ImageContent{Data: "base64data", MIMEType: "image/png"},
 	}}
 	assistant := llm.AssistantMessage{
@@ -20,8 +20,8 @@ func TestMessageRoundtrip(t *testing.T) {
 		Model:      "gpt-5",
 		ResponseID: "resp_123",
 		Content: []llm.Content{
-			llm.ThinkingContent{Thinking: "思考内容", ThinkingSignature: "sig-1"},
-			llm.TextContent{Text: "回答"},
+			llm.ThinkingContent{Thinking: "thinking content", ThinkingSignature: "sig-1"},
+			llm.TextContent{Text: "answer"},
 			llm.ToolCall{ID: "call_1", Name: "read", Arguments: map[string]any{"path": "a.go"}},
 		},
 		StopReason: llm.StopReasonToolUse,
@@ -30,7 +30,7 @@ func TestMessageRoundtrip(t *testing.T) {
 	toolResult := llm.ToolResultMessage{
 		ToolCallID: "call_1",
 		ToolName:   "read",
-		Content:    []llm.Content{llm.TextContent{Text: "文件内容"}},
+		Content:    []llm.Content{llm.TextContent{Text: "file content"}},
 		Details:    map[string]any{"lines": "1-10"},
 		IsError:    true,
 	}
@@ -149,10 +149,10 @@ func TestParseFileTolerance(t *testing.T) {
 		data    string
 		wantErr string
 	}{
-		{"missing header", userLine + "\n", "缺少会话 header"},
-		{"wrong version", strings.Replace(header, `"version":1`, `"version":9`, 1) + "\n" + userLine + "\n", "不支持的会话版本"},
-		{"invalid header json", "{\"type\":\"session\",\"version\":1}\n" + userLine + "\n", "header 缺少 id"},
-		{"header must be first", "{\"type\":\"unknown\",\"id\":\"x\"}\n" + header + "\n", "缺少会话 header"},
+		{"missing header", userLine + "\n", "missing session header"},
+		{"wrong version", strings.Replace(header, `"version":1`, `"version":9`, 1) + "\n" + userLine + "\n", "unsupported session version"},
+		{"invalid header json", "{\"type\":\"session\",\"version\":1}\n" + userLine + "\n", "session header missing id"},
+		{"header must be first", "{\"type\":\"unknown\",\"id\":\"x\"}\n" + header + "\n", "missing session header"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

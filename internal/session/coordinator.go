@@ -144,7 +144,7 @@ func (c *Coordinator) NotifyOverflow() {
 // 落盘成功前内存不替换，失败时会话与内存保持一致
 func (c *Coordinator) compact(ctx context.Context, reason, instructions string) error {
 	if c.Compactor == nil {
-		return errors.New("session: 未启用上下文压缩")
+		return errors.New("session: context compaction not enabled")
 	}
 	proj := c.m.BuildContext()
 	tokensBefore := contextTokens(proj)
@@ -159,7 +159,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	}
 	// 切点定位在投影消息上，经同序 EntryIDs 换算成会话条目；不一致时显式报错，避免静默清空历史
 	if result.CutIndex >= len(proj.EntryIDs) {
-		return fmt.Errorf("session: 切点 %d 超出投影条目数 %d，消息与条目不一致", result.CutIndex, len(proj.EntryIDs))
+		return fmt.Errorf("session: cut index %d exceeds projected entry count %d; messages and entries are inconsistent", result.CutIndex, len(proj.EntryIDs))
 	}
 	firstKept := proj.EntryIDs[result.CutIndex]
 	var usage *llm.Usage
@@ -187,7 +187,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 func (c *Coordinator) omitLastAttempt() error {
 	target := c.m.LastEntryID()
 	if target == "" {
-		return errors.New("session: 没有可省略的失败尝试")
+		return errors.New("session: no failed attempt to omit")
 	}
 	return c.m.AppendContextEdit(target, nil)
 }

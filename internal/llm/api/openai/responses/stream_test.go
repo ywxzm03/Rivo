@@ -250,11 +250,11 @@ func TestClassifyAPIErrorWrapsContextOverflow(t *testing.T) {
 
 func TestClassifyStreamErrorWrapsContextOverflow(t *testing.T) {
 	wrapped := errors.New("POST returned 400: context_length_exceeded")
-	if err := classifyStreamError("openai: 流中断", wrapped); !llm.IsContextOverflow(err) {
+	if err := classifyStreamError("openai: stream interrupted", wrapped); !llm.IsContextOverflow(err) {
 		t.Fatalf("classifyStreamError() = %v, want overflow", err)
 	}
 	plain := errors.New("connection reset")
-	if err := classifyStreamError("openai: 流中断", plain); llm.IsContextOverflow(err) {
+	if err := classifyStreamError("openai: stream interrupted", plain); llm.IsContextOverflow(err) {
 		t.Fatalf("classifyStreamError() = %v, want non-overflow", err)
 	}
 }

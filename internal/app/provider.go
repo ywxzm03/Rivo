@@ -50,7 +50,7 @@ func lookupProvider(id string) (providerSpec, error) {
 	}
 	spec, ok := providerSpecs[id]
 	if !ok {
-		return providerSpec{}, fmt.Errorf("未知的厂商 %q", id)
+		return providerSpec{}, fmt.Errorf("unknown provider %q", id)
 	}
 	return spec, nil
 }
@@ -61,5 +61,5 @@ func findModel(providerID string, models []llm.Model, modelID string) (llm.Model
 			return m, nil
 		}
 	}
-	return llm.Model{}, fmt.Errorf("厂商 %q 下没有模型 %q", providerID, modelID)
+	return llm.Model{}, fmt.Errorf("provider %q has no model %q", providerID, modelID)
 }

@@ -58,7 +58,7 @@ func TestRun(t *testing.T) {
 			name:       "unknown long option",
 			args:       []string{"--unknown"},
 			wantCode:   2,
-			wantStderr: "Rivo: 不支持的参数 \"--unknown\"\n请运行 'Rivo --help' 查看用法。\n",
+			wantStderr: "Rivo: unsupported argument \"--unknown\"\nRun 'Rivo --help' for usage.\n",
 		},
 		{
 			name:       "help with unknown option",
@@ -70,19 +70,19 @@ func TestRun(t *testing.T) {
 			name:       "version is not implemented",
 			args:       []string{"--version"},
 			wantCode:   2,
-			wantStderr: "Rivo: 不支持的参数 \"--version\"\n请运行 'Rivo --help' 查看用法。\n",
+			wantStderr: "Rivo: unsupported argument \"--version\"\nRun 'Rivo --help' for usage.\n",
 		},
 		{
 			name:       "short version is not implemented",
 			args:       []string{"-v"},
 			wantCode:   2,
-			wantStderr: "Rivo: 不支持的参数 \"-v\"\n请运行 'Rivo --help' 查看用法。\n",
+			wantStderr: "Rivo: unsupported argument \"-v\"\nRun 'Rivo --help' for usage.\n",
 		},
 		{
 			name:       "positional argument is not implemented",
 			args:       []string{"hello"},
 			wantCode:   2,
-			wantStderr: "Rivo: 不支持的参数 \"hello\"\n请运行 'Rivo --help' 查看用法。\n",
+			wantStderr: "Rivo: unsupported argument \"hello\"\nRun 'Rivo --help' for usage.\n",
 		},
 	}
 
@@ -119,7 +119,7 @@ func TestRunMissingAPIKey(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Errorf("Run() stdout = %q, want empty", got)
 	}
-	if got := stderr.String(); got != "Rivo: API_KEY 未设置\n" {
+	if got := stderr.String(); got != "Rivo: API_KEY is not set\n" {
 		t.Errorf("Run() stderr = %q, want missing-key diagnostic", got)
 	}
 }

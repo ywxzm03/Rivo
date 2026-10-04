@@ -30,7 +30,7 @@ type SessionManager struct {
 func DefaultDir(cwd string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("session: 获取用户主目录失败: %w", err)
+		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
 	}
 	return filepath.Join(home, ".rivo", "agent", "sessions", dirName(cwd)), nil
 }
@@ -68,7 +68,7 @@ func New(cwd, dir string) *SessionManager {
 func Open(path, cwd string) (*SessionManager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("session: 读取会话文件失败: %w", err)
+		return nil, fmt.Errorf("session: failed to read session file: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		m := New(cwd, filepath.Dir(path))
@@ -156,20 +156,20 @@ func (m *SessionManager) AppendContextEdit(targetID string, replacement *Replace
 	// 1.目标存在且在活跃分支上
 	target, ok := m.byID[targetID]
 	if !ok {
-		return fmt.Errorf("session: entry %s 不存在", targetID)
+		return fmt.Errorf("session: entry %s not found", targetID)
 	}
 	if !m.onActiveBranch(targetID) {
-		return fmt.Errorf("session: entry %s 不在活跃分支上", targetID)
+		return fmt.Errorf("session: entry %s is not on the active branch", targetID)
 	}
 	// 2.只有 user/assistant/toolResult 消息可编辑
 	me, ok := target.(*MessageEntry)
 	if !ok {
-		return fmt.Errorf("session: entry %s 不是可编辑的消息 entry", targetID)
+		return fmt.Errorf("session: entry %s is not an editable message entry", targetID)
 	}
 	switch messageRole(me.Message) {
 	case "user", "assistant", "toolResult":
 	default:
-		return fmt.Errorf("session: entry %s 不是可编辑的消息 entry", targetID)
+		return fmt.Errorf("session: entry %s is not an editable message entry", targetID)
 	}
 	return m.appendEntry(&ContextEditEntry{TargetID: targetID, Replacement: replacement})
 }
@@ -177,7 +177,7 @@ func (m *SessionManager) AppendContextEdit(targetID string, replacement *Replace
 // Branch 只移动内存 leaf 到指定 entry，下一次追加形成新分支，不改写文件
 func (m *SessionManager) Branch(entryID string) error {
 	if _, ok := m.byID[entryID]; !ok {
-		return fmt.Errorf("session: entry %s 不存在", entryID)
+		return fmt.Errorf("session: entry %s not found", entryID)
 	}
 	m.leafID = entryID
 	return nil
@@ -230,29 +230,29 @@ func (m *SessionManager) persist(e Entry) error {
 // flush 独占创建会话文件并写入 header 与全部 entry；中途失败不清理不重写
 func (m *SessionManager) flush() error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
-		return fmt.Errorf("session: 创建会话目录失败: %w", err)
+		return fmt.Errorf("session: failed to create session directory: %w", err)
 	}
 	f, err := os.OpenFile(m.sessionFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("session: 创建会话文件失败: %w", err)
+		return fmt.Errorf("session: failed to create session file: %w", err)
 	}
 	defer f.Close()
 	// 1.写 header
 	headerLine, err := json.Marshal(m.header)
 	if err != nil {
-		return fmt.Errorf("session: 编码 header 失败: %w", err)
+		return fmt.Errorf("session: failed to encode session header: %w", err)
 	}
 	if _, err := f.Write(append(headerLine, '\n')); err != nil {
-		return fmt.Errorf("session: 写入会话文件失败: %w", err)
+		return fmt.Errorf("session: failed to write session file: %w", err)
 	}
 	// 2.按文件序写 entry，每行一个 JSON 对象
 	for _, e := range m.entries {
 		line, err := json.Marshal(e)
 		if err != nil {
-			return fmt.Errorf("session: 编码 entry 失败: %w", err)
+			return fmt.Errorf("session: failed to encode entry: %w", err)
 		}
 		if _, err := f.Write(append(line, '\n')); err != nil {
-			return fmt.Errorf("session: 写入会话文件失败: %w", err)
+			return fmt.Errorf("session: failed to write session file: %w", err)
 		}
 	}
 	m.flushed = true
@@ -263,17 +263,17 @@ func (m *SessionManager) flush() error {
 func (m *SessionManager) appendLine(e Entry) error {
 	line, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("session: 编码 entry 失败: %w", err)
+		return fmt.Errorf("session: failed to encode entry: %w", err)
 	}
 	f, err := os.OpenFile(m.sessionFile, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("session: 打开会话文件失败: %w", err)
+		return fmt.Errorf("session: failed to open session file: %w", err)
 	}
 	defer f.Close()
 	// 1.记录追加前长度，用于部分写失败时回滚
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("session: 获取会话文件大小失败: %w", err)
+		return fmt.Errorf("session: failed to stat session file: %w", err)
 	}
 	// 2.末尾缺换行先补一个，防止新行与残行粘连成一行
 	buf := make([]byte, 0, len(line)+2)
@@ -285,9 +285,9 @@ func (m *SessionManager) appendLine(e Entry) error {
 	if _, err := f.Write(buf); err != nil {
 		// 3.部分写失败回滚到追加前状态，缺换行标志保持不变，重试时整行重写
 		if rollbackErr := f.Truncate(info.Size()); rollbackErr != nil {
-			return fmt.Errorf("session: 写入会话文件失败: %w; 回滚失败: %v", err, rollbackErr)
+			return fmt.Errorf("session: failed to write session file: %w; rollback failed: %v", err, rollbackErr)
 		}
-		return fmt.Errorf("session: 写入会话文件失败: %w", err)
+		return fmt.Errorf("session: failed to write session file: %w", err)
 	}
 	m.needsNewline = false
 	return nil

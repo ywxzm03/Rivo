@@ -34,17 +34,17 @@ func TestConfigFromEnv(t *testing.T) {
 		{
 			name:         "missing api key",
 			env:          map[string]string{},
-			wantErr:      "API_KEY 未设置",
+			wantErr:      "API_KEY is not set",
 			wantProvider: deepseek.ProviderID,
 		},
 		{
 			name:         "blank api key",
 			env:          map[string]string{apiKeyEnv: "   "},
-			wantErr:      "API_KEY 未设置",
+			wantErr:      "API_KEY is not set",
 			wantProvider: deepseek.ProviderID,
 		},
 		{
-			name:         "未设置 PROVIDER 时落到默认厂商的模型",
+			name:         "falls back to default provider model when PROVIDER is unset",
 			env:          map[string]string{apiKeyEnv: "test-key"},
 			wantProvider: deepseek.ProviderID,
 			wantModel:    deepseek.DefaultModel,
@@ -69,27 +69,27 @@ func TestConfigFromEnv(t *testing.T) {
 			wantBase:     "https://example.test/v1",
 		},
 		{
-			name:         "deepseek 用自己的默认模型",
+			name:         "deepseek uses its own default model",
 			env:          map[string]string{providerEnv: "deepseek", apiKeyEnv: "test-key"},
 			wantProvider: deepseek.ProviderID,
 			wantModel:    deepseek.DefaultModel,
 		},
 		{
-			name:         "provider 大小写不敏感",
+			name:         "provider is case-insensitive",
 			env:          map[string]string{providerEnv: "DeepSeek", apiKeyEnv: "test-key"},
 			wantProvider: deepseek.ProviderID,
 			wantModel:    deepseek.DefaultModel,
 		},
 		{
-			name:         "provider 两侧空白被裁掉",
+			name:         "provider is trimmed of surrounding whitespace",
 			env:          map[string]string{providerEnv: "  openai  ", apiKeyEnv: "test-key"},
 			wantProvider: openai.ProviderID,
 			wantModel:    openai.DefaultModel,
 		},
 		{
-			name:    "未知厂商报错",
+			name:    "unknown provider errors",
 			env:     map[string]string{providerEnv: "no-such-provider", apiKeyEnv: "test-key"},
-			wantErr: `未知的厂商 "no-such-provider"`,
+			wantErr: `unknown provider "no-such-provider"`,
 		},
 	}
 

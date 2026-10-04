@@ -78,7 +78,7 @@ func TestRunREPLResumeEmptyList(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("runREPL() code = %d, want 0", code)
 	}
-	if !strings.Contains(stdout.String(), "没有可恢复的会话") {
+	if !strings.Contains(stdout.String(), "no sessions to resume") {
 		t.Errorf("stdout = %q, want empty-list notice", stdout.String())
 	}
 }
@@ -108,7 +108,7 @@ func TestRunREPLResumeSelectsByNumber(t *testing.T) {
 		t.Errorf("resumed = %q, want /s/old.jsonl", resumed)
 	}
 	// 列表按编号打印并带相对时间，恢复本身静默
-	if !strings.Contains(stdout.String(), "1. ") || !strings.Contains(stdout.String(), "2 小时前") {
+	if !strings.Contains(stdout.String(), "1. ") || !strings.Contains(stdout.String(), "2h ago") {
 		t.Errorf("stdout = %q, want numbered list with relative time", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "older") {

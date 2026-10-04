@@ -61,7 +61,7 @@ func TestReadSmallFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out != content {
-		t.Errorf("输出 = %q, want %q（应无行号、无续读提示）", out, content)
+		t.Errorf("output = %q, want %q (no line numbers, no continuation notice)", out, content)
 	}
 }
 
@@ -72,24 +72,24 @@ func TestReadKeepsTrailingNewline(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out != content {
-		t.Errorf("输出 = %q, want %q", out, content)
+		t.Errorf("output = %q, want %q", out, content)
 	}
 }
 
 func TestReadEmptyFile(t *testing.T) {
 	out, err := execRead(t, map[string]any{"path": writeTemp(t, "empty.txt", "")})
 	if err != nil {
-		t.Fatalf("空文件不该报错: %v", err)
+		t.Fatalf("empty file should not error: %v", err)
 	}
 	if out != "" {
-		t.Errorf("输出 = %q, want 空串", out)
+		t.Errorf("output = %q, want empty string", out)
 	}
 }
 
 func TestReadMissingFile(t *testing.T) {
 	_, err := execRead(t, map[string]any{"path": filepath.Join(t.TempDir(), "nope.txt")})
 	if err == nil {
-		t.Fatal("err = nil, want 文件不存在报错")
+		t.Fatal("err = nil, want a missing-file error")
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("err = %v, want fs.ErrNotExist", err)
@@ -99,7 +99,7 @@ func TestReadMissingFile(t *testing.T) {
 func TestReadMissingPathParam(t *testing.T) {
 	_, err := execRead(t, map[string]any{})
 	if err == nil {
-		t.Fatal("err = nil, want 缺 path 参数报错")
+		t.Fatal("err = nil, want a missing-path error")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestReadRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out != content {
-		t.Errorf("输出 = %q, want %q", out, content)
+		t.Errorf("output = %q, want %q", out, content)
 	}
 }
 
@@ -134,7 +134,7 @@ func TestReadTildePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out != content {
-		t.Errorf("输出 = %q, want %q", out, content)
+		t.Errorf("output = %q, want %q", out, content)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestReadTruncatesByLines(t *testing.T) {
 	want := strings.Join(rows[:2000], "\n") +
 		"\n\n[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]"
 	if out != want {
-		t.Errorf("输出不匹配\n got 结尾 %q\n want 结尾 %q", tail(out), tail(want))
+		t.Errorf("output mismatch\n got tail %q\n want tail %q", tail(out), tail(want))
 	}
 }
 
@@ -170,7 +170,7 @@ func TestReadTruncatesByBytes(t *testing.T) {
 	want := strings.Join(rows[:254], "\n") +
 		"\n\n[Showing lines 1-254 of 500 (50.0KB limit). Use offset=255 to continue.]"
 	if out != want {
-		t.Errorf("输出不匹配\n got 结尾 %q\n want 结尾 %q", tail(out), tail(want))
+		t.Errorf("output mismatch\n got tail %q\n want tail %q", tail(out), tail(want))
 	}
 }
 
@@ -183,10 +183,10 @@ func TestReadOffset(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := strings.Join(rows[50:], "\n"); out != want {
-		t.Errorf("输出不匹配\n got 开头 %q\n want 开头 %q", head(out), head(want))
+		t.Errorf("output mismatch\n got head %q\n want head %q", head(out), head(want))
 	}
 	if strings.Contains(out, "Use offset=") {
-		t.Error("读到文件末尾不该有续读提示")
+		t.Error("reading to EOF should not show a continuation notice")
 	}
 }
 
@@ -201,7 +201,7 @@ func TestReadLimit(t *testing.T) {
 	want := strings.Join(rows[:10], "\n") +
 		"\n\n[Showing lines 1-10 of 100. Use offset=11 to continue.]"
 	if out != want {
-		t.Errorf("输出不匹配\n got 结尾 %q\n want 结尾 %q", tail(out), tail(want))
+		t.Errorf("output mismatch\n got tail %q\n want tail %q", tail(out), tail(want))
 	}
 }
 
@@ -216,7 +216,7 @@ func TestReadOffsetWithLimit(t *testing.T) {
 	want := strings.Join(rows[40:60], "\n") +
 		"\n\n[Showing lines 41-60 of 100. Use offset=61 to continue.]"
 	if out != want {
-		t.Errorf("输出不匹配\n got 结尾 %q\n want 结尾 %q", tail(out), tail(want))
+		t.Errorf("output mismatch\n got tail %q\n want tail %q", tail(out), tail(want))
 	}
 }
 
@@ -233,7 +233,7 @@ func TestReadLimitBeyondToolCap(t *testing.T) {
 	want := strings.Join(rows[:2000], "\n") +
 		"\n\n[Showing lines 1-2000 of 10000. Use offset=2001 to continue.]"
 	if out != want {
-		t.Errorf("输出不匹配\n got 结尾 %q\n want 结尾 %q", tail(out), tail(want))
+		t.Errorf("output mismatch\n got tail %q\n want tail %q", tail(out), tail(want))
 	}
 }
 
@@ -242,7 +242,7 @@ func TestReadOffsetBeyondEnd(t *testing.T) {
 
 	_, err := execRead(t, map[string]any{"path": path, "offset": float64(100)})
 	if err == nil {
-		t.Fatal("err = nil, want 越界报错")
+		t.Fatal("err = nil, want an out-of-range error")
 	}
 	want := "Offset 100 is beyond end of file (3 lines total)"
 	if err.Error() != want {
@@ -259,10 +259,10 @@ func TestReadFirstLineExceedsByteLimit(t *testing.T) {
 	}
 	want := "[Line 1 is 58.6KB, exceeds 50.0KB limit. Use offset=2 to continue.]"
 	if out != want {
-		t.Errorf("输出 = %q, want %q", out, want)
+		t.Errorf("output = %q, want %q", out, want)
 	}
 	if strings.Contains(out, "bash") {
-		t.Error("提示里不该出现 bash —— Rivo 没有这个工具")
+		t.Error("the notice should not mention bash — Rivo has no such tool")
 	}
 }
 
@@ -277,7 +277,7 @@ func TestReadNonPositiveLimitReadsWholeFile(t *testing.T) {
 			t.Fatalf("limit=%v: %v", limit, err)
 		}
 		if want := strings.Join(rows, "\n"); out != want {
-			t.Errorf("limit=%v: 输出 = %q, want 整个文件", limit, head(out))
+			t.Errorf("limit=%v: output = %q, want the whole file", limit, head(out))
 		}
 	}
 }
@@ -286,16 +286,16 @@ func TestReadDefinition(t *testing.T) {
 	r := &Read{}
 
 	if r.Name() != "read" {
-		t.Errorf("Name() = %q, want %q（模型看到的标识，必须与 pi 一致）", r.Name(), "read")
+		t.Errorf("Name() = %q, want %q (model-facing identifier must match pi)", r.Name(), "read")
 	}
 	if !strings.Contains(r.Description(), "truncated to 2000 lines or 50KB") {
-		t.Errorf("Description() = %q, want 含截断上限", r.Description())
+		t.Errorf("Description() = %q, want it to mention the truncation limit", r.Description())
 	}
 	if !strings.Contains(r.Description(), "images (jpg, png, webp)") {
-		t.Errorf("Description() = %q, want 含支持的图片格式", r.Description())
+		t.Errorf("Description() = %q, want it to mention supported image formats", r.Description())
 	}
 	if strings.Contains(r.Description(), "gif") || strings.Contains(r.Description(), "bmp") {
-		t.Error("Description() 不该提 gif/bmp —— 本工具不支持这两种")
+		t.Error("Description() should not mention gif/bmp — this tool does not support them")
 	}
 
 	params := r.Parameters()
@@ -312,7 +312,7 @@ func TestReadDefinition(t *testing.T) {
 	}
 	for _, key := range []string{"path", "offset", "limit"} {
 		if _, ok := props[key]; !ok {
-			t.Errorf("parameters.properties 缺 %q", key)
+			t.Errorf("parameters.properties is missing %q", key)
 		}
 	}
 }
@@ -370,10 +370,10 @@ func TestSniffImage(t *testing.T) {
 		{"png", makePNG(t, 2, 2), "image/png"},
 		{"jpeg", makeJPEG(t, 2, 2), "image/jpeg"},
 		{"webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp"},
-		{"纯文本", []byte("hello world"), ""},
-		{"空文件", nil, ""},
-		{"jpeg-ls 不是 jpeg", []byte{0xff, 0xd8, 0xff, 0xf7}, ""},
-		{"riff 但不是 webp", []byte("RIFF\x00\x00\x00\x00WAVEfmt "), ""},
+		{"plain text", []byte("hello world"), ""},
+		{"empty file", nil, ""},
+		{"jpeg-ls is not jpeg", []byte{0xff, 0xd8, 0xff, 0xf7}, ""},
+		{"riff but not webp", []byte("RIFF\x00\x00\x00\x00WAVEfmt "), ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -393,12 +393,12 @@ func TestReadImageAsAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(content.Content) != 2 {
-		t.Fatalf("content 有 %d 项, want 2（文字 + 图片）", len(content.Content))
+		t.Fatalf("content has %d items, want 2 (text + image)", len(content.Content))
 	}
 
 	text, ok := content.Content[0].(llm.TextContent)
 	if !ok || text.Text != "Read image file [image/png]" {
-		t.Errorf("content[0] = %+v, want 图片说明", content.Content[0])
+		t.Errorf("content[0] = %+v, want an image description", content.Content[0])
 	}
 	img, ok := content.Content[1].(llm.ImageContent)
 	if !ok {
@@ -409,7 +409,7 @@ func TestReadImageAsAttachment(t *testing.T) {
 	}
 	// 小图应当原样返回，不重新编码
 	if want := base64.StdEncoding.EncodeToString(data); img.Data != want {
-		t.Error("小图的 base64 应与原始字节一致（不该被重新编码）")
+		t.Error("small image base64 should match the original bytes (no re-encoding)")
 	}
 }
 
@@ -421,18 +421,18 @@ func TestReadImageWithoutVisionSupport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(content.Content) != 1 {
-		t.Fatalf("content 有 %d 项, want 1（模型不收图，只给文字）", len(content.Content))
+		t.Fatalf("content has %d items, want 1 (model takes no image; text only)", len(content.Content))
 	}
 	text, _ := content.Content[0].(llm.TextContent)
 	want := "Read image file [image/png]\n" + noVisionNote
 	if text.Text != want {
-		t.Errorf("文本 = %q, want %q（模型看不到图，尺寸之类的信息没有用处）", text.Text, want)
+		t.Errorf("text = %q, want %q (model cannot see the image; dimensions are useless)", text.Text, want)
 	}
 }
 
 // 模型不收图时完全不该碰图片内容：坏图与好图给出同样的说明
 func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
-	broken := append(append([]byte{}, pngSignature...), []byte("这不是真的 png")...)
+	broken := append(append([]byte{}, pngSignature...), []byte("this is not a real png")...)
 	path := writeTempBytes(t, "broken.png", broken)
 
 	content, err := (&Read{}).Execute(context.Background(), map[string]any{"path": path})
@@ -442,7 +442,7 @@ func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
 	text, _ := content.Content[0].(llm.TextContent)
 	want := "Read image file [image/png]\n" + noVisionNote
 	if text.Text != want {
-		t.Errorf("文本 = %q, want %q（说明它去解码了，不该）", text.Text, want)
+		t.Errorf("text = %q, want %q (it decoded the broken image; it should not)", text.Text, want)
 	}
 }
 
@@ -450,7 +450,7 @@ func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
 func TestImageJPEGQualitiesDescend(t *testing.T) {
 	for i := 1; i < len(imageJPEGQualities); i++ {
 		if imageJPEGQualities[i] >= imageJPEGQualities[i-1] {
-			t.Errorf("第 %d 档质量 %d 不低于前一档 %d —— 这一档永远选不到",
+			t.Errorf("quality tier %d (%d) is not smaller than the previous %d — this tier is never selected",
 				i, imageJPEGQualities[i], imageJPEGQualities[i-1])
 		}
 	}
@@ -463,19 +463,19 @@ func TestReadImageDecodeFailure(t *testing.T) {
 
 	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), map[string]any{"path": path})
 	if err != nil {
-		t.Fatalf("不该返回 error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(content.Content) != 1 {
-		t.Fatalf("content 有 %d 项, want 1（只给文字说明）", len(content.Content))
+		t.Fatalf("content has %d items, want 1 (text description only)", len(content.Content))
 	}
 	text, _ := content.Content[0].(llm.TextContent)
 	if !strings.Contains(text.Text, "could not be converted") {
-		t.Errorf("缺少失败说明: %q", text.Text)
+		t.Errorf("missing failure description: %q", text.Text)
 	}
 }
 
 func TestProcessImage(t *testing.T) {
-	t.Run("尺寸超限时等比缩小", func(t *testing.T) {
+	t.Run("scales down proportionally when oversized", func(t *testing.T) {
 		result, err := processImage(makePNG(t, 3000, 100), "image/png", defaultImageLimits)
 		if err != nil {
 			t.Fatal(err)
@@ -487,33 +487,33 @@ func TestProcessImage(t *testing.T) {
 			t.Errorf("Width = %d, want %d", result.Width, imageMaxWidth)
 		}
 		if result.OriginalWidth != 3000 || result.OriginalHeight != 100 {
-			t.Errorf("原尺寸 = %dx%d, want 3000x100", result.OriginalWidth, result.OriginalHeight)
+			t.Errorf("original size = %dx%d, want 3000x100", result.OriginalWidth, result.OriginalHeight)
 		}
 		note := dimensionNote(result)
 		if !strings.Contains(note, "original 3000x100") {
 			t.Errorf("dimensionNote() = %q", note)
 		}
 		if !strings.Contains(note, "Multiply coordinates by") {
-			t.Errorf("dimensionNote() = %q, want 含坐标换算提示", note)
+			t.Errorf("dimensionNote() = %q, want it to mention coordinate conversion", note)
 		}
 	})
 
-	t.Run("字节超限时逐轮缩小直到装得下", func(t *testing.T) {
+	t.Run("shrinks round by round until it fits when over the byte limit", func(t *testing.T) {
 		// 上限压到 4KB：200x200 的噪点图连 JPEG 最低质量都装不下，必须靠缩尺寸
 		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 4 * 1024}
 		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
 		if err != nil {
-			t.Fatalf("err = %v, want 缩到限内", err)
+			t.Fatalf("err = %v, want it to shrink within the limit", err)
 		}
 		if len(result.Data) >= limits.maxBytes {
-			t.Errorf("输出 %d 字节, 仍超过上限 %d", len(result.Data), limits.maxBytes)
+			t.Errorf("output is %d bytes, still over the limit %d", len(result.Data), limits.maxBytes)
 		}
 		if result.Width >= 200 {
-			t.Errorf("Width = %d, want 比 200 小（应缩过尺寸）", result.Width)
+			t.Errorf("Width = %d, want it below 200 (should have been resized)", result.Width)
 		}
 	})
 
-	t.Run("同样尺寸下换编码就能装下", func(t *testing.T) {
+	t.Run("re-encoding at the same size fits", func(t *testing.T) {
 		// 上限够大：不必缩尺寸，换 JPEG 编码即可，Resized 仍为 true
 		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 20 * 1024}
 		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
@@ -521,17 +521,17 @@ func TestProcessImage(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !result.Resized {
-			t.Error("Resized = false, want true（重新编码过）")
+			t.Error("Resized = false, want true (re-encoded)")
 		}
 		if result.Width != 200 {
-			t.Errorf("Width = %d, want 200（尺寸没变，只换了编码）", result.Width)
+			t.Errorf("Width = %d, want 200 (size unchanged; only re-encoded)", result.Width)
 		}
 		if result.MIMEType == "image/png" {
-			t.Errorf("MIMEType = %q, want 换成更小的 JPEG", result.MIMEType)
+			t.Errorf("MIMEType = %q, want it switched to the smaller JPEG", result.MIMEType)
 		}
 	})
 
-	t.Run("缩到 1x1 仍装不下就报错", func(t *testing.T) {
+	t.Run("errors when even 1x1 does not fit", func(t *testing.T) {
 		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 10}
 		_, err := processImage(makeNoisePNG(t, 50, 50), "image/png", limits)
 		if !errors.Is(err, errImageTooBig) {
@@ -539,7 +539,7 @@ func TestProcessImage(t *testing.T) {
 		}
 	})
 
-	t.Run("网页格式也能处理", func(t *testing.T) {
+	t.Run("web formats are handled too", func(t *testing.T) {
 		// 用 JPEG 走一遍，确认解码器分派正确
 		result, err := processImage(makeJPEG(t, 20, 20), "image/jpeg", defaultImageLimits)
 		if err != nil {

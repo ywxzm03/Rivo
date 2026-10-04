@@ -31,7 +31,7 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 			effort = llm.ReasoningEffortMedium
 		}
 		if !validReasoningEffort(effort) {
-			return responses.ResponseNewParams{}, fmt.Errorf("openai: 不支持的 reasoning effort %q", effort)
+			return responses.ResponseNewParams{}, fmt.Errorf("openai: unsupported reasoning effort %q", effort)
 		}
 		params.Reasoning = shared.ReasoningParam{
 			Effort:  shared.ReasoningEffort(effort),
@@ -82,7 +82,7 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 		case llm.ToolResultMessage:
 			items = append(items, toolResultItem(msg))
 		default:
-			return nil, fmt.Errorf("openai: 不支持的消息类型 %T", m)
+			return nil, fmt.Errorf("openai: unsupported message type %T", m)
 		}
 	}
 	return items, nil
@@ -134,7 +134,7 @@ func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.Re
 			flush()
 			args, err := json.Marshal(v.Arguments)
 			if err != nil {
-				return nil, fmt.Errorf("openai: 序列化工具 %q 的参数: %w", v.Name, err)
+				return nil, fmt.Errorf("openai: marshal tool %q arguments: %w", v.Name, err)
 			}
 			items = append(items, responses.ResponseInputItemParamOfFunctionCall(
 				string(args), v.ID, v.Name,
@@ -149,7 +149,7 @@ func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.Re
 func reasoningItemParam(content llm.ThinkingContent) (responses.ResponseReasoningItemParam, error) {
 	var item responses.ResponseReasoningItem
 	if err := json.Unmarshal([]byte(content.ThinkingSignature), &item); err != nil {
-		return responses.ResponseReasoningItemParam{}, fmt.Errorf("openai: 解析 reasoning item: %w", err)
+		return responses.ResponseReasoningItemParam{}, fmt.Errorf("openai: parse reasoning item: %w", err)
 	}
 	return item.ToParam(), nil
 }
@@ -259,7 +259,7 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			if signature == "" {
 				data, err := json.Marshal(reasoning)
 				if err != nil {
-					return nil, nil, fmt.Errorf("openai: 序列化 reasoning item: %w", err)
+					return nil, nil, fmt.Errorf("openai: marshal reasoning item: %w", err)
 				}
 				signature = string(data)
 			}
@@ -283,7 +283,7 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			calls = append(calls, tc)
 			msg.Content = append(msg.Content, tc)
 		default:
-			return nil, nil, fmt.Errorf("openai: 不支持的响应 output item 类型 %q", item.Type)
+			return nil, nil, fmt.Errorf("openai: unsupported response output item type %q", item.Type)
 		}
 
 	}
@@ -311,7 +311,7 @@ func toolCallFromItem(item responses.ResponseOutputItemUnion) (llm.ToolCall, err
 	args := map[string]any{}
 	if raw := item.Arguments.OfString; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return llm.ToolCall{}, fmt.Errorf("openai: 工具 %q 的参数不是合法 JSON: %w", item.Name, err)
+			return llm.ToolCall{}, fmt.Errorf("openai: tool %q arguments are not valid JSON: %w", item.Name, err)
 		}
 	}
 	return llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args}, nil

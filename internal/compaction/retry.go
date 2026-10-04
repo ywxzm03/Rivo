@@ -155,17 +155,17 @@ func retrySummarize(ctx context.Context, policy RetryPolicy, produce func() (str
 // validateSummary 在持久化前校验摘要响应：截断的摘要只有部分文本，绝不能变成会话检查点
 func validateSummary(message *llm.AssistantMessage) error {
 	if message == nil {
-		return fmt.Errorf("compaction: 摘要响应为空")
+		return fmt.Errorf("compaction: empty summary response")
 	}
 	switch message.StopReason {
 	case llm.StopReasonError:
-		return fmt.Errorf("compaction: 摘要生成失败")
+		return fmt.Errorf("compaction: summary generation failed")
 	case llm.StopReasonLength:
-		return fmt.Errorf("compaction: 摘要被输出长度截断")
+		return fmt.Errorf("compaction: summary truncated by output length")
 	}
 	for _, c := range message.Content {
 		if _, ok := c.(llm.ToolCall); ok {
-			return fmt.Errorf("compaction: 摘要试图调用工具")
+			return fmt.Errorf("compaction: summary attempted to call tools")
 		}
 	}
 	return nil

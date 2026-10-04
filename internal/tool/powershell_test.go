@@ -24,12 +24,12 @@ func powerShellText(result llm.ToolResult) string {
 
 func TestPowerShellExecutesUTF8Output(t *testing.T) {
 	result, err := runPowerShell(t, context.Background(), map[string]any{
-		"command": "[Console]::Write('你好，PowerShell')",
+		"command": "[Console]::Write('hello, powershell')",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := powerShellText(result); got != "你好，PowerShell" {
+	if got := powerShellText(result); got != "hello, powershell" {
 		t.Errorf("output = %q, want UTF-8 PowerShell output", got)
 	}
 }

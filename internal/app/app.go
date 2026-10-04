@@ -31,7 +31,7 @@ func (a *App) ModelFallbackMessage() string {
 func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("app: 获取工作目录失败: %w", err)
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
 	}
 	sm, err := session.Open(path, cwd)
 	if err != nil {
@@ -90,7 +90,7 @@ func New(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("app: 获取工作目录失败: %w", err)
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
 	}
 	if dir == "" {
 		dir, err = session.DefaultDir(cwd)

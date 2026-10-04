@@ -119,7 +119,7 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("获取工作目录失败: %w", err)
+		return nil, fmt.Errorf("failed to get working directory: %w", err)
 	}
 	infos, err := session.ListSessions(cwd)
 	if err != nil {
@@ -140,7 +140,7 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
-			fmt.Fprintf(stderr, "Rivo: 读取输入失败: %v\n", err)
+			fmt.Fprintf(stderr, "Rivo: failed to read input: %v\n", err)
 			return 1
 		}
 		if line == "" {
@@ -190,8 +190,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "--continue", "--resume":
 			continueRecent = true
 		default:
-			fmt.Fprintf(stderr, "Rivo: 不支持的参数 %q\n", arg)
-			fmt.Fprintln(stderr, "请运行 'Rivo --help' 查看用法。")
+			fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", arg)
+			fmt.Fprintln(stderr, "Run 'Rivo --help' for usage.")
 			return 2
 		}
 	}
@@ -207,17 +207,17 @@ func handleResume(reader *bufio.Reader, stdout, stderr io.Writer, listSessions f
 		return true
 	}
 	if len(infos) == 0 {
-		fmt.Fprintln(stdout, "没有可恢复的会话")
+		fmt.Fprintln(stdout, "no sessions to resume")
 		return true
 	}
 	// 1.按编号打印列表：编号 + 相对时间 + 首条用户消息摘要
 	for i, info := range infos {
 		fmt.Fprintf(stdout, "%d. %s  %s\n", i+1, relativeTime(info.ModTime), info.Summary)
 	}
-	fmt.Fprint(stdout, "输入编号恢复，回车取消: ")
+	fmt.Fprint(stdout, "Enter a number to resume, press Enter to cancel: ")
 	line, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		fmt.Fprintf(stderr, "Rivo: 读取输入失败: %v\n", err)
+		fmt.Fprintf(stderr, "Rivo: failed to read input: %v\n", err)
 		return false
 	}
 	// 2.非法编号与回车都视为取消
@@ -238,13 +238,13 @@ func relativeTime(t time.Time) string {
 	case d < 0:
 		return t.Format("2006-01-02")
 	case d < time.Minute:
-		return "刚刚"
+		return "just now"
 	case d < time.Hour:
-		return fmt.Sprintf("%d 分钟前", int(d.Minutes()))
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%d 小时前", int(d.Hours()))
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%d 天前", int(d.Hours()/24))
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	default:
 		return t.Format("2006-01-02")
 	}

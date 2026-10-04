@@ -26,7 +26,7 @@ func assertWire(t *testing.T, v any, want string) {
 		t.Fatalf("unmarshal want: %v", err)
 	}
 	if !reflect.DeepEqual(gotAny, wantAny) {
-		t.Errorf("wire JSON 不一致\ngot  %s\nwant %s", b, want)
+		t.Errorf("wire JSON mismatch\ngot  %s\nwant %s", b, want)
 	}
 }
 
@@ -61,7 +61,7 @@ func TestBuildParams(t *testing.T) {
 		parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 	}
 
-	t.Run("system prompt 生成首条 system 消息", func(t *testing.T) {
+	t.Run("system prompt generates the first system message", func(t *testing.T) {
 		params, err := BuildParams(testModel(), llm.Context{SystemPrompt: "be brief"}, llm.Options{})
 		if err != nil {
 			t.Fatal(err)
@@ -71,9 +71,9 @@ func TestBuildParams(t *testing.T) {
 			`{"model":"gpt-5","input":[{"role":"system","content":"be brief"}]}`)
 	})
 
-	t.Run("用户消息的文本与图片合为一条消息", func(t *testing.T) {
+	t.Run("user text and image merge into one message", func(t *testing.T) {
 		c := llm.Context{Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{
-			llm.TextContent{Text: "看这张图"},
+			llm.TextContent{Text: "look at this image"},
 			llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
 		}}}}
 		params, err := BuildParams(testModel(), c, llm.Options{})
@@ -82,13 +82,13 @@ func TestBuildParams(t *testing.T) {
 		}
 		assertWire(t, params,
 			`{"model":"gpt-5","input":[{"role":"user","content":[`+
-				`{"type":"input_text","text":"看这张图"},`+
+				`{"type":"input_text","text":"look at this image"},`+
 				`{"type":"input_image","image_url":"data:image/png;base64,aGk=","detail":"auto"}]}]}`)
 	})
 
-	t.Run("助手消息拆为 message 与 function_call", func(t *testing.T) {
+	t.Run("assistant message splits into message and function_call", func(t *testing.T) {
 		c := llm.Context{Messages: []llm.Message{llm.AssistantMessage{Content: []llm.Content{
-			llm.TextContent{Text: "我来试试"},
+			llm.TextContent{Text: "let me try"},
 			llm.ToolCall{ID: "call_1", Name: "ping", Arguments: map[string]any{}},
 		}}}}
 		params, err := BuildParams(testModel(), c, llm.Options{})
@@ -98,11 +98,11 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params,
 			`{"model":"gpt-5","input":[`+
 				`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
-				`"content":[{"type":"output_text","text":"我来试试","annotations":[]}]},`+
+				`"content":[{"type":"output_text","text":"let me try","annotations":[]}]},`+
 				`{"type":"function_call","arguments":"{}","call_id":"call_1","name":"ping"}]}`)
 	})
 
-	t.Run("工具结果回填为 function_call_output", func(t *testing.T) {
+	t.Run("tool result maps to function_call_output", func(t *testing.T) {
 		c := llm.Context{Messages: []llm.Message{llm.ToolResultMessage{
 			ToolCallID: "call_1",
 			ToolName:   "ping",
@@ -116,7 +116,7 @@ func TestBuildParams(t *testing.T) {
 			`{"model":"gpt-5","input":[{"type":"function_call_output","call_id":"call_1","output":"pong"}]}`)
 	})
 
-	t.Run("含图片的工具结果改走结构化输出", func(t *testing.T) {
+	t.Run("tool result with image switches to structured output", func(t *testing.T) {
 		c := llm.Context{Messages: []llm.Message{llm.ToolResultMessage{
 			ToolCallID: "call_1",
 			ToolName:   "read",
@@ -135,7 +135,7 @@ func TestBuildParams(t *testing.T) {
 				`{"type":"input_image","image_url":"data:image/png;base64,aGk=","detail":"auto"}]}]}`)
 	})
 
-	t.Run("工具定义转 function tool", func(t *testing.T) {
+	t.Run("tool definition converts to function tool", func(t *testing.T) {
 		params, err := BuildParams(testModel(), llm.Context{Tools: []llm.Tool{pingTool}}, llm.Options{})
 		if err != nil {
 			t.Fatal(err)
@@ -144,11 +144,11 @@ func TestBuildParams(t *testing.T) {
 			`{"model":"gpt-5","tools":[{"type":"function","name":"ping","description":"Return pong","parameters":{"properties":{},"type":"object"}}]}`)
 	})
 
-	t.Run("多轮对话中助手消息按序号取 id", func(t *testing.T) {
+	t.Run("assistant messages take ids by index across turns", func(t *testing.T) {
 		c := llm.Context{Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "pi"}}},
 			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "3.14159"}}},
-			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "你好"}}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
 		}}
 		params, err := BuildParams(testModel(), c, llm.Options{})
 		if err != nil {
@@ -159,10 +159,10 @@ func TestBuildParams(t *testing.T) {
 				`{"role":"user","content":[{"type":"input_text","text":"pi"}]},`+
 				`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_1",`+
 				`"content":[{"type":"output_text","text":"3.14159","annotations":[]}]},`+
-				`{"role":"user","content":[{"type":"input_text","text":"你好"}]}]}`)
+				`{"role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	})
 
-	t.Run("reasoning 请求启用摘要和加密内容", func(t *testing.T) {
+	t.Run("reasoning request enables summary and encrypted content", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ReasoningEffort = llm.ReasoningEffortHigh
@@ -173,7 +173,7 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"high","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
 	})
 
-	t.Run("DeepSeek reasoning 模型使用 Responses 请求", func(t *testing.T) {
+	t.Run("DeepSeek reasoning model uses Responses request", func(t *testing.T) {
 		model := llm.Model{
 			ID:              "deepseek-flash",
 			Provider:        "deepseek",
@@ -188,7 +188,7 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params, `{"model":"deepseek-flash","reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"]}`)
 	})
 
-	t.Run("reasoning effort 不接受未定义等级", func(t *testing.T) {
+	t.Run("reasoning effort rejects unknown levels", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ReasoningEffort = llm.ReasoningEffort("ultra")
@@ -197,7 +197,7 @@ func TestBuildParams(t *testing.T) {
 		}
 	})
 
-	t.Run("assistant reasoning item 原样回放", func(t *testing.T) {
+	t.Run("assistant reasoning item replays verbatim", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		signature := `{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"cot"}],"encrypted_content":"enc","status":"completed"}`
@@ -226,7 +226,7 @@ func responseFromJSON(t *testing.T, s string) responses.Response {
 }
 
 func TestBuildAssistantMessage(t *testing.T) {
-	t.Run("reasoning summary 优先并保存原始 item", func(t *testing.T) {
+	t.Run("reasoning summary takes precedence and keeps the original item", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_reasoning","created_at":0,"status":"completed",
 			"output":[{"type":"reasoning","id":"r1","summary":[{"type":"summary_text","text":"summary"}],
@@ -246,12 +246,12 @@ func TestBuildAssistantMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("文本与工具调用，stopReason 为 toolUse", func(t *testing.T) {
+	t.Run("text and tool calls with stopReason toolUse", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_1","created_at":0,"status":"completed",
 			"output":[
 				{"type":"message","id":"m1","role":"assistant","status":"completed",
-				 "content":[{"type":"output_text","text":"我来试试"}]},
+				 "content":[{"type":"output_text","text":"let me try"}]},
 				{"type":"function_call","id":"fc1","call_id":"call_1","name":"ping","arguments":"{\"k\":1}"}
 			],
 			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
@@ -277,7 +277,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("incomplete 截断标记为 length", func(t *testing.T) {
+	t.Run("incomplete truncation marked as length", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_2","created_at":0,"status":"incomplete",
 			"incomplete_details":{"reason":"max_output_tokens"},
@@ -294,7 +294,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("空参数解析为空 map", func(t *testing.T) {
+	t.Run("empty arguments parse to an empty map", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_3","created_at":0,"status":"completed",
 			"output":[{"type":"function_call","id":"fc3","call_id":"call_3","name":"ping","arguments":""}],
@@ -309,25 +309,25 @@ func TestBuildAssistantMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("非法参数 JSON 返回错误", func(t *testing.T) {
+	t.Run("invalid arguments JSON returns an error", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_4","created_at":0,"status":"completed",
 			"output":[{"type":"function_call","id":"fc4","call_id":"call_4","name":"ping","arguments":"{bad"}],
 			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
 		}`)
 		if _, _, err := BuildAssistantMessage(resp); err == nil {
-			t.Error("期望非法 JSON 报错")
+			t.Error("expected an error for invalid JSON")
 		}
 	})
 
-	t.Run("custom tool 返回不支持错误", func(t *testing.T) {
+	t.Run("custom tool returns an unsupported error", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_custom","created_at":0,"status":"completed",
 			"output":[{"type":"custom_tool_call","id":"ct1","call_id":"call_custom","name":"apply_patch","input":"patch"}],
 			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
 		}`)
 		if _, _, err := BuildAssistantMessage(resp); err == nil {
-			t.Error("期望 custom tool 不支持错误")
+			t.Error("expected an unsupported error for custom tool")
 		}
 	})
 }
@@ -336,7 +336,7 @@ func TestAssistantMessageReplayRoundTrip(t *testing.T) {
 	resp := responseFromJSON(t, `{
 		"id":"resp_1","created_at":0,"status":"completed",
 		"output":[{"type":"message","id":"msg_abc","role":"assistant","status":"completed",
-			"content":[{"type":"output_text","text":"π 约等于 3.14159"}]}],
+			"content":[{"type":"output_text","text":"pi is approximately 3.14159"}]}],
 		"usage":{"input_tokens":3,"output_tokens":9,"total_tokens":12}
 	}`)
 
@@ -353,5 +353,5 @@ func TestAssistantMessageReplayRoundTrip(t *testing.T) {
 	assertWire(t, params,
 		`{"model":"gpt-5","input":[`+
 			`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
-			`"content":[{"type":"output_text","text":"π 约等于 3.14159","annotations":[]}]}]}`)
+			`"content":[{"type":"output_text","text":"pi is approximately 3.14159","annotations":[]}]}]}`)
 }

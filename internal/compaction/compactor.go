@@ -60,7 +60,7 @@ func (c *Compactor) Compact(ctx context.Context, messages []llm.Message, previou
 	}
 	plan := FindCutPoint(messages, start, c.Config.KeepRecentTokens)
 	if plan.CutIndex <= start {
-		return Result{}, fmt.Errorf("compaction: 没有可压缩的历史区间")
+		return Result{}, fmt.Errorf("compaction: no compressible history range")
 	}
 	result := Result{
 		CutIndex:     plan.CutIndex,
@@ -138,7 +138,7 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 	produce := func() (string, llm.Usage, error) {
 		events, err := c.StreamFn(ctx, c.Model, modelCtx, opts)
 		if err != nil {
-			return "", llm.Usage{}, fmt.Errorf("compaction: 摘要调用失败: %w", err)
+			return "", llm.Usage{}, fmt.Errorf("compaction: summary call failed: %w", err)
 		}
 		var final *llm.AssistantMessage
 		var usage llm.Usage
@@ -151,13 +151,13 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 			case llm.AssistantMessageErrorEvent:
 				if ev.Err != nil {
 					// 上游中断必须显式报错，避免流关闭后被误报成「摘要为空」
-					return "", usage, fmt.Errorf("compaction: 摘要调用失败: %w", ev.Err)
+					return "", usage, fmt.Errorf("compaction: summary call failed: %w", ev.Err)
 				}
-				return "", usage, fmt.Errorf("compaction: 摘要调用失败: 模型流返回空错误")
+				return "", usage, fmt.Errorf("compaction: summary call failed: model stream returned empty error")
 			}
 		}
 		if final == nil {
-			return "", usage, fmt.Errorf("compaction: 摘要调用失败: 流已结束但未收到最终消息")
+			return "", usage, fmt.Errorf("compaction: summary call failed: stream ended without a final message")
 		}
 		// 摘要质量校验：宁可放弃本次压缩，也不让坏摘要变成会话检查点
 		if err := validateSummary(final); err != nil {
@@ -165,7 +165,7 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 		}
 		text := summaryText(final.Content)
 		if text == "" {
-			return "", usage, fmt.Errorf("compaction: 摘要为空")
+			return "", usage, fmt.Errorf("compaction: empty summary")
 		}
 		return text, usage, nil
 	}

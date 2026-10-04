@@ -127,7 +127,7 @@ func TestCompactSplitTurnMergesSummaries(t *testing.T) {
 func TestCompactRejectsEmptySummary(t *testing.T) {
 	streamFn, _ := recordingStreamFn("")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "摘要为空") {
+	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "empty summary") {
 		t.Fatalf("err = %v, want empty summary error", err)
 	}
 }
@@ -143,7 +143,7 @@ func TestCompactRejectsTruncatedSummary(t *testing.T) {
 		return ch, nil
 	}
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "截断") {
+	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "truncated by output length") {
 		t.Fatalf("err = %v, want truncated error", err)
 	}
 }

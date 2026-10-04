@@ -23,7 +23,7 @@ func main() {
 			<-sigCh
 
 			go func() {
-				fmt.Fprintln(stdout, "再执行一次 Ctrl + C 则会退出")
+				fmt.Fprintln(stdout, "Press Ctrl + C again to exit")
 				fmt.Fprint(stdout, ">")
 			}()
 

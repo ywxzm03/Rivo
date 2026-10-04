@@ -10,7 +10,7 @@ import (
 )
 
 // errUnknownRole 标记 message entry 携带了未知角色，上层将其降级为 UnknownEntry
-var errUnknownRole = errors.New("session: 未知消息角色")
+var errUnknownRole = errors.New("session: unknown message role")
 
 // entryLine 单行 entry 的探测结构，只取 type 字段
 type entryLine struct {
@@ -57,7 +57,7 @@ func parseFile(data []byte) (*Header, []Entry, error) {
 		entries = append(entries, entry)
 	}
 	if header == nil {
-		return nil, nil, errors.New("session: 缺少会话 header")
+		return nil, nil, errors.New("session: missing session header")
 	}
 	return header, entries, nil
 }
@@ -65,17 +65,17 @@ func parseFile(data []byte) (*Header, []Entry, error) {
 // decodeHeader 校验并解码 header：类型必须是 session、版本必须是当前版本、id 非空
 func decodeHeader(line []byte, typ string) (*Header, error) {
 	if typ != TypeSession {
-		return nil, errors.New("session: 缺少会话 header")
+		return nil, errors.New("session: missing session header")
 	}
 	var h Header
 	if err := json.Unmarshal(line, &h); err != nil {
-		return nil, fmt.Errorf("session: header 非法: %w", err)
+		return nil, fmt.Errorf("session: invalid session header: %w", err)
 	}
 	if h.Version != CurrentVersion {
-		return nil, fmt.Errorf("session: 不支持的会话版本 %d", h.Version)
+		return nil, fmt.Errorf("session: unsupported session version %d", h.Version)
 	}
 	if h.ID == "" {
-		return nil, errors.New("session: header 缺少 id")
+		return nil, errors.New("session: session header missing id")
 	}
 	return &h, nil
 }
@@ -216,7 +216,7 @@ func encodeContents(contents []llm.Content) (json.RawMessage, error) {
 				Arguments map[string]any `json:"arguments,omitempty"`
 			}{string(llm.ContentToolCall), c.ID, c.Name, c.Arguments}
 		default:
-			return nil, fmt.Errorf("session: 不支持的 content 类型 %T", c)
+			return nil, fmt.Errorf("session: unsupported content type %T", c)
 		}
 		block, err := json.Marshal(wire)
 		if err != nil {
@@ -343,7 +343,7 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 		}
 		return json.Marshal(wire)
 	default:
-		return nil, fmt.Errorf("session: 不支持的消息类型 %T", m)
+		return nil, fmt.Errorf("session: unsupported message type %T", m)
 	}
 }
 

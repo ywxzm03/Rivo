@@ -115,10 +115,10 @@ func TestAgentRunToolLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	if calls != 2 {
-		t.Errorf("StreamFn 调用 %d 次, want 2", calls)
+		t.Errorf("StreamFn called %d times, want 2", calls)
 	}
 	if len(ping.arguments) != 1 {
-		t.Errorf("工具被调用 %d 次, want 1（派发应走 AgentContext.Tools）", len(ping.arguments))
+		t.Errorf("tool called %d times, want 1 (dispatch should go through AgentContext.Tools)", len(ping.arguments))
 	}
 	txt, ok := reply.Content[0].(llm.TextContent)
 	if !ok || txt.Text != "done" {
@@ -126,7 +126,7 @@ func TestAgentRunToolLoop(t *testing.T) {
 	}
 
 	if got := len(a.AgentContext.Messages); got != 4 {
-		t.Errorf("历史消息 %d 条, want 4", got)
+		t.Errorf("history has %d messages, want 4", got)
 	}
 	if _, ok := a.AgentContext.Messages[0].(llm.UserMessage); !ok {
 		t.Errorf("Messages[0] = %T, want UserMessage", a.AgentContext.Messages[0])
@@ -406,7 +406,7 @@ func TestAgentRunUnknownTool(t *testing.T) {
 	}
 
 	if got := len(a.AgentContext.Messages); got != 4 {
-		t.Fatalf("历史消息 %d 条, want 4", got)
+		t.Fatalf("history has %d messages, want 4", got)
 	}
 	tr, ok := a.AgentContext.Messages[2].(llm.ToolResultMessage)
 	if !ok {
@@ -417,7 +417,7 @@ func TestAgentRunUnknownTool(t *testing.T) {
 	}
 	text, _ := tr.Content[0].(llm.TextContent)
 	if !strings.Contains(text.Text, "tool error:") {
-		t.Errorf("工具结果 = %q, want 含 tool error:", text.Text)
+		t.Errorf("tool result = %q, want it to contain tool error:", text.Text)
 	}
 }
 

@@ -120,7 +120,7 @@ func nowRFC3339() string {
 func newSessionID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(fmt.Sprintf("session: 生成会话 ID 失败: %v", err))
+		panic(fmt.Sprintf("session: failed to generate session ID: %v", err))
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
@@ -132,7 +132,7 @@ func newSessionID() string {
 func randomHexID() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic(fmt.Sprintf("session: 生成 entry ID 失败: %v", err))
+		panic(fmt.Sprintf("session: failed to generate entry ID: %v", err))
 	}
 	return hex.EncodeToString(b[:])
 }
