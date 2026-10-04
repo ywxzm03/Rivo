@@ -40,13 +40,13 @@ func TestRun(t *testing.T) {
 			name:       "long help",
 			args:       []string{"--help"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help  Show this help\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
 		},
 		{
 			name:       "short help",
 			args:       []string{"-h"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help  Show this help\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
 		},
 		{
 			name:       "repl exits",
