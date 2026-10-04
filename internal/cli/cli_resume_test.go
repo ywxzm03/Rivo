@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,10 +12,13 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-// useTestEnv 把 HOME 切到临时目录并配好内置 provider 凭据
+// useTestEnv 隔离真实配置并配好内置 provider 凭据
 func useTestEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("RIVO_AGENT_DIR", home+string(os.PathSeparator)+".rivo-agent-test")
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 }
 

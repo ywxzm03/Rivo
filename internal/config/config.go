@@ -12,6 +12,9 @@ import (
 // APIOpenAIResponses 是 models.json 中 provider 支持的唯一协议标识
 const APIOpenAIResponses = "openai-responses"
 
+// agentDirEnv 是 agent 配置目录的环境变量覆盖名
+const agentDirEnv = "RIVO_AGENT_DIR"
+
 // Settings 对应 ~/.rivo/agent/settings.json；只消费默认模型相关字段，其余字段忽略
 type Settings struct {
 	DefaultProvider      string `json:"defaultProvider"`
@@ -54,8 +57,12 @@ type NamedProvider struct {
 	Provider Provider
 }
 
-// Dir 返回 agent 配置目录 ~/.rivo/agent
+// Dir 返回 agent 配置目录 ~/.rivo/agent；设置 RIVO_AGENT_DIR 环境变量时使用其值
+// （对齐 pi 的 PI_CODING_AGENT_DIR），否则回落到用户主目录
 func Dir() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(agentDirEnv)); dir != "" {
+		return dir, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("config: failed to get user home directory: %w", err)
@@ -146,6 +153,9 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 				return err
 			}
 			continue
+		}
+		if seen {
+			return fmt.Errorf("config: models file has duplicate \"providers\" key")
 		}
 		seen = true
 		if err := m.decodeProviders(dec); err != nil {

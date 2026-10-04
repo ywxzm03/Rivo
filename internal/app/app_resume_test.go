@@ -172,3 +172,35 @@ func TestOpenErrorsOnMissingFile(t *testing.T) {
 		t.Fatal("Open() error = nil, want read error")
 	}
 }
+
+func TestOpenRestoresExplicitOffThinkingLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := newSessionFileWithModel(t, dir, deepseek.ProviderID, deepseek.DefaultModel, "hello")
+	// 会话里显式记录过 off：恢复时必须回填，而不是落回模型默认 effort
+	if err := reopenAndAppend(path, func(m *session.SessionManager) error {
+		return m.AppendThinkingLevelChange("off")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if a.agent.AgentConfig.ThinkingLevel != llm.ThinkingLevelOff {
+		t.Errorf("agent ThinkingLevel = %q, want off", a.agent.AgentConfig.ThinkingLevel)
+	}
+}
+
+// reopenAndAppend 重新加载会话文件并追加记录
+func reopenAndAppend(path string, appendFn func(*session.SessionManager) error) error {
+	cwd := "/tmp/proj"
+	m, err := session.Open(path, cwd)
+	if err != nil {
+		return err
+	}
+	if err := appendFn(m); err != nil {
+		return err
+	}
+	return nil
+}

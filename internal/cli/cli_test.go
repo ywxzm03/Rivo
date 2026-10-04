@@ -2,16 +2,20 @@ package cli_test
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/cli"
 )
 
-// useTestHome 把 HOME 切到临时目录，隔离真实的 ~/.rivo 配置
+// useTestHome 把 HOME/USERPROFILE/RIVO_AGENT_DIR 都切到临时目录，跨平台隔离真实配置
 func useTestHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("RIVO_AGENT_DIR", home+string(os.PathSeparator)+".rivo-agent-test")
 }
 
 func TestRun(t *testing.T) {

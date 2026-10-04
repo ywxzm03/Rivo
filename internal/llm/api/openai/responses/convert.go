@@ -26,13 +26,12 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		params.MaxOutputTokens = param.NewOpt(int64(opts.MaxTokens))
 	}
 	if model.Reasoning {
-		if effort, ok := resolveReasoningEffort(model, opts); ok {
-			params.Reasoning = shared.ReasoningParam{
-				Effort:  shared.ReasoningEffort(effort),
-				Summary: shared.ReasoningSummaryAuto,
-			}
-			params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
+		effort := resolveReasoningEffort(model, opts)
+		params.Reasoning = shared.ReasoningParam{
+			Effort:  shared.ReasoningEffort(effort),
+			Summary: shared.ReasoningSummaryAuto,
 		}
+		params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
 	}
 	if len(model.SamplingParams) > 0 {
 		params.SetExtraFields(model.SamplingParams)
@@ -56,32 +55,35 @@ var thinkingLevels = []llm.ThinkingLevel{
 }
 
 // resolveReasoningEffort 按 pi 语义把思考等级解析为 reasoning effort：
-// 1.无显式等级：沿用模型默认 effort（缺省 medium），保持既有行为（偏差于 pi 的 map.off??none，为兼容历史）
+// 1.无显式等级：沿用模型默认 effort（缺省 medium），保持既有行为；
+//
+//	不采用 pi 无等级时经 map.off 回落到 "none" 的语义，避免改变历史默认
+//
 // 2.有显式等级：先经 clampThinkingLevel 收敛到模型支持的最近可用等级
 // 3.收敛后为 off：发 effort "none" 或 map.off 的映射值（pi 流程中 off 经 void 后落入无等级分支）
 // 4.其余等级：命中映射用映射值，未命中原样透传
-// 返回 ok=false 表示本请求不发 reasoning 参数（仅非 reasoning 模型经外层跳过）
-func resolveReasoningEffort(model llm.Model, opts llm.Options) (llm.ReasoningEffort, bool) {
+// 非 reasoning 模型不经此函数（外层 if model.Reasoning 拦截）
+func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffort {
 	if opts.ThinkingLevel == "" {
 		effort := model.ReasoningEffort
 		if effort == "" {
 			effort = llm.ReasoningEffortMedium
 		}
-		return effort, true
+		return effort
 	}
 	level := clampThinkingLevel(model, opts.ThinkingLevel)
 	if level == llm.ThinkingLevelOff {
 		if model.ThinkingLevelMap != nil {
 			if mapped, ok := model.ThinkingLevelMap[llm.ThinkingLevelOff]; ok && mapped != nil {
-				return *mapped, true
+				return *mapped
 			}
 		}
-		return llm.ReasoningEffort("none"), true
+		return llm.ReasoningEffort("none")
 	}
 	if mapped, ok := model.ThinkingLevelMap[level]; ok && mapped != nil {
-		return *mapped, true
+		return *mapped
 	}
-	return llm.ReasoningEffort(level), true
+	return llm.ReasoningEffort(level)
 }
 
 // clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级（对齐 pi clampThinkingLevel）

@@ -44,6 +44,12 @@ func builtinRegistry() map[string]providerSpec {
 	}
 	for id, spec := range specs {
 		spec.apiKey = apiKeyFromEnv(id)
+		// 填充内置模型列表，供 settings 成对指定的模型校验使用（构造客户端为离线操作）
+		if len(spec.models) == 0 {
+			if models, _ := spec.new(spec.apiKey, spec.baseURL); len(models) > 0 {
+				spec.models = models
+			}
+		}
 		specs[id] = spec
 	}
 	return specs
@@ -52,6 +58,9 @@ func builtinRegistry() map[string]providerSpec {
 // customSpec 把 models.json 的 provider 条目转成 openai 兼容的 providerSpec
 func customSpec(id string, p config.Provider) (providerSpec, error) {
 	id = strings.ToLower(strings.TrimSpace(id))
+	if len(p.Models) == 0 {
+		return providerSpec{}, fmt.Errorf("provider %q has no models", id)
+	}
 	models := make([]llm.Model, 0, len(p.Models))
 	for _, m := range p.Models {
 		name := m.Name

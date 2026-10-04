@@ -46,11 +46,10 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if len(proj.Messages) > 0 {
 		a.agent.ReplaceMessages(proj.Messages)
 	}
-	// 2.思考等级：settings 默认优先；未配置时投影记录的非 off 值兜底
-	// （BuildContext 以 off 为占位，无法区分「记录过 off」与「从未记录」）
+	// 2.思考等级：settings 默认优先；未配置且会话有显式记录（含 off）时回填投影值
 	if cfg.ThinkingLevel != "" {
 		a.agent.AgentConfig.ThinkingLevel = cfg.ThinkingLevel
-	} else if proj.ThinkingLevel != "off" {
+	} else if proj.HasThinkingLevel {
 		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
 	}
 	a.modelFallback = warning
@@ -134,7 +133,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 
 	ag := agent.NewAgent(
-		llm.AgentConfig{Model: model},
+		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel},
 		llm.Context{
 			SystemPrompt: systemPrompt,
 			Tools:        tools,

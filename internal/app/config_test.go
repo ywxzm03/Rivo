@@ -6,21 +6,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/config"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
+	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
 
-// useConfigHome 把 HOME 切到临时目录，隔离真实的 ~/.rivo 配置
+// useConfigHome 把配置目录切到临时目录（RIVO_AGENT_DIR 覆盖，跨平台一致）
 func useConfigHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	return home
+	dir := t.TempDir()
+	t.Setenv("RIVO_AGENT_DIR", dir)
+	return dir
 }
 
-func writeAgentConfig(t *testing.T, home, name, body string) {
+func writeAgentConfig(t *testing.T, dir, name, body string) {
 	t.Helper()
-	dir := filepath.Join(home, ".rivo", "agent")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +52,10 @@ func TestLoadUsesBuiltinProviderEnvKey(t *testing.T) {
 }
 
 func TestLoadPrefersSettingsPairedDefault(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
-	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie","models":[{"id":"glm-5.3"}]}}}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie","models":[{"id":"glm-5.3"}]}}}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -66,10 +67,10 @@ func TestLoadPrefersSettingsPairedDefault(t *testing.T) {
 }
 
 func TestLoadFallsBackWhenSettingsModelUnknown(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"gone"}`)
-	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"other"}]}}}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultProvider":"magpie","defaultModel":"gone"}`)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"other"}]}}}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -82,10 +83,10 @@ func TestLoadFallsBackWhenSettingsModelUnknown(t *testing.T) {
 }
 
 func TestLoadFallsBackWhenSettingsProviderHasNoKey(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
-	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","models":[{"id":"glm-5.3"}]}}}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultProvider":"magpie","defaultModel":"glm-5.3"}`)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","models":[{"id":"glm-5.3"}]}}}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -98,11 +99,11 @@ func TestLoadFallsBackWhenSettingsProviderHasNoKey(t *testing.T) {
 }
 
 func TestLoadSingleSideSettingsIsIgnored(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
 	// 只设 defaultProvider 不生效（对齐 pi：必须成对）
-	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"magpie"}`)
-	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"glm-5.3"}]}}}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultProvider":"magpie"}`)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"glm-5.3"}]}}}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -114,9 +115,9 @@ func TestLoadSingleSideSettingsIsIgnored(t *testing.T) {
 }
 
 func TestLoadSoftDegradesOnBrokenModelsFile(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "models.json", "{oops")
+	writeAgentConfig(t, dir, "models.json", "{oops")
 
 	cfg, err := Load()
 	if err != nil {
@@ -132,8 +133,8 @@ func TestLoadSoftDegradesOnBrokenModelsFile(t *testing.T) {
 }
 
 func TestLoadFirstAvailableProviderInFileOrder(t *testing.T) {
-	home := useConfigHome(t)
-	writeAgentConfig(t, home, "models.json", `{"providers":{
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{
 		"no-key": {"baseUrl":"http://a/v1","models":[{"id":"m1"}]},
 		"with-key": {"baseUrl":"http://b/v1","apiKey":"k","models":[{"id":"m2","contextWindow":1000,"maxTokens":500,"reasoning":true}]}
 	}}`)
@@ -148,9 +149,9 @@ func TestLoadFirstAvailableProviderInFileOrder(t *testing.T) {
 }
 
 func TestLoadReadsDefaultThinkingLevel(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "settings.json", `{"defaultThinkingLevel":"high"}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultThinkingLevel":"high"}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -162,9 +163,9 @@ func TestLoadReadsDefaultThinkingLevel(t *testing.T) {
 }
 
 func TestLoadWarnsOnUnknownThinkingLevel(t *testing.T) {
-	home := useConfigHome(t)
+	dir := useConfigHome(t)
 	t.Setenv("DEEPSEEK_API_KEY", "env-key")
-	writeAgentConfig(t, home, "settings.json", `{"defaultThinkingLevel":"ultra"}`)
+	writeAgentConfig(t, dir, "settings.json", `{"defaultThinkingLevel":"ultra"}`)
 
 	cfg, err := Load()
 	if err != nil {
@@ -179,8 +180,8 @@ func TestLoadWarnsOnUnknownThinkingLevel(t *testing.T) {
 }
 
 func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
-	home := useConfigHome(t)
-	writeAgentConfig(t, home, "models.json", `{"providers":{"magpie":{
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{
 		"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie",
 		"models":[{"id":"glm-5.3","name":"GLM","contextWindow":200000,"maxTokens":8192,"reasoning":true,
 			"thinkingLevelMap":{"off":null,"medium":"medium"},"samplingParams":{"temperature":0.7}}]
@@ -215,5 +216,40 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
 	if len(models) != 1 || streamFn == nil {
 		t.Errorf("spec.new() = %d models, streamFn %v, want one model and a stream fn", len(models), streamFn)
+	}
+}
+
+func TestLoadSettingsPairedDefaultWithBuiltinProvider(t *testing.T) {
+	dir := useConfigHome(t)
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeAgentConfig(t, dir, "settings.json", `{"defaultProvider":"openai","defaultModel":"`+openai.DefaultModel+`"}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// 内置 provider 的模型列表也要参与 settings 成对校验（回归：spec.models 曾恒为 nil）
+	if cfg.ProviderID != openai.ProviderID || cfg.ModelID != openai.DefaultModel {
+		t.Errorf("Load() = %s/%s, want settings default with builtin provider", cfg.ProviderID, cfg.ModelID)
+	}
+}
+
+func TestNewSessionAppliesConfiguredThinkingLevel(t *testing.T) {
+	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
+	cfg.ThinkingLevel = llm.ThinkingLevelHigh
+
+	a, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	// 新会话也要应用 settings 解析出的 defaultThinkingLevel
+	if a.agent.AgentConfig.ThinkingLevel != llm.ThinkingLevelHigh {
+		t.Errorf("agent ThinkingLevel = %q, want high", a.agent.AgentConfig.ThinkingLevel)
+	}
+}
+
+func TestCustomSpecRejectsEmptyModels(t *testing.T) {
+	if _, err := customSpec("x", config.Provider{BaseURL: "http://x/v1"}); err == nil {
+		t.Fatal("customSpec() error = nil, want empty-models error")
 	}
 }

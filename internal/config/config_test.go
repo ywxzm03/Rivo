@@ -7,20 +7,38 @@ import (
 	"testing"
 )
 
-func TestDirUsesHomeOverride(t *testing.T) {
+func TestDirUsesEnvOverride(t *testing.T) {
+	// RIVO_AGENT_DIR 覆盖优先于 HOME/USERPROFILE（对齐 pi 的 PI_CODING_AGENT_DIR）
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("RIVO_AGENT_DIR", filepath.Join(home, "custom-agent-dir"))
 	dir, err := Dir()
 	if err != nil {
 		t.Fatalf("Dir() error = %v", err)
 	}
+	if want := filepath.Join(home, "custom-agent-dir"); dir != want {
+		t.Errorf("Dir() = %q, want %q", dir, want)
+	}
+}
+
+func TestDirDefaultsToHomeAndProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("RIVO_AGENT_DIR", "")
+	dir, err := Dir()
+	if err != nil {
+		t.Fatalf("Dir() error = %v", err)
+	}
+	// 无覆盖时回落用户主目录；Windows 的 UserHomeDir 读 USERPROFILE，Unix 读 HOME
 	if want := filepath.Join(home, ".rivo", "agent"); dir != want {
 		t.Errorf("Dir() = %q, want %q", dir, want)
 	}
 }
 
 func TestLoadSettingsMissingFileReturnsZero(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RIVO_AGENT_DIR", t.TempDir())
 	s, err := LoadSettings()
 	if err != nil {
 		t.Fatalf("LoadSettings() error = %v", err)
@@ -32,8 +50,8 @@ func TestLoadSettingsMissingFileReturnsZero(t *testing.T) {
 
 func TestLoadSettingsReadsDefaultModel(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".rivo", "agent")
+	t.Setenv("RIVO_AGENT_DIR", home)
+	dir := home
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +72,8 @@ func TestLoadSettingsReadsDefaultModel(t *testing.T) {
 
 func TestLoadSettingsInvalidJSONErrors(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".rivo", "agent")
+	t.Setenv("RIVO_AGENT_DIR", home)
+	dir := home
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +86,7 @@ func TestLoadSettingsInvalidJSONErrors(t *testing.T) {
 }
 
 func TestLoadModelsMissingFileReturnsEmpty(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RIVO_AGENT_DIR", t.TempDir())
 	m, err := LoadModels()
 	if err != nil {
 		t.Fatalf("LoadModels() error = %v", err)
@@ -81,8 +99,8 @@ func TestLoadModelsMissingFileReturnsEmpty(t *testing.T) {
 func writeModelsFile(t *testing.T, body string) {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".rivo", "agent")
+	t.Setenv("RIVO_AGENT_DIR", home)
+	dir := home
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -202,5 +220,13 @@ func TestLoadModelsReadsProviderName(t *testing.T) {
 	}
 	if m.Providers[0].Provider.Name != "Magpie" {
 		t.Errorf("provider name = %q, want Magpie", m.Providers[0].Provider.Name)
+	}
+}
+
+func TestLoadModelsRejectsDuplicateProvidersKey(t *testing.T) {
+	writeModelsFile(t, `{"providers": {"a": {"baseUrl": "http://a/v1", "models": [{"id": "m"}]}}, "providers": {"b": {"baseUrl": "http://b/v1", "models": [{"id": "m"}]}}}`)
+	_, err := LoadModels()
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("LoadModels() error = %v, want duplicate providers key error", err)
 	}
 }
