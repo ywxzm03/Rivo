@@ -237,3 +237,11 @@ func TestLoadModelsRejectsTrailingData(t *testing.T) {
 		t.Fatalf("LoadModels() error = %v, want trailing-data error", err)
 	}
 }
+
+func TestLoadModelsRejectsDuplicateProviderID(t *testing.T) {
+	body := `{"providers": {"a": {"baseUrl": "http://a/v1", "models": [{"id": "m"}]}, "a": {"baseUrl": "http://b/v1", "models": [{"id": "m"}]}}}`
+	writeModelsFile(t, body)
+	if _, err := LoadModels(); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+		t.Fatalf("LoadModels() error = %v, want duplicate entry error", err)
+	}
+}

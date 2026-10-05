@@ -283,3 +283,17 @@ func TestLoadRejectsDuplicateProviderID(t *testing.T) {
 		t.Fatalf("Load() error = %v, want duplicate provider entry error", err)
 	}
 }
+
+func TestLoadNoModelsErrorIncludesParseWarning(t *testing.T) {
+	dir := useConfigHome(t)
+	// 只配置了自定义 provider 且文件解析失败：错误必须包含真实原因，而非仅 "no models available"
+	writeAgentConfig(t, dir, "models.json", "{oops")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "no models available") {
+		t.Fatalf("Load() error = %v, want no-models error", err)
+	}
+	if !strings.Contains(err.Error(), "invalid models file") {
+		t.Errorf("Load() error = %v, want it to include the parse failure", err)
+	}
+}

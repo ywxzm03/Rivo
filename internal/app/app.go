@@ -76,7 +76,14 @@ func assembleResume(cfg Config, proj session.SessionContext, sm *session.Session
 
 // fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
 func fallbackWarning(cfg Config, proj session.SessionContext) string {
-	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, cfg.ModelID)
+	modelID := cfg.ModelID
+	if modelID == "" {
+		// 空 ModelID 经装配兜底为 provider 默认模型，文案与实际装配保持一致
+		if spec, err := cfg.lookupProvider(cfg.ProviderID); err == nil {
+			modelID = spec.defaultModel
+		}
+	}
+	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, modelID)
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
