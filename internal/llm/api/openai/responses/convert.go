@@ -34,7 +34,16 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		params.Include = append(params.Include, responses.ResponseIncludableReasoningEncryptedContent)
 	}
 	if len(model.SamplingParams) > 0 {
-		params.SetExtraFields(model.SamplingParams)
+		extra := make(map[string]any, len(model.SamplingParams))
+		for key, value := range model.SamplingParams {
+			// 保留键不得覆盖 BuildParams 自行构建的核心请求字段
+			if !reservedParamKeys[key] {
+				extra[key] = value
+			}
+		}
+		if len(extra) > 0 {
+			params.SetExtraFields(extra)
+		}
 	}
 	for _, t := range c.Tools {
 		params.Tools = append(params.Tools, responses.ToolUnionParam{
@@ -46,6 +55,13 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		})
 	}
 	return params, nil
+}
+
+// reservedParamKeys 是 BuildParams 自行构建的核心请求字段，
+// models.json 的自由采样参数不得与它们同名覆盖
+var reservedParamKeys = map[string]bool{
+	"model": true, "input": true, "stream": true, "max_output_tokens": true,
+	"tools": true, "tool_choice": true, "reasoning": true, "include": true,
 }
 
 // thinkingLevels 是 pi 的扩展思考等级体系，顺序从低到高

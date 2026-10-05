@@ -187,7 +187,7 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	dir := useConfigHome(t)
 	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{
 		"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie",
-		"models":[{"id":"glm-5.3","name":"GLM","contextWindow":200000,"maxTokens":8192,"reasoning":true,
+		"models":[{"id":"glm-5.3","name":"GLM","contextWindow":200000,"maxTokens":8192,"reasoning":true,"supportsImages":true,
 			"thinkingLevelMap":{"off":null,"medium":"medium"},"samplingParams":{"temperature":0.7}}]
 	}}}`)
 
@@ -207,7 +207,7 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 		t.Fatalf("models = %d, want 1", len(spec.models))
 	}
 	m := spec.models[0]
-	if m.Name != "GLM" || m.ContextWindow != 200000 || m.MaxTokens != 8192 || !m.Reasoning {
+	if m.Name != "GLM" || m.ContextWindow != 200000 || m.MaxTokens != 8192 || !m.Reasoning || !m.SupportsImages {
 		t.Errorf("model = %+v, want mapped metadata", m)
 	}
 	if m.ThinkingLevelMap[llm.ThinkingLevelOff] != nil {

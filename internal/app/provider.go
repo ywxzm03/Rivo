@@ -73,6 +73,7 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 			Provider:         id,
 			API:              llm.APIOpenAIResponses,
 			Reasoning:        m.Reasoning,
+			SupportsImages:   m.SupportsImages,
 			ContextWindow:    m.ContextWindow,
 			MaxTokens:        m.MaxTokens,
 			ThinkingLevelMap: thinkingLevelMap(m.ThinkingLevelMap),

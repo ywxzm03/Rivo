@@ -30,6 +30,8 @@ type Model struct {
 	MaxTokens     int    `json:"maxTokens"`
 	// Reasoning 表示模型支持 openai-responses 的 reasoning 输出
 	Reasoning bool `json:"reasoning"`
+	// SupportsImages 表示模型接受图片输入，影响 read 工具是否把图片降级为文字说明
+	SupportsImages bool `json:"supportsImages"`
 	// ThinkingLevelMap 把思考等级映射为该模型的 reasoning effort；值 null 表示该等级禁用
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 	// SamplingParams 是并入请求体的自由采样参数（temperature/top_p 等）

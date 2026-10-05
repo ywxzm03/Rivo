@@ -283,6 +283,20 @@ func TestBuildParams(t *testing.T) {
 		assertWire(t, params, `{"model":"gpt-5","temperature":0.5,"top_k":20}`)
 	})
 
+	t.Run("sampling params cannot override reserved request fields", func(t *testing.T) {
+		model := testModel()
+		model.Reasoning = true
+		model.SamplingParams = map[string]any{
+			"model": "evil", "reasoning": "evil", "temperature": 0.5,
+		}
+		params, err := BuildParams(model, llm.Context{}, llm.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 保留键被跳过，核心字段保持 BuildParams 构建的值；其余自由键正常并入
+		assertWire(t, params, `{"model":"gpt-5","reasoning":{"effort":"medium","summary":"auto"},"temperature":0.5,"include":["reasoning.encrypted_content"]}`)
+	})
+
 	t.Run("assistant reasoning item replays verbatim", func(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
