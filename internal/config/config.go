@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -131,7 +132,7 @@ func loadModelsFromFile(path string) (ModelsFile, error) {
 // UnmarshalJSON 解析 {"providers": {...}} 结构并保持文件中 provider 的出现顺序
 // （schema 对齐 pi 的 ModelsConfigSchema：顶层必须有 providers 对象）
 func (m *ModelsFile) UnmarshalJSON(data []byte) error {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
 		return err
@@ -202,9 +203,10 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 		if err := dec.Decode(&p); err != nil {
 			return err
 		}
-		// 同名 provider 视为配置错误，与顶层重复 providers 键的处理保持一致
+		// 同名 provider（大小写不敏感，注册表 key 会转小写）视为配置错误，
+		// 与顶层重复 providers 键的处理保持一致
 		for _, existing := range m.Providers {
-			if existing.ID == id {
+			if strings.EqualFold(existing.ID, id) {
 				return fmt.Errorf("config: providers has duplicate entry %q", id)
 			}
 		}

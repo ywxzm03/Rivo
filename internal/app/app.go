@@ -46,10 +46,9 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if len(proj.Messages) > 0 {
 		a.agent.ReplaceMessages(proj.Messages)
 	}
-	// 2.思考等级：settings 默认优先；未配置且会话有显式记录（含 off）时回填投影值
-	if cfg.ThinkingLevel != "" {
-		a.agent.AgentConfig.ThinkingLevel = cfg.ThinkingLevel
-	} else if proj.HasThinkingLevel {
+	// 2.思考等级：newAppWithModel 已按 cfg.ThinkingLevel 装配，
+	// 仅在 settings 未指定时回填会话投影的显式记录（含 off）
+	if cfg.ThinkingLevel == "" && proj.HasThinkingLevel {
 		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
 	}
 	a.modelFallback = warning

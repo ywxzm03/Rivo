@@ -245,3 +245,12 @@ func TestLoadModelsRejectsDuplicateProviderID(t *testing.T) {
 		t.Fatalf("LoadModels() error = %v, want duplicate entry error", err)
 	}
 }
+
+func TestLoadModelsRejectsCaseInsensitiveDuplicateProviderID(t *testing.T) {
+	body := `{"providers": {"Foo": {"baseUrl": "http://a/v1", "models": [{"id": "m"}]}, "foo": {"baseUrl": "http://b/v1", "models": [{"id": "m"}]}}}`
+	writeModelsFile(t, body)
+	// 注册表 key 会转小写，仅大小写不同的 provider 同样视为重复
+	if _, err := LoadModels(); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+		t.Fatalf("LoadModels() error = %v, want duplicate entry error", err)
+	}
+}
