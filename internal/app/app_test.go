@@ -10,11 +10,7 @@ import (
 )
 
 func TestNewAcceptsDefaultModel(t *testing.T) {
-	a, err := New(Config{
-		ProviderID: openai.ProviderID,
-		ModelID:    openai.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := New(configWithBuiltin(openai.ProviderID, openai.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("New() with default model %q error = %v, want nil", openai.DefaultModel, err)
 	}
@@ -34,11 +30,7 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 }
 
 func TestNewAcceptsDeepSeekDefaultModel(t *testing.T) {
-	a, err := New(Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := New(configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("New() with default model %q error = %v, want nil", deepseek.DefaultModel, err)
 	}
@@ -48,11 +40,7 @@ func TestNewAcceptsDeepSeekDefaultModel(t *testing.T) {
 }
 
 func TestNewRejectsUnknownModel(t *testing.T) {
-	_, err := New(Config{
-		ProviderID: openai.ProviderID,
-		ModelID:    "no-such-model",
-		APIKey:     "test-key",
-	}, nil)
+	_, err := New(configWithBuiltin(openai.ProviderID, "no-such-model"), nil)
 	if err == nil {
 		t.Fatal("New() error = nil, want unknown model error")
 	}
@@ -63,11 +51,7 @@ func TestNewRejectsUnknownModel(t *testing.T) {
 
 func TestNewRejectsModelFromOtherProvider(t *testing.T) {
 	// 拿 OpenAI 的模型名去 deepseek 的目录里查，必须落空
-	_, err := New(Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    openai.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	_, err := New(configWithBuiltin(deepseek.ProviderID, openai.DefaultModel), nil)
 	if err == nil {
 		t.Fatal("New() error = nil, want unknown model error")
 	}
@@ -77,15 +61,16 @@ func TestNewRejectsModelFromOtherProvider(t *testing.T) {
 }
 
 func TestNewRejectsUnknownProvider(t *testing.T) {
-	_, err := New(Config{
-		ProviderID: "no-such-provider",
-		ModelID:    openai.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	_, err := New(configWithBuiltin("no-such-provider", openai.DefaultModel), nil)
 	if err == nil {
 		t.Fatal("New() error = nil, want unknown provider error")
 	}
 	if !strings.Contains(err.Error(), "no-such-provider") {
 		t.Errorf("New() error = %q, want it to name the provider id", err)
 	}
+}
+
+// configWithBuiltin 返回只含内置 provider 的 Config，供测试装配
+func configWithBuiltin(providerID, modelID string) Config {
+	return Config{ProviderID: providerID, ModelID: modelID, registry: builtinRegistry()}
 }

@@ -16,6 +16,8 @@ type SessionContext struct {
 	ThinkingLevel string
 	// LastSummary 为最近一次压缩的原始摘要文本，供压缩增量合并与会话恢复使用
 	LastSummary string
+	// HasThinkingLevel 表示活跃路径上存在显式的思考等级记录，用于区分「记录过 off」与「从未记录」
+	HasThinkingLevel bool
 	// UsageStale 表示最后一条 assistant 消息位于最近一次压缩之前，其 usage 反映压缩前的大上下文，
 	// 此时 token 计费应改用纯消息体估算
 	UsageStale bool
@@ -36,6 +38,7 @@ func (m *SessionManager) BuildContext() SessionContext {
 			modelChange = e
 		case *ThinkingLevelChangeEntry:
 			ctx.ThinkingLevel = e.ThinkingLevel
+			ctx.HasThinkingLevel = true
 		case *MessageEntry:
 			if a, ok := e.Message.(llm.AssistantMessage); ok {
 				lastAssistant = a

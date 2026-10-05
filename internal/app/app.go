@@ -46,6 +46,11 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if len(proj.Messages) > 0 {
 		a.agent.ReplaceMessages(proj.Messages)
 	}
+	// 2.思考等级：newAppWithModel 已按 cfg.ThinkingLevel 装配，
+	// 仅在 settings 未指定时回填会话投影的显式记录（含 off）
+	if cfg.ThinkingLevel == "" && proj.HasThinkingLevel {
+		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
+	}
 	a.modelFallback = warning
 	return a, nil
 }
@@ -68,17 +73,16 @@ func assembleResume(cfg Config, proj session.SessionContext, sm *session.Session
 	return a, fallbackWarning(cfg, proj), nil
 }
 
-// fallbackWarning 拼回退警告文案；newApp 装配已成功，说明 env 厂商必然有效
+// fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
 func fallbackWarning(cfg Config, proj session.SessionContext) string {
-	spec, err := lookupProvider(cfg.ProviderID)
-	if err != nil {
-		return ""
-	}
 	modelID := cfg.ModelID
 	if modelID == "" {
-		modelID = spec.defaultModel
+		// 空 ModelID 经装配兜底为 provider 默认模型，文案与实际装配保持一致
+		if spec, err := cfg.lookupProvider(cfg.ProviderID); err == nil {
+			modelID = spec.defaultModel
+		}
 	}
-	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, spec.id, modelID)
+	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, modelID)
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
@@ -109,12 +113,12 @@ func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) 
 
 // newAppWithModel 按指定厂商与模型装配编排层与 Agent：事件经编排层落盘，压缩与溢出恢复由编排层驱动
 func newAppWithModel(cfg Config, providerID, modelID string, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
-	spec, err := lookupProvider(providerID)
+	spec, err := cfg.lookupProvider(providerID)
 	if err != nil {
 		return nil, err
 	}
 
-	models, streamFn := spec.new(cfg.APIKey, cfg.BaseURL)
+	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
 	if modelID == "" {
 		modelID = spec.defaultModel
 	}
@@ -135,7 +139,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 
 	ag := agent.NewAgent(
-		llm.AgentConfig{Model: model},
+		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel},
 		llm.Context{
 			SystemPrompt: systemPrompt,
 			Tools:        tools,

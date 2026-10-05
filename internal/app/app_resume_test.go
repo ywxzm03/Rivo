@@ -33,11 +33,7 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, openai.DefaultModel, "hello resume")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -84,11 +80,7 @@ func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -114,11 +106,7 @@ func TestOpenFallsBackWhenProviderUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, "no-such-provider", "some-model", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -131,11 +119,7 @@ func TestOpenWithoutModelRecordUsesEnvConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, "", "", "hello")
 
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    deepseek.DefaultModel,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -156,10 +140,7 @@ func TestOpenFallsBackToDefaultModelWhenEnvModelEmpty(t *testing.T) {
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
 	// env 未配 MODEL 时回退装配用厂商默认模型，而不是拿空 modelID 去匹配失败
-	a, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		APIKey:     "test-key",
-	}, nil)
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -176,11 +157,7 @@ func TestOpenErrorsWhenFallbackModelUnknown(t *testing.T) {
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")
 
 	// env 默认模型也解析不到时按启动失败处理
-	_, err := Open(path, Config{
-		ProviderID: deepseek.ProviderID,
-		ModelID:    "also-missing",
-		APIKey:     "test-key",
-	}, nil)
+	_, err := Open(path, configWithBuiltin(deepseek.ProviderID, "also-missing"), nil)
 	if err == nil {
 		t.Fatal("Open() error = nil, want unknown model error")
 	}
@@ -193,5 +170,52 @@ func TestOpenErrorsOnMissingFile(t *testing.T) {
 	_, err := Open(filepath.Join(t.TempDir(), "not-exist.jsonl"), Config{}, nil)
 	if err == nil {
 		t.Fatal("Open() error = nil, want read error")
+	}
+}
+
+func TestOpenRestoresExplicitOffThinkingLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := newSessionFileWithModel(t, dir, deepseek.ProviderID, deepseek.DefaultModel, "hello")
+	// 会话里显式记录过 off：恢复时必须回填，而不是落回模型默认 effort
+	if err := reopenAndAppend(path, func(m *session.SessionManager) error {
+		return m.AppendThinkingLevelChange("off")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if a.agent.AgentConfig.ThinkingLevel != llm.ThinkingLevelOff {
+		t.Errorf("agent ThinkingLevel = %q, want off", a.agent.AgentConfig.ThinkingLevel)
+	}
+}
+
+// reopenAndAppend 重新加载会话文件并追加记录
+func reopenAndAppend(path string, appendFn func(*session.SessionManager) error) error {
+	cwd := "/tmp/proj"
+	m, err := session.Open(path, cwd)
+	if err != nil {
+		return err
+	}
+	if err := appendFn(m); err != nil {
+		return err
+	}
+	return nil
+}
+
+func TestFallbackWarningFillsEmptyModelID(t *testing.T) {
+	dir := t.TempDir()
+	path := newSessionFileWithModel(t, dir, deepseek.ProviderID, "no-such-model", "hello")
+
+	// 空 ModelID 时文案兜底为 provider 默认模型，与实际装配一致
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, ""), nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	want := "Could not restore model " + deepseek.ProviderID + "/no-such-model. Using " + deepseek.ProviderID + "/" + deepseek.DefaultModel
+	if a.ModelFallbackMessage() != want {
+		t.Errorf("ModelFallbackMessage() = %q, want %q", a.ModelFallbackMessage(), want)
 	}
 }

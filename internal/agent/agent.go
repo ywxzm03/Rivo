@@ -141,7 +141,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
 		streamCtx, streamCancel := context.WithCancel(ctx)
-		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{})
+		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
 
 		var final *llm.AssistantMessage
 		toolCallArguments := make(map[int]string)
