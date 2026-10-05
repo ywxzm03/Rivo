@@ -257,3 +257,29 @@ func TestCustomSpecRejectsEmptyModels(t *testing.T) {
 		t.Fatal("customSpec() error = nil, want empty-models error")
 	}
 }
+
+func TestLoadIncludesParseWarningsInNoModelsError(t *testing.T) {
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", "{oops")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "no models available") {
+		t.Fatalf("Load() error = %v, want no-models error", err)
+	}
+	// 只配置了自定义 provider 时，解析失败的原因必须并入错误信息，不能只报"未配置"
+	if !strings.Contains(err.Error(), "invalid models file") {
+		t.Errorf("Load() error = %v, want it to include the parse failure", err)
+	}
+}
+
+func TestLoadRejectsDuplicateProviderID(t *testing.T) {
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{
+		"magpie": {"baseUrl":"http://a/v1","apiKey":"k","models":[{"id":"m1"}]},
+		"magpie": {"baseUrl":"http://b/v1","apiKey":"k","models":[{"id":"m2"}]}
+	}}`)
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "duplicate entry") {
+		t.Fatalf("Load() error = %v, want duplicate provider entry error", err)
+	}
+}

@@ -178,7 +178,6 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	return fmt.Errorf("config: unexpected trailing data after models file object")
-	return nil
 }
 
 // decodeProviders 解析 providers 对象，保持 key 的文件顺序
@@ -202,6 +201,12 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 		var p Provider
 		if err := dec.Decode(&p); err != nil {
 			return err
+		}
+		// 同名 provider 视为配置错误，与顶层重复 providers 键的处理保持一致
+		for _, existing := range m.Providers {
+			if existing.ID == id {
+				return fmt.Errorf("config: providers has duplicate entry %q", id)
+			}
 		}
 		m.Providers = append(m.Providers, NamedProvider{ID: id, Provider: p})
 	}

@@ -204,3 +204,18 @@ func reopenAndAppend(path string, appendFn func(*session.SessionManager) error) 
 	}
 	return nil
 }
+
+func TestFallbackWarningFillsEmptyModelID(t *testing.T) {
+	dir := t.TempDir()
+	path := newSessionFileWithModel(t, dir, deepseek.ProviderID, "no-such-model", "hello")
+
+	// 空 ModelID 时文案兜底为 provider 默认模型，与实际装配一致
+	a, err := Open(path, configWithBuiltin(deepseek.ProviderID, ""), nil)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	want := "Could not restore model " + deepseek.ProviderID + "/no-such-model. Using " + deepseek.ProviderID + "/" + deepseek.DefaultModel
+	if a.ModelFallbackMessage() != want {
+		t.Errorf("ModelFallbackMessage() = %q, want %q", a.ModelFallbackMessage(), want)
+	}
+}

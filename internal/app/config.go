@@ -89,7 +89,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{}, fmt.Errorf("no models available: configure a provider in %s/models.json", dir)
+	message := fmt.Sprintf("no models available: configure a provider in %s/models.json", dir)
+	if len(cfg.Warnings) > 0 {
+		// 软降级发生时（如 models.json 解析失败）把原始原因并入错误，避免掩盖真实问题
+		message += "; config warnings: " + strings.Join(cfg.Warnings, "; ")
+	}
+	return Config{}, fmt.Errorf("%s", message)
 }
 
 // knownThinkingLevel 判断给定的思考等级是否在 pi 等级体系内
