@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
@@ -52,8 +54,8 @@ func TestRunHelpTakesPrecedenceOverContinue(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Usage") {
 		t.Errorf("stdout = %q, want help text", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "> ") {
-		t.Errorf("stdout = %q, want no REPL prompt", stdout.String())
+	if stdout.String() != helpText {
+		t.Errorf("stdout = %q, want exactly the help text", stdout.String())
 	}
 }
 
@@ -211,5 +213,121 @@ func TestRunUnknownArgBeforeHelpStillShowsHelp(t *testing.T) {
 	}
 	if stderr.String() != "" {
 		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestBuildPrintPromptJoinsPositional(t *testing.T) {
+	prompt, err := buildPrintPrompt([]string{"hello", "world"}, strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("buildPrintPrompt() error = %v", err)
+	}
+	if prompt != "hello world" {
+		t.Errorf("prompt = %q, want %q", prompt, "hello world")
+	}
+}
+
+func TestBuildPrintPromptReadsPipedStdin(t *testing.T) {
+	prompt, err := buildPrintPrompt(nil, strings.NewReader("piped prompt\n"))
+	if err != nil {
+		t.Fatalf("buildPrintPrompt() error = %v", err)
+	}
+	if prompt != "piped prompt" {
+		t.Errorf("prompt = %q, want %q", prompt, "piped prompt")
+	}
+}
+
+func TestBuildPrintPromptEmptyStdinErrors(t *testing.T) {
+	if _, err := buildPrintPrompt(nil, strings.NewReader("  \n")); err == nil {
+		t.Fatal("buildPrintPrompt() error = nil, want empty-prompt error")
+	}
+}
+
+func TestRunProviderWithoutModelErrors(t *testing.T) {
+	useTestEnv(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--provider", "openai"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--provider requires --model") {
+		t.Errorf("stderr = %q, want provider-requires-model error", stderr.String())
+	}
+}
+
+func TestRunInvalidThinkingErrors(t *testing.T) {
+	useTestEnv(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"--thinking", "ultra"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown thinking level") {
+		t.Errorf("stderr = %q, want unknown thinking level error", stderr.String())
+	}
+}
+
+func TestRunPositionalWithoutPrintErrors(t *testing.T) {
+	useTestEnv(t)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"hello"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "unsupported argument") {
+		t.Errorf("stderr = %q, want unsupported argument error", stderr.String())
+	}
+}
+
+// fakeRunner 实现 promptRunner，记录输入并返回预设结果
+type fakeRunner struct {
+	input string
+	msg   *llm.AssistantMessage
+	err   error
+}
+
+func (f *fakeRunner) Run(_ context.Context, input string) (*llm.AssistantMessage, error) {
+	f.input = input
+	return f.msg, f.err
+}
+
+func TestPrintModeOutputsAssistantText(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := &fakeRunner{msg: &llm.AssistantMessage{
+		Content:    []llm.Content{llm.TextContent{Text: "the answer"}},
+		StopReason: llm.StopReasonStop,
+	}}
+
+	code := printMode(app.Config{}, "question", false, &stdout, &stderr, runner)
+	if code != 0 {
+		t.Fatalf("printMode() code = %d, want 0", code)
+	}
+	if runner.input != "question" {
+		t.Errorf("input = %q, want %q", runner.input, "question")
+	}
+	if stdout.String() != "the answer\n" {
+		t.Errorf("stdout = %q, want the answer text", stdout.String())
+	}
+}
+
+func TestPrintModeRunErrorReturnsOne(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := &fakeRunner{err: errors.New("boom")}
+
+	code := printMode(app.Config{}, "q", false, &stdout, &stderr, runner)
+	if code != 1 {
+		t.Fatalf("printMode() code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Errorf("stderr = %q, want run error", stderr.String())
+	}
+}
+
+func TestPrintModeErrorStopReasonReturnsOne(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := &fakeRunner{msg: &llm.AssistantMessage{StopReason: llm.StopReasonError}}
+
+	code := printMode(app.Config{}, "q", false, &stdout, &stderr, runner)
+	if code != 1 {
+		t.Fatalf("printMode() code = %d, want 1", code)
 	}
 }
