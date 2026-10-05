@@ -137,3 +137,25 @@ func TestApplyOverridesInvalidPatternLevelFallsToNotFound(t *testing.T) {
 		t.Fatalf("ApplyOverrides() error = %v, want not-found error", err)
 	}
 }
+
+func TestApplyOverridesCombinedSlashAndLevelSuffix(t *testing.T) {
+	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
+	// 回归：斜杠推断与 :level 后缀组合时，后缀不得被带回匹配串
+	if err := ApplyOverrides(&cfg, "", "openai/"+openai.DefaultModel+":low", ""); err != nil {
+		t.Fatalf("ApplyOverrides() error = %v", err)
+	}
+	if cfg.ProviderID != openai.ProviderID || cfg.ModelID != openai.DefaultModel {
+		t.Errorf("ApplyOverrides() = %s/%s, want openai default", cfg.ProviderID, cfg.ModelID)
+	}
+	if cfg.ThinkingLevel != llm.ThinkingLevelLow {
+		t.Errorf("ThinkingLevel = %q, want low from pattern suffix", cfg.ThinkingLevel)
+	}
+}
+
+func TestApplyOverridesProviderPrefixWithoutModelName(t *testing.T) {
+	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
+	err := ApplyOverrides(&cfg, "openai", "openai/", "")
+	if err == nil || !strings.Contains(err.Error(), "missing a model name") {
+		t.Fatalf("ApplyOverrides() error = %v, want missing-model-name error", err)
+	}
+}

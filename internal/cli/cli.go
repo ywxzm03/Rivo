@@ -34,22 +34,17 @@ With --print, the prompt comes from positional arguments or piped stdin.
 `
 
 func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
-	return repl(false, stdin, stdout, stderr)
-}
-
-// repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建
-func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.加载运行配置（settings.json + models.json）
 	cfg, err := app.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	// 软降级警告（如 models.json 解析失败被按空配置处理）在启动时明示
-	for _, warning := range cfg.Warnings {
-		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
-	}
+	return repl(cfg, false, stdin, stdout, stderr)
+}
 
+// repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建。
+// cfg 由调用方加载并应用 CLI 覆盖后传入，本函数不再重复加载
+func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if update, ok := ev.(llm.MessageUpdateEvent); ok {
 			if text, ok := update.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent); ok {
@@ -80,8 +75,9 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 		return nil
 	}
 
-	// 2.组装 Agent：恢复最近会话或新建
+	// 1.组装 Agent：恢复最近会话或新建
 	var a *app.App
+	var err error
 	if continueRecent {
 		a, err = resumeRecentApp(cfg, onEvent)
 	} else {
@@ -91,12 +87,12 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	// 3.模型回退警告：恢复继续，但明确告知实际使用的模型
+	// 2.模型回退警告：恢复继续，但明确告知实际使用的模型
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
 
-	// 4.开始交互模式
+	// 3.开始交互模式
 	return runREPL(stdin, stdout, stderr, func(ctx context.Context, input string) error {
 		_, err := a.Run(ctx, input)
 		if err == nil {
@@ -214,7 +210,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "--print", "-p":
 			printRequested = true
 		case "--provider", "--model", "--thinking":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
 				return 2
 			}
@@ -265,7 +261,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return printMode(cfg, prompt, continueRecent, stdout, stderr)
 	}
-	return repl(continueRecent, stdin, stdout, stderr)
+	// 已应用覆盖的 cfg 直接传给 repl，避免重复加载导致覆盖丢失、警告重复输出
+	return repl(cfg, continueRecent, stdin, stdout, stderr)
 }
 
 // buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），
@@ -321,7 +318,7 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 		fmt.Fprintf(stderr, "Rivo: %v\n", runErr)
 		return 1
 	}
-	if msg.StopReason == llm.StopReasonError || msg.StopReason == "aborted" {
+	if msg.StopReason == llm.StopReasonError {
 		fmt.Fprintf(stderr, "Rivo: request %s\n", msg.StopReason)
 		return 1
 	}

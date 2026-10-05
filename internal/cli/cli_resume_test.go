@@ -331,3 +331,16 @@ func TestPrintModeErrorStopReasonReturnsOne(t *testing.T) {
 		t.Fatalf("printMode() code = %d, want 1", code)
 	}
 }
+
+func TestRunMissingFlagValueErrors(t *testing.T) {
+	useTestEnv(t)
+	var stdout, stderr bytes.Buffer
+	// --model 的值缺位（下一个 token 是另一个 flag）时报缺值错误，而不是吞掉后面的 flag
+	code := Run([]string{"--model", "--thinking", "high"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "flag --model requires a value") {
+		t.Errorf("stderr = %q, want missing-value error for --model", stderr.String())
+	}
+}

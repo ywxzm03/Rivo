@@ -44,11 +44,18 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 			return err
 		}
 		spec = s
-		pattern = stripProviderPrefix(pattern, spec.id)
-	} else if i := strings.Index(modelPattern, "/"); i >= 0 {
-		if s, err := cfg.lookupProvider(modelPattern[:i]); err == nil {
+		var stripped bool
+		pattern, stripped = stripProviderPrefix(pattern, spec.id)
+		if stripped && pattern == "" {
+			return fmt.Errorf("model %q is missing a model name after the provider prefix", modelPattern)
+		}
+	} else if i := strings.Index(pattern, "/"); i >= 0 {
+		if s, err := cfg.lookupProvider(pattern[:i]); err == nil {
 			spec = s
-			pattern = modelPattern[i+1:]
+			pattern = pattern[i+1:]
+			if pattern == "" {
+				return fmt.Errorf("model %q is missing a model name after the provider prefix", modelPattern)
+			}
 		}
 	}
 	// 4.无 provider：先跨全注册表精确匹配（id 或 provider/id）
@@ -63,10 +70,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 		}
 	}
 	// 5.域内子串匹配：多个命中按 id 字典序取「最新」（对齐 pi 1.A 决策）
-	model, err := resolveSubstring(cfg, spec, pattern)
-	if err != nil {
-		return err
-	}
+	model := resolveSubstring(cfg, spec, pattern)
 	if model == nil {
 		return fmt.Errorf("model %q not found", modelPattern)
 	}
@@ -74,13 +78,14 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 	return nil
 }
 
-// stripProviderPrefix 去掉 pattern 中与 provider id 同名的前缀（大小写不敏感）
-func stripProviderPrefix(pattern, providerID string) string {
+// stripProviderPrefix 去掉 pattern 中与 provider id 同名的前缀（大小写不敏感），
+// stripped 表示前缀确实存在；剩余部分可能为空（如 --model openai/）
+func stripProviderPrefix(pattern, providerID string) (string, bool) {
 	prefix := providerID + "/"
-	if len(pattern) > len(prefix) && strings.EqualFold(pattern[:len(prefix)], prefix) {
-		return pattern[len(prefix):]
+	if len(pattern) >= len(prefix) && strings.EqualFold(pattern[:len(prefix)], prefix) {
+		return pattern[len(prefix):], true
 	}
-	return pattern
+	return pattern, false
 }
 
 // resolveExactAcrossProviders 跨全注册表精确匹配 id 或 provider/id；
@@ -112,7 +117,7 @@ func resolveExactAcrossProviders(cfg *Config, pattern string) (*llm.Model, error
 
 // resolveSubstring 在 provider 域内（未指定 provider 时为全域）按子串匹配模型，
 // 多个命中按 id 字典序取最大（对齐 pi 的「取最新」策略）
-func resolveSubstring(cfg *Config, spec providerSpec, pattern string) (*llm.Model, error) {
+func resolveSubstring(cfg *Config, spec providerSpec, pattern string) *llm.Model {
 	var candidates []llm.Model
 	if spec.id != "" {
 		candidates = spec.models
@@ -129,8 +134,8 @@ func resolveSubstring(cfg *Config, spec providerSpec, pattern string) (*llm.Mode
 		}
 	}
 	if len(matches) == 0 {
-		return nil, nil
+		return nil
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].ID > matches[j].ID })
-	return &matches[0], nil
+	return &matches[0]
 }
