@@ -230,3 +230,10 @@ func TestLoadModelsRejectsDuplicateProvidersKey(t *testing.T) {
 		t.Fatalf("LoadModels() error = %v, want duplicate providers key error", err)
 	}
 }
+
+func TestLoadModelsRejectsTrailingData(t *testing.T) {
+	writeModelsFile(t, `{"providers": {"a": {"baseUrl": "http://a/v1", "models": [{"id": "m"}]}}}{"providers": {}}`)
+	if _, err := LoadModels(); err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("LoadModels() error = %v, want trailing-data error", err)
+	}
+}

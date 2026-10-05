@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -170,6 +171,13 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 	if !seen {
 		return fmt.Errorf("config: models file is missing the \"providers\" object")
 	}
+	// 尾随内容视为非法（对齐标准 json.Unmarshal 的行为），防止误改/误拼被静默接受
+	if _, err := dec.Token(); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return fmt.Errorf("config: unexpected trailing data after models file object")
 	return nil
 }
 

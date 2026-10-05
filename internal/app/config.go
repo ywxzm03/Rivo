@@ -85,7 +85,10 @@ func Load() (Config, error) {
 			return cfg, nil
 		}
 	}
-	dir, _ := config.Dir()
+	dir, err := config.Dir()
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{}, fmt.Errorf("no models available: configure a provider in %s/models.json", dir)
 }
 
