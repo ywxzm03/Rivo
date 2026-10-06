@@ -34,13 +34,13 @@ func TestRun(t *testing.T) {
 			name:       "long help",
 			args:       []string{"--help"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "short help",
 			args:       []string{"-h"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "repl exits",
@@ -58,7 +58,7 @@ func TestRun(t *testing.T) {
 			name:       "help with unknown option",
 			args:       []string{"--help", "--unknown"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options]\n\nOptions:\n  -h, --help    Show this help\n      --continue  Continue the most recent session\n      --resume    Alias of --continue\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "version is not implemented",

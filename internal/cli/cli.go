@@ -19,31 +19,32 @@ import (
 const helpText = `Rivo - AI coding assistant
 
 Usage:
-  Rivo [options]
+  Rivo [options] [prompt]
 
 Options:
-  -h, --help    Show this help
-      --continue  Continue the most recent session
-      --resume    Alias of --continue
+  -h, --help              Show this help
+      --continue          Continue the most recent session
+      --resume            Alias of --continue
+      --print, -p         Non-interactive mode: process prompt and exit
+      --provider <name>   Provider for --model (requires --model)
+      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix
+      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max
+
+With --print, the prompt comes from positional arguments or piped stdin.
 `
 
 func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
-	return repl(false, stdin, stdout, stderr)
-}
-
-// repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建
-func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.加载运行配置（settings.json + models.json）
 	cfg, err := app.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	// 软降级警告（如 models.json 解析失败被按空配置处理）在启动时明示
-	for _, warning := range cfg.Warnings {
-		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
-	}
+	return repl(cfg, false, stdin, stdout, stderr)
+}
 
+// repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建。
+// cfg 由调用方加载并应用 CLI 覆盖后传入，本函数不再重复加载
+func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if update, ok := ev.(llm.MessageUpdateEvent); ok {
 			if text, ok := update.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent); ok {
@@ -74,8 +75,9 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 		return nil
 	}
 
-	// 2.组装 Agent：恢复最近会话或新建
+	// 1.组装 Agent：恢复最近会话或新建
 	var a *app.App
+	var err error
 	if continueRecent {
 		a, err = resumeRecentApp(cfg, onEvent)
 	} else {
@@ -85,12 +87,12 @@ func repl(continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	// 3.模型回退警告：恢复继续，但明确告知实际使用的模型
+	// 2.模型回退警告：恢复继续，但明确告知实际使用的模型
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
 
-	// 4.开始交互模式
+	// 3.开始交互模式
 	return runREPL(stdin, stdout, stderr, func(ctx context.Context, input string) error {
 		_, err := a.Run(ctx, input)
 		if err == nil {
@@ -180,26 +182,152 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.先扫描 --help：一旦出现即优先展示帮助，不再校验其余参数
-	for _, arg := range args {
-		if arg == "--help" || arg == "-h" {
+	// 1.先扫描 --help：一旦出现即优先展示帮助（跳过带值参数的值），不校验其余参数
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--help" || args[i] == "-h" {
 			fmt.Fprint(stdout, helpText)
 			return 0
 		}
+		switch args[i] {
+		case "--provider", "--model", "--thinking":
+			i++
+		}
 	}
-	// 2.解析恢复参数：--continue 与 --resume 本阶段同路径，恢复最近会话
-	continueRecent := false
-	for _, arg := range args {
+	// 2.正式解析：位置参数仅 --print 模式可用作提示词
+	var (
+		continueRecent bool
+		printRequested bool
+		providerArg    string
+		modelArg       string
+		thinkingArg    string
+		positional     []string
+	)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "--continue", "--resume":
 			continueRecent = true
+		case "--print", "-p":
+			printRequested = true
+		case "--provider", "--model", "--thinking":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
+				return 2
+			}
+			i++
+			switch arg {
+			case "--provider":
+				providerArg = args[i]
+			case "--model":
+				modelArg = args[i]
+			case "--thinking":
+				thinkingArg = args[i]
+			}
 		default:
-			fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", arg)
-			fmt.Fprintln(stderr, "Run 'Rivo --help' for usage.")
-			return 2
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", arg)
+				fmt.Fprintln(stderr, "Run 'Rivo --help' for usage.")
+				return 2
+			}
+			positional = append(positional, arg)
 		}
 	}
-	return repl(continueRecent, stdin, stdout, stderr)
+	if !printRequested && len(positional) > 0 {
+		fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", positional[0])
+		fmt.Fprintln(stderr, "Run 'Rivo --help' for usage.")
+		return 2
+	}
+
+	// 2.加载运行配置并应用 CLI 覆盖（--provider/--model/--thinking）
+	cfg, err := app.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 2
+	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
+	}
+	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, thinkingArg); err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 2
+	}
+
+	// 3.print 模式：单轮执行后退出
+	if printRequested {
+		prompt, err := buildPrintPrompt(positional, stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "Rivo: %v\n", err)
+			return 2
+		}
+		return printMode(cfg, prompt, continueRecent, stdout, stderr)
+	}
+	// 已应用覆盖的 cfg 直接传给 repl，避免重复加载导致覆盖丢失、警告重复输出
+	return repl(cfg, continueRecent, stdin, stdout, stderr)
+}
+
+// buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），
+// 无位置参数时从 stdin 读取（管道/重定向）；stdin 是终端且无提示词时报错
+func buildPrintPrompt(positional []string, stdin io.Reader) (string, error) {
+	if len(positional) > 0 {
+		return strings.Join(positional, " "), nil
+	}
+	if f, ok := stdin.(*os.File); ok {
+		if stat, err := f.Stat(); err == nil && stat.Mode()&os.ModeCharDevice != 0 {
+			return "", fmt.Errorf("no prompt provided (use arguments or pipe stdin)")
+		}
+	}
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("failed to read stdin: %w", err)
+	}
+	prompt := strings.TrimSpace(string(data))
+	if prompt == "" {
+		return "", fmt.Errorf("no prompt provided (use arguments or pipe stdin)")
+	}
+	return prompt, nil
+}
+
+// promptRunner 抽象单轮执行，便于 print 模式测试
+type promptRunner interface {
+	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
+}
+
+// printMode 非交互执行一轮：输出最终 assistant 消息的文本块；
+// 运行错误或 stopReason 为 error/aborted 时打到 stderr 并返回 1
+func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
+	var run promptRunner
+	if len(runner) > 0 {
+		run = runner[0]
+	} else if resumeRecent {
+		a, err := resumeRecentApp(cfg, nil)
+		if err != nil {
+			fmt.Fprintf(stderr, "Rivo: %v\n", err)
+			return 1
+		}
+		run = a
+	} else {
+		a, err := app.New(cfg, nil)
+		if err != nil {
+			fmt.Fprintf(stderr, "Rivo: %v\n", err)
+			return 1
+		}
+		run = a
+	}
+	msg, runErr := run.Run(context.Background(), prompt)
+	if runErr != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", runErr)
+		return 1
+	}
+	if msg.StopReason == llm.StopReasonError {
+		fmt.Fprintf(stderr, "Rivo: request %s\n", msg.StopReason)
+		return 1
+	}
+	for _, content := range msg.Content {
+		if text, ok := content.(llm.TextContent); ok {
+			fmt.Fprintln(stdout, text.Text)
+		}
+	}
+	return 0
 }
 
 // handleResume 打印会话列表并读取编号完成恢复；返回 false 表示输入读取失败需退出 REPL。
