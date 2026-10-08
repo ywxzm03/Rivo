@@ -261,8 +261,23 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return printMode(cfg, prompt, continueRecent, stdout, stderr)
 	}
-	// 已应用覆盖的 cfg 直接传给 repl，避免重复加载导致覆盖丢失、警告重复输出
+	// 终端交互使用全屏 TUI；管道/测试流保留逐行入口，避免把 ANSI 控制序列写入非终端输出
+	if terminalStreams(stdin, stdout) {
+		return runTUI(cfg, continueRecent, stdin.(*os.File), stdout.(*os.File), stderr)
+	}
+	// 非终端流继续使用逐行入口，保留脚本与既有测试的可组合性
 	return repl(cfg, continueRecent, stdin, stdout, stderr)
+}
+
+func terminalStreams(stdin io.Reader, stdout io.Writer) bool {
+	in, inOK := stdin.(*os.File)
+	out, outOK := stdout.(*os.File)
+	if !inOK || !outOK {
+		return false
+	}
+	inInfo, inErr := in.Stat()
+	outInfo, outErr := out.Stat()
+	return inErr == nil && outErr == nil && inInfo.Mode()&os.ModeCharDevice != 0 && outInfo.Mode()&os.ModeCharDevice != 0
 }
 
 // buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），

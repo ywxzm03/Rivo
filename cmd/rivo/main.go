@@ -1,42 +1,14 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/ywxzm03/Rivo/internal/cli"
 )
 
 func main() {
-	var stdin io.Reader = os.Stdin
-	var stdout, stderr io.Writer = os.Stdout, os.Stderr
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT)
-
-	go func() {
-		for {
-			<-sigCh
-
-			go func() {
-				fmt.Fprintln(stdout, "Press Ctrl + C again to exit")
-				fmt.Fprint(stdout, ">")
-			}()
-
-			select {
-			case <-sigCh:
-				os.Exit(130)
-			case <-time.After(time.Second * 2):
-				continue
-			}
-		}
-	}()
-
-	os.Exit(run(os.Args[1:], stdin, stdout, stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

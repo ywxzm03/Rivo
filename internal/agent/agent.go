@@ -141,7 +141,8 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
 		streamCtx, streamCancel := context.WithCancel(ctx)
-		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
+		requestContext := contextForModel(a.AgentContext)
+		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
 
 		var final *llm.AssistantMessage
 		toolCallArguments := make(map[int]string)
@@ -257,6 +258,19 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return nil, err
 		}
 	}
+}
+
+// contextForModel 过滤已经错误收尾的 assistant，避免取消/失败文本污染下一次请求
+func contextForModel(agentContext llm.Context) llm.Context {
+	messages := make([]llm.Message, 0, len(agentContext.Messages))
+	for _, message := range agentContext.Messages {
+		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.StopReason == llm.StopReasonError {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	agentContext.Messages = messages
+	return agentContext
 }
 
 // isRecoverableLength 输出在达到模型输出上限之前被截断，说明截断来自上下文耗尽而非输出上限；

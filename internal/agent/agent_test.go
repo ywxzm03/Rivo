@@ -817,6 +817,30 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestAgentFiltersErrorAssistantFromNextRequest(t *testing.T) {
+	var received []llm.Message
+	streamFn := func(_ context.Context, _ llm.Model, c llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		received = append([]llm.Message(nil), c.Messages...)
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}}}
+		close(ch)
+		return ch, nil
+	}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{Messages: []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "old"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "cancelled"}}, StopReason: llm.StopReasonError},
+	}}, streamFn, nil)
+	if _, err := a.Run(context.Background(), "new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(received) != 2 {
+		t.Fatalf("request messages = %d, want 2", len(received))
+	}
+	if _, ok := received[1].(llm.UserMessage); !ok {
+		t.Fatalf("request message 1 = %T, want user message", received[1])
+	}
+}
+
 // recordingCoordinator 记录回调调用的假编排层
 type recordingCoordinator struct {
 	compactions int

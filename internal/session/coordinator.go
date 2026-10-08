@@ -159,7 +159,9 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	}
 	// 切点定位在投影消息上，经同序 EntryIDs 换算成会话条目；不一致时显式报错，避免静默清空历史
 	if result.CutIndex >= len(proj.EntryIDs) {
-		return fmt.Errorf("session: cut index %d exceeds projected entry count %d; messages and entries are inconsistent", result.CutIndex, len(proj.EntryIDs))
+		err := fmt.Errorf("session: cut index %d exceeds projected entry count %d; messages and entries are inconsistent", result.CutIndex, len(proj.EntryIDs))
+		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
+		return err
 	}
 	firstKept := proj.EntryIDs[result.CutIndex]
 	var usage *llm.Usage
@@ -167,6 +169,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 		usage = &result.Usage
 	}
 	if err := c.m.AppendCompaction(result.Summary, firstKept, tokensBefore, "", usage); err != nil {
+		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态

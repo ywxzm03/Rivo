@@ -1,0 +1,216 @@
+// tui/preview 是独立视觉验收入口：使用固定数据，不装配真实 Agent、不写会话
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/tui"
+)
+
+const exampleThinking = "The user just said hello. I will answer briefly and wait for their next request."
+const exampleAnswer = "Hi! I'm ready to help with your code — reading files, editing code, running commands, and debugging. What would you like to do?"
+const exampleMarkdown = "## A small Go example\n\n中文、emoji 👋 和 **Markdown** 使用同一套宽度规则。\n\n```go\nfunc greet(name string) string {\n    return \"Hello, \" + name\n}\n```\n\n- Inline `code` and **bold text**\n- [Rivo](https://github.com/ywxzm03/Rivo)\n\n> A quoted paragraph with a long line that wraps inside the transcript.\n\n| State | Result |\n| --- | --- |\n| streaming | visible |\n| completed | cached |"
+
+// preview 持有模拟运行状态；只通过 UI 消息交付值副本
+type preview struct {
+	state    tui.Snapshot
+	send     func(tea.Msg)
+	cancel   context.CancelFunc
+	sequence int
+	scene    string
+}
+
+func initialState() tui.Snapshot {
+	cwd, _ := os.Getwd()
+	branch, _ := exec.Command("git", "branch", "--show-current").Output()
+	levels := []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+	models := []tui.ModelOption{
+		{ID: "deepseek-v4.1-flash", Provider: "deepseek", Name: "DeepSeek V4.1 Flash", ContextWindow: 1000000, Levels: levels},
+	}
+	return tui.Snapshot{Cwd: cwd, Branch: strings.TrimSpace(string(branch)), Models: models, ModelKey: models[0].Key(), DefaultModelKey: models[0].Key(), Thinking: "max", ContextKnown: true, AutoCompact: true,
+		Sessions: []tui.SessionOption{
+			{Path: "preview/session-1", Summary: "Investigate a streaming response", Modified: "2m ago"},
+			{Path: "preview/session-2", Summary: "设计一个中文终端界面", Modified: "1h ago"},
+			{Path: "preview/session-3", Summary: "Review a Go command", Modified: "1d ago"},
+		}}
+}
+
+// request 创建取消边界后返回命令；所有模拟状态变更都在单次命令内完成
+func (p *preview) request(request tui.Request) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	return func() tea.Msg {
+		defer cancel()
+		switch request.Kind {
+		case "run":
+			return p.run(ctx, request.Value)
+		case "model":
+			p.state.ModelKey = request.Value
+			for _, model := range p.state.Models {
+				if model.Key() != request.Value {
+					continue
+				}
+				found := false
+				for _, level := range model.Levels {
+					if level == p.state.Thinking {
+						found = true
+					}
+				}
+				if !found {
+					p.state.Thinking = model.Levels[len(model.Levels)-1]
+				}
+			}
+		case "thinking":
+			p.state.Thinking = request.Value
+		case "resume":
+			for _, session := range p.state.Sessions {
+				if session.Path == request.Value {
+					p.state.Messages = []tui.Message{{ID: "resumed-user", Role: "user", Text: session.Summary}, {ID: "resumed-assistant", Role: "assistant", Text: exampleMarkdown}}
+				}
+			}
+			p.state.InputTokens, p.state.OutputTokens, p.state.ContextTokens = 4200, 320, 4520
+		case "compact":
+			p.send(tui.StatusMsg("Compacting context…"))
+			if !wait(ctx, 600*time.Millisecond) {
+				return tui.OperationDoneMsg{}
+			}
+			p.sequence++
+			p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("summary-%d", p.sequence), Role: "summary", Text: "Context compacted. The conversation is ready to continue."})
+			p.state.ContextKnown = false
+		}
+		return tui.OperationDoneMsg{Snapshot: &p.state}
+	}
+}
+
+func wait(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (p *preview) run(ctx context.Context, input string) tea.Msg {
+	p.sequence++
+	user := tui.Message{ID: fmt.Sprintf("user-%d", p.sequence), Role: "user", Text: input}
+	p.state.Messages = append(p.state.Messages, user)
+	p.send(tui.MessageMsg(user))
+	message := tui.Message{ID: fmt.Sprintf("assistant-%d", p.sequence), Role: "assistant", Thinking: exampleThinking}
+	start := time.Now()
+	p.send(tui.MessageMsg(message))
+	delay := 500 * time.Millisecond
+	if p.scene == "working" {
+		delay = 15 * time.Second
+	}
+	answer := exampleAnswer
+	if strings.Contains(strings.ToLower(input), "markdown") {
+		answer = exampleMarkdown
+	}
+	runes := []rune(answer)
+	aborted := !wait(ctx, delay)
+	for end := 0; end < len(runes) && !aborted; {
+		end = min(len(runes), end+6)
+		message.Text = string(runes[:end])
+		p.send(tui.MessageMsg(message))
+		aborted = !wait(ctx, 40*time.Millisecond)
+	}
+	if !aborted {
+		message.Elapsed = time.Since(start)
+	}
+	p.state.Messages = append(p.state.Messages, message)
+	if aborted {
+		p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("aborted-%d", p.sequence), Role: "notice", Text: "Operation aborted"})
+	} else {
+		p.state.InputTokens += 17000
+		p.state.OutputTokens += 130
+		p.state.ContextTokens, p.state.ContextKnown = 17130, true
+	}
+	if input == "error" {
+		return tui.OperationDoneMsg{Snapshot: &p.state, Err: errors.New("simulated request failure")}
+	}
+	return tui.OperationDoneMsg{Snapshot: &p.state}
+}
+
+// previewModel 在收到真实终端尺寸后注入场景按键，避免预览专用状态进入正式组件
+type previewModel struct {
+	*tui.Model
+	scene  string
+	seeded bool
+}
+
+func (p *previewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := p.Model.Update(msg)
+	if _, ok := msg.(tea.WindowSizeMsg); !ok || p.seeded {
+		return p, cmd
+	}
+	p.seeded = true
+	input := ""
+	enter := true
+	switch p.scene {
+	case "completion":
+		input = "/"
+		enter = false
+	case "model":
+		input = "/model "
+	case "thinking":
+		input = "/thinking "
+	case "resume":
+		input = "/resume "
+	case "working":
+		input = "hello"
+	}
+	if input != "" {
+		_, typed := p.Model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(input)})
+		cmd = tea.Batch(cmd, typed)
+		if enter {
+			_, submitted := p.Model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			cmd = tea.Batch(cmd, submitted)
+		}
+	}
+	return p, cmd
+}
+
+func main() {
+	scene := flag.String("scene", "initial", "initial, conversation, markdown, working, completion, model, thinking, resume")
+	flag.Parse()
+	valid := map[string]bool{"initial": true, "conversation": true, "markdown": true, "working": true, "completion": true, "model": true, "thinking": true, "resume": true}
+	if !valid[*scene] {
+		fmt.Fprintln(os.Stderr, "unknown scene:", *scene)
+		os.Exit(2)
+	}
+	driver := &preview{state: initialState(), scene: *scene}
+	if *scene == "conversation" || *scene == "model" || *scene == "markdown" {
+		answer := exampleAnswer
+		if *scene == "markdown" {
+			answer = exampleMarkdown
+		}
+		driver.state.Messages = []tui.Message{{ID: "hello", Role: "user", Text: "hello"}, {ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Elapsed: 12 * time.Second}}
+		driver.state.InputTokens, driver.state.OutputTokens, driver.state.ContextTokens = 17000, 130, 17130
+	}
+	model := &previewModel{Model: tui.New(driver.state, tui.Handlers{Request: driver.request, Cancel: func() {
+		if driver.cancel != nil {
+			driver.cancel()
+		}
+	}}), scene: *scene}
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	driver.send = program.Send
+	_, err := program.Run()
+	if driver.cancel != nil {
+		driver.cancel()
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

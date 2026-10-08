@@ -17,6 +17,8 @@ type App struct {
 	agent       *agent.Agent
 	session     *session.SessionManager
 	coordinator *session.Coordinator
+	cfg         Config
+	onEvent     llm.AgentEventSink
 	// modelFallback 非空表示恢复时投影模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
@@ -149,7 +151,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	)
 	ag.Coordinator = coord
 	coord.Agent = ag
-	return &App{agent: ag, session: sm, coordinator: coord}, nil
+	return &App{agent: ag, session: sm, coordinator: coord, cfg: cfg, onEvent: onEvent}, nil
 }
 
 // Run 经编排层驱动一次运行，溢出恢复由编排层负责
@@ -160,4 +162,88 @@ func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, err
 // Compact 手动触发一次上下文压缩，instructions 为聚焦指令
 func (a *App) Compact(ctx context.Context, instructions string) error {
 	return a.coordinator.Compact(ctx, instructions)
+}
+
+// SessionContext 返回当前会话的显示/模型投影副本
+func (a *App) SessionContext() session.SessionContext {
+	proj := a.session.BuildContext()
+	proj.Messages = append([]llm.Message(nil), proj.Messages...)
+	proj.EntryIDs = append([]string(nil), proj.EntryIDs...)
+	return proj
+}
+
+// CurrentModel 返回当前运行模型副本
+func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
+
+// CurrentThinkingLevel 返回当前思考等级
+func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
+
+// AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
+func (a *App) AutoCompactionEnabled() bool {
+	return a.coordinator != nil && a.coordinator.Compactor != nil
+}
+
+// AvailableModels 返回当前配置中的模型目录
+func (a *App) AvailableModels() []llm.Model { return a.cfg.AvailableModels() }
+
+// SetThinkingLevel 更新当前模型的思考等级并记录会话设置
+func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
+	if !validThinkingLevel(level) {
+		return fmt.Errorf("unknown thinking level %q", level)
+	}
+	a.agent.AgentConfig.ThinkingLevel = level
+	return a.session.AppendThinkingLevelChange(string(level))
+}
+
+// SetModel 切换模型、流适配器和压缩器；校验完成后才应用运行模型
+func (a *App) SetModel(providerID, modelID string) error {
+	spec, err := a.cfg.lookupProvider(providerID)
+	if err != nil {
+		return err
+	}
+	providerID = spec.id
+	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
+	model, err := findModel(spec.id, models, modelID)
+	if err != nil {
+		for _, candidate := range a.AvailableModels() {
+			if candidate.Provider == providerID && candidate.ID == modelID {
+				model, err = candidate, nil
+				break
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := a.session.AppendModelChange(providerID, modelID); err != nil {
+		return err
+	}
+	a.agent.AgentConfig.Model = model
+	a.agent.StreamFn = streamFn
+	for _, candidate := range a.agent.AgentContext.Tools {
+		if read, ok := candidate.(*tool.Read); ok {
+			read.SupportsImages = model.SupportsImages
+		}
+	}
+	if model.ContextWindow > 0 {
+		if a.coordinator.Compactor == nil {
+			a.coordinator.Compactor = &compaction.Compactor{Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
+		}
+		a.coordinator.Compactor.Model = model
+		a.coordinator.Compactor.StreamFn = streamFn
+		a.coordinator.Compactor.Config = compaction.DefaultConfig(model.ContextWindow)
+	} else {
+		a.coordinator.Compactor = nil
+	}
+	return nil
+}
+
+func validThinkingLevel(level llm.ThinkingLevel) bool {
+	switch level {
+	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
+		return true
+	default:
+		return false
+	}
 }

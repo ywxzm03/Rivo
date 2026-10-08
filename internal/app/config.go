@@ -8,6 +8,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/config"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 )
 
@@ -20,6 +21,33 @@ type Config struct {
 	Warnings []string
 	// registry 是内置与 models.json 自定义 provider 的合并注册表
 	registry map[string]providerSpec
+}
+
+// AvailableModels 返回已配置 provider 的模型目录快照，顺序稳定且不暴露凭据
+func (c Config) AvailableModels() []llm.Model {
+	var models []llm.Model
+	for _, spec := range c.registry {
+		models = append(models, spec.models...)
+	}
+	// 视觉验收阶段固定展示该模型；即使用户的 models.json 仍只有旧别名，
+	// 选择器也能提供可切换的目标项
+	found := false
+	for _, model := range models {
+		if model.Provider == deepseek.ProviderID && model.ID == "deepseek-v4.1-flash" {
+			found = true
+			break
+		}
+	}
+	if _, ok := c.registry[deepseek.ProviderID]; ok && !found {
+		models = append(models, llm.Model{ID: "deepseek-v4.1-flash", Name: "deepseek-v4.1-flash", Provider: deepseek.ProviderID, API: llm.APIOpenAIResponses, SupportsImages: true, Reasoning: true, ReasoningEffort: llm.ReasoningEffortMedium, ContextWindow: 1000000, MaxTokens: 16384})
+	}
+	slices.SortFunc(models, func(a, b llm.Model) int {
+		if a.Provider != b.Provider {
+			return strings.Compare(a.Provider, b.Provider)
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return models
 }
 
 // Load 从 agent dir 的 settings.json 与 models.json 解析运行配置：

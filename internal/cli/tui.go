@@ -1,0 +1,380 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/tui"
+)
+
+// tuiRuntime 把 app 的同步事件投影成 UI 消息；它不把 Agent 或 SessionManager 暴露给 TUI
+type tuiRuntime struct {
+	mu sync.Mutex
+
+	app     *app.App
+	cfg     app.Config
+	program *tea.Program
+	cwd     string
+	branch  string
+
+	messages     []tui.Message
+	sequence     int
+	userID       string
+	assistantID  string
+	started      time.Time
+	inputTokens  int
+	outputTokens int
+	cancel       context.CancelFunc
+}
+
+func (r *tuiRuntime) setProgram(program *tea.Program) {
+	r.mu.Lock()
+	r.program = program
+	r.mu.Unlock()
+}
+
+// request 在 tea.Cmd 中串行执行一次 app 操作；取消只取消当前 context，不等待 Agent 收尾
+func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
+	r.mu.Lock()
+	if r.cancel != nil {
+		r.mu.Unlock()
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	activeApp := r.app
+	r.mu.Unlock()
+	return func() tea.Msg {
+		defer func() {
+			r.mu.Lock()
+			r.cancel = nil
+			r.mu.Unlock()
+		}()
+		var err error
+		switch req.Kind {
+		case "run":
+			r.mu.Lock()
+			r.sequence++
+			r.started = time.Now()
+			r.userID, r.assistantID = fmt.Sprintf("user-%d", r.sequence), fmt.Sprintf("assistant-%d", r.sequence)
+			r.mu.Unlock()
+			_, err = activeApp.Run(ctx, req.Value)
+		case "compact":
+			err = activeApp.Compact(ctx, req.Value)
+		case "model":
+			provider, model, _ := strings.Cut(req.Value, "/")
+			err = activeApp.SetModel(provider, model)
+		case "thinking":
+			err = activeApp.SetThinkingLevel(llm.ThinkingLevel(req.Value))
+		case "resume":
+			var next *app.App
+			next, err = app.Open(req.Value, r.cfg, r.handleEvent)
+			if err == nil {
+				r.mu.Lock()
+				r.app = next
+				r.messages = nil
+				r.replaceMessagesLocked(next.SessionContext())
+				r.mu.Unlock()
+			}
+		}
+		r.mu.Lock()
+		if r.app != nil {
+			var partial *tui.Message
+			if req.Kind == "run" {
+				partial = r.partialAssistantLocked()
+			}
+			r.replaceMessagesLocked(r.app.SessionContext())
+			if partial != nil && !r.hasMessageLocked(*partial) {
+				r.upsertLocked(*partial)
+			}
+		}
+		snapshot := r.snapshotLocked()
+		program := r.program
+		sequence := r.sequence
+		r.mu.Unlock()
+		if program != nil {
+			aborted := errors.Is(err, context.Canceled)
+			if aborted {
+				err = nil
+			}
+			program.Send(tui.OperationDoneMsg{Snapshot: &snapshot, Err: err})
+			if aborted {
+				program.Send(tui.MessageMsg{ID: fmt.Sprintf("aborted-%d", sequence), Role: "notice", Text: "Operation aborted"})
+			}
+		}
+		return nil
+	}
+}
+
+func (r *tuiRuntime) cancelCurrent() {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// handleEvent 只发送消息/状态事件；OperationDoneMsg 由请求命令在 app 返回后发送
+func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.program == nil {
+		return nil
+	}
+	var message *tui.Message
+	var status string
+	switch event := event.(type) {
+	case llm.MessageStartEvent:
+		switch event.Message.(type) {
+		case llm.UserMessage:
+			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
+			if ok {
+				message = &converted
+			}
+		case llm.AssistantMessage:
+			converted, ok := r.messageFromLLMLocked(event.Message, r.assistantID)
+			if ok {
+				message = &converted
+			}
+		}
+	case llm.MessageUpdateEvent:
+		if _, ok := event.Message.(llm.AssistantMessage); ok {
+			converted, ok := r.messageFromLLMLocked(event.Message, r.assistantID)
+			if ok {
+				message = &converted
+			}
+		}
+	case llm.MessageEndEvent:
+		if assistant, ok := event.Message.(llm.AssistantMessage); ok && assistant.StopReason != llm.StopReasonError {
+			converted, ok := r.messageFromLLMLocked(assistant, r.assistantID)
+			if ok {
+				converted.Elapsed = time.Since(r.started)
+				message = &converted
+			}
+		}
+	case llm.CompactionStartEvent:
+		status = "Compacting context…"
+	case llm.CompactionEndEvent:
+		if event.Error == "" {
+			status = "Working"
+		} else {
+			status = "Compaction failed"
+		}
+	}
+	if message != nil {
+		r.upsertLocked(*message)
+		r.program.Send(tui.MessageMsg(*message))
+	}
+	if status != "" {
+		r.program.Send(tui.StatusMsg(status))
+	}
+	return nil
+}
+
+func (r *tuiRuntime) upsertLocked(message tui.Message) {
+	for i := range r.messages {
+		if r.messages[i].ID == message.ID {
+			r.messages[i] = message
+			return
+		}
+	}
+	r.messages = append(r.messages, message)
+}
+
+func (r *tuiRuntime) replaceMessagesLocked(proj session.SessionContext) {
+	old := make(map[string]time.Duration)
+	for _, message := range r.messages {
+		old[message.Role+"\x00"+message.Text] = message.Elapsed
+	}
+	messages := make([]tui.Message, 0, len(proj.Messages))
+	for i, message := range proj.Messages {
+		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.StopReason == llm.StopReasonError {
+			continue
+		}
+		id := fmt.Sprintf("history-%d", i)
+		converted, ok := r.messageFromLLMLocked(message, id)
+		if !ok {
+			continue
+		}
+		converted.Elapsed = old[converted.Role+"\x00"+converted.Text]
+		messages = append(messages, converted)
+	}
+	r.messages = messages
+	if len(messages) > 0 {
+		r.sequence = len(messages)
+	}
+	r.inputTokens, r.outputTokens = 0, 0
+	for _, message := range proj.Messages {
+		if assistant, ok := message.(llm.AssistantMessage); ok {
+			r.inputTokens += assistant.Usage.InputTokens
+			r.outputTokens += assistant.Usage.OutputTokens
+		}
+	}
+}
+
+func (r *tuiRuntime) partialAssistantLocked() *tui.Message {
+	for i := len(r.messages) - 1; i >= 0; i-- {
+		message := r.messages[i]
+		if message.Role == "assistant" && message.ID == r.assistantID && (message.Text != "" || message.Thinking != "") {
+			copy := message
+			return &copy
+		}
+		if message.Role == "user" {
+			break
+		}
+	}
+	return nil
+}
+
+func (r *tuiRuntime) hasMessageLocked(message tui.Message) bool {
+	for _, current := range r.messages {
+		if current.Role == message.Role && current.Text == message.Text && current.Thinking == message.Thinking {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *tuiRuntime) messageFromLLMLocked(message llm.Message, id string) (tui.Message, bool) {
+	converted := tui.Message{ID: id}
+	switch message := message.(type) {
+	case llm.UserMessage:
+		converted.Role, converted.Text = "user", textContent(message.Content)
+		if strings.HasPrefix(converted.Text, "The conversation history before this point was compacted") {
+			converted.Role = "summary"
+		}
+	case llm.AssistantMessage:
+		converted.Role = "assistant"
+		for _, content := range message.Content {
+			switch content := content.(type) {
+			case llm.TextContent:
+				converted.Text += content.Text
+			case llm.ThinkingContent:
+				converted.Thinking += content.Thinking
+			}
+		}
+	case llm.ToolResultMessage:
+		return tui.Message{}, false
+	default:
+		return tui.Message{}, false
+	}
+	return converted, converted.Text != "" || converted.Thinking != ""
+}
+
+func textContent(contents []llm.Content) string {
+	var parts []string
+	for _, content := range contents {
+		if text, ok := content.(llm.TextContent); ok {
+			parts = append(parts, text.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (r *tuiRuntime) snapshotLocked() tui.Snapshot {
+	model := r.app.CurrentModel()
+	proj := r.app.SessionContext()
+	thinking := r.app.CurrentThinkingLevel()
+	if thinking == "" {
+		thinking = llm.ThinkingLevelOff
+	}
+	models := make([]tui.ModelOption, 0)
+	for _, candidate := range r.app.AvailableModels() {
+		if candidate.Provider != "deepseek" || candidate.ID != "deepseek-v4.1-flash" {
+			continue
+		}
+		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate)})
+	}
+	current := modelOption(model)
+	sessions, _ := session.ListSessions(r.cwd)
+	sessionOptions := make([]tui.SessionOption, 0, len(sessions))
+	for _, item := range sessions {
+		sessionOptions = append(sessionOptions, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: relativeTime(item.ModTime)})
+	}
+	contextKnown := false
+	contextTokens := 0
+	if len(proj.Messages) > 0 && !proj.UsageStale {
+		contextTokens = compaction.ContextTokens(proj.Messages)
+		contextKnown = hasUsage(proj.Messages)
+	}
+	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
+		Thinking: string(thinking), Models: models, Sessions: sessionOptions, Messages: append([]tui.Message(nil), r.messages...),
+		InputTokens: r.inputTokens, OutputTokens: r.outputTokens, ContextTokens: contextTokens, ContextKnown: contextKnown, AutoCompact: r.app.AutoCompactionEnabled()}
+}
+
+func modelOption(model llm.Model) tui.ModelOption {
+	return tui.ModelOption{ID: model.ID, Provider: model.Provider, Name: model.Name, ContextWindow: model.ContextWindow, Levels: thinkingLevels(model)}
+}
+
+func (r *tuiRuntime) snapshot() tui.Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snapshotLocked()
+}
+
+func hasUsage(messages []llm.Message) bool {
+	for _, message := range messages {
+		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.Usage.InputTokens > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func thinkingLevels(model llm.Model) []string {
+	if !model.Reasoning {
+		return []string{"off"}
+	}
+	if len(model.ThinkingLevelMap) == 0 {
+		return []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+	}
+	levels := make([]string, 0, len(model.ThinkingLevelMap))
+	for level := range model.ThinkingLevelMap {
+		levels = append(levels, string(level))
+	}
+	sort.Strings(levels)
+	return levels
+}
+
+func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr io.Writer) int {
+	cwd, _ := os.Getwd()
+	branchBytes, _ := exec.Command("git", "branch", "--show-current").Output()
+	runtime := &tuiRuntime{cfg: cfg, cwd: cwd, branch: strings.TrimSpace(string(branchBytes))}
+	var a *app.App
+	var err error
+	if continueRecent {
+		a, err = resumeRecentApp(cfg, runtime.handleEvent)
+	} else {
+		a, err = app.New(cfg, runtime.handleEvent)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 2
+	}
+	runtime.app = a
+	runtime.replaceMessagesLocked(a.SessionContext())
+	model := tui.New(runtime.snapshot(), tui.Handlers{Request: runtime.request, Cancel: runtime.cancelCurrent})
+	program := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	runtime.setProgram(program)
+	_, err = program.Run()
+	runtime.cancelCurrent()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 1
+	}
+	return 0
+}
