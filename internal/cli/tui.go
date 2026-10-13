@@ -144,7 +144,9 @@ func (r *tuiRuntime) cancelCurrent() {
 func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// program 未挂载时只跳过发送；投影状态照常更新，保证启动早期事件不丢失
 	if r.program == nil {
+		r.projectEventLocked(event)
 		return nil
 	}
 	var message *tui.Message
@@ -190,7 +192,11 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 				r.currentAssistantID = fmt.Sprintf("assistant-%d-%d", r.sequence, r.assistantTurn)
 			}
 			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
-			if ok {
+			if !ok && assistant.StopReason == llm.StopReasonAborted {
+				// abort 必有可见反馈：空 partial 也要构造消息（对齐 Pi 的无条件渲染）
+				converted = tui.Message{ID: r.currentAssistantID, Role: "assistant"}
+			}
+			if ok || assistant.StopReason == llm.StopReasonAborted {
 				// aborted 的 assistant 保留 partial 正文并带取消标记，由渲染层追加提示行
 				converted.Aborted = assistant.StopReason == llm.StopReasonAborted
 				message = &converted
@@ -248,6 +254,49 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	return nil
 }
 
+// projectEventLocked program 未挂载时的最小投影：与 handleEvent 主体同步消息状态，不发送
+func (r *tuiRuntime) projectEventLocked(event llm.AgentEvent) {
+	switch event := event.(type) {
+	case llm.MessageStartEvent:
+		if _, ok := event.Message.(llm.AssistantMessage); ok {
+			r.assistantTurn++
+			r.currentAssistantID = fmt.Sprintf("assistant-%d-%d", r.sequence, r.assistantTurn)
+		}
+	case llm.MessageUpdateEvent:
+		if assistant, ok := event.Message.(llm.AssistantMessage); ok {
+			if converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, event.AssistantMessageEvent); ok {
+				r.upsertLocked(converted)
+			}
+		}
+	case llm.MessageEndEvent:
+		if assistant, ok := event.Message.(llm.AssistantMessage); ok && assistant.StopReason != llm.StopReasonError {
+			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
+			if !ok && assistant.StopReason == llm.StopReasonAborted {
+				converted = tui.Message{ID: r.currentAssistantID, Role: "assistant"}
+			}
+			if ok || assistant.StopReason == llm.StopReasonAborted {
+				converted.Aborted = assistant.StopReason == llm.StopReasonAborted
+				r.upsertLocked(converted)
+			}
+		}
+	case llm.AgentEndEvent:
+		r.sealToolGroupLocked()
+		if !event.WillRetry {
+			r.addDividerLocked()
+			r.turnStarted = time.Time{}
+		}
+	case llm.ToolExecutionStartEvent:
+		converted := r.toolStartLocked(event)
+		r.upsertLocked(converted)
+	case llm.ToolExecutionUpdateEvent:
+		converted := r.toolUpdateLocked(event)
+		r.upsertLocked(converted)
+	case llm.ToolExecutionEndEvent:
+		converted := r.toolEndLocked(event)
+		r.upsertLocked(converted)
+	}
+}
+
 func (r *tuiRuntime) upsertLocked(message tui.Message) {
 	for i := range r.messages {
 		if r.messages[i].ID == message.ID {
@@ -286,7 +335,7 @@ func (r *tuiRuntime) replaceMessagesLocked(proj session.SessionContext) {
 func (r *tuiRuntime) partialAssistantLocked() *tui.Message {
 	for i := len(r.messages) - 1; i >= 0; i-- {
 		message := r.messages[i]
-		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.Thinking != "" || message.ToolGroup != nil) {
+		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.Thinking != "" || message.ToolGroup != nil || message.Aborted) {
 			copy := message
 			return &copy
 		}

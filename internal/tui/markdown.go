@@ -96,6 +96,24 @@ func (m *Model) renderMessage(message Message) string {
 	if message.Role == "notice" || message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
+	if message.Role == "divider" && message.Divider != nil {
+		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
+	}
+	if message.ToolGroup != nil {
+		parts := []string{m.renderToolGroup(message.ToolGroup, width)}
+		if message.Text != "" {
+			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
+		}
+		if message.Aborted {
+			// 取消属于用户操作：正文后追加固定红色提示（对齐 Pi 的 aborted 渲染）
+			parts = append(parts, colored(redColor, "Operation aborted"))
+			return strings.Join(parts, "\n\n")
+		}
+		if message.Divider != nil && message.Text != "" {
+			parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
+		}
+		return strings.Join(parts, "\n\n")
+	}
 	if message.Aborted {
 		// 取消属于用户操作：partial 正文后追加固定红色提示（对齐 Pi 的 aborted 渲染）
 		parts := []string{}
@@ -104,19 +122,6 @@ func (m *Model) renderMessage(message Message) string {
 		}
 		parts = append(parts, colored(redColor, "Operation aborted"))
 		return strings.Join(parts, "\n")
-	}
-	if message.Role == "divider" && message.Divider != nil {
-		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
-	}
-	if message.ToolGroup != nil {
-		parts := []string{m.renderToolGroup(message.ToolGroup, width)}
-		if message.Divider != nil && message.Text != "" {
-			parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
-		}
-		if message.Text != "" {
-			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
-		}
-		return strings.Join(parts, "\n\n")
 	}
 	if message.Role == "user" {
 		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
