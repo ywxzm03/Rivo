@@ -112,9 +112,14 @@ func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
 	return a.runLoop(ctx, cancel, firstMessageIndex)
 }
 
-// ReplaceMessages 用编排层提供的投影消息替换内存消息序列（SystemPrompt 与 Tools 不变）
+// ReplaceMessages 用编排层提供的投影消息替换内存消息序列（Tools 不变）
 func (a *Agent) ReplaceMessages(messages []llm.Message) {
 	a.AgentContext.Messages = messages
+}
+
+// AppendMessage 把编排层产生的消息（如 system prompt 补丁）压入内存消息序列
+func (a *Agent) AppendMessage(msg llm.Message) {
+	a.AgentContext.Messages = append(a.AgentContext.Messages, msg)
 }
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩

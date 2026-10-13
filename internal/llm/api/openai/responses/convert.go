@@ -178,6 +178,8 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			c.SystemPrompt, responses.EasyInputMessageRoleSystem,
 		))
 	}
+	// 消息序列中位于最前的那条 system 消息渲染完整文本，其余渲染补丁框定文本
+	systemCount := 0
 	for i, m := range c.Messages {
 		switch msg := m.(type) {
 		case llm.UserMessage:
@@ -190,6 +192,15 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			items = append(items, assistantItems...)
 		case llm.ToolResultMessage:
 			items = append(items, toolResultItem(msg))
+		case llm.SystemMessage:
+			text := llm.RenderSystemMessageUpdate(msg)
+			if systemCount == 0 {
+				text = llm.RenderSystemMessageText(msg)
+			}
+			systemCount++
+			if text != "" {
+				items = append(items, responses.ResponseInputItemParamOfMessage(text, responses.EasyInputMessageRoleSystem))
+			}
 		default:
 			return nil, fmt.Errorf("openai: unsupported message type %T", m)
 		}

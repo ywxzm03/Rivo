@@ -297,6 +297,8 @@ func messageRole(m llm.Message) string {
 		return "assistant"
 	case llm.ToolResultMessage:
 		return "toolResult"
+	case llm.SystemMessage:
+		return "system"
 	default:
 		return ""
 	}
@@ -304,6 +306,13 @@ func messageRole(m llm.Message) string {
 
 // encodeMessage 按角色把消息编码为 JSON
 func encodeMessage(m llm.Message) (json.RawMessage, error) {
+	// system 消息只承载分节，不带 content 块
+	if sys, ok := m.(llm.SystemMessage); ok {
+		return json.Marshal(struct {
+			Role     string            `json:"role"`
+			Sections map[string]string `json:"sections"`
+		}{"system", sys.Sections})
+	}
 	content, err := encodeContents(messageContent(m))
 	if err != nil {
 		return nil, err
@@ -419,6 +428,14 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			msg.Details = json.RawMessage(append([]byte(nil), wire.Details...))
 		}
 		return msg, nil
+	case "system":
+		var wire struct {
+			Sections map[string]string `json:"sections"`
+		}
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			return nil, err
+		}
+		return llm.SystemMessage{Sections: wire.Sections}, nil
 	default:
 		return nil, errUnknownRole
 	}

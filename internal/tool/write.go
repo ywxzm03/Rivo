@@ -15,6 +15,12 @@ func (w *Write) Name() string { return "write" }
 
 func (w *Write) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
+func (w *Write) PromptSnippet() string { return "Create or overwrite files" }
+
+func (w *Write) PromptGuidelines() []string {
+	return []string{"Use write only for new files or complete rewrites."}
+}
+
 func (w *Write) Description() string {
 	return "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
 }

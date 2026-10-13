@@ -23,6 +23,10 @@ func (f *Find) Name() string { return "find" }
 
 func (f *Find) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
+func (f *Find) PromptSnippet() string { return "Find files by glob pattern (respects .gitignore)" }
+
+func (f *Find) PromptGuidelines() []string { return nil }
+
 func (f *Find) Description() string {
 	return fmt.Sprintf(
 		"Find files by glob pattern. Returns paths relative to the search directory. Includes hidden files and respects .gitignore. "+

@@ -6,6 +6,7 @@ const (
 	RoleUser       Role = "user"
 	RoleAssistant  Role = "assistant"
 	RoleToolResult Role = "toolResult"
+	RoleSystem     Role = "system"
 )
 
 type Message interface {
@@ -44,6 +45,14 @@ type ToolResultMessage struct {
 func (ToolResultMessage) Role() Role { return RoleToolResult }
 func (ToolResultMessage) message()   {}
 
+// SystemMessage 一条 system prompt 声明：Sections 承载分节文本，空串表示该节被删除
+type SystemMessage struct {
+	Sections map[string]string
+}
+
+func (SystemMessage) Role() Role { return RoleSystem }
+func (SystemMessage) message()   {}
+
 type StopReason string
 
 const (
@@ -62,4 +71,5 @@ var (
 	_ Message = UserMessage{}
 	_ Message = AssistantMessage{}
 	_ Message = ToolResultMessage{}
+	_ Message = SystemMessage{}
 )

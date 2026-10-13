@@ -9,6 +9,7 @@ require (
 	github.com/openai/openai-go/v3 v3.59.0
 	golang.org/x/image v0.46.0
 	golang.org/x/text v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

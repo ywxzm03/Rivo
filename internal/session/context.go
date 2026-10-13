@@ -75,7 +75,6 @@ func (m *SessionManager) BuildContext() SessionContext {
 		}
 		selected = append(selected, path[compactionIdx+1:]...)
 	}
-
 	// 3.每个目标取路径上最新一条 context_edit
 	edits := make(map[string]*ContextEditEntry)
 	for _, e := range selected {
@@ -110,9 +109,15 @@ func (m *SessionManager) BuildContext() SessionContext {
 				lastAssistantStale = compaction != nil && pathIdx[e.base().ID] < compactionIdx
 			}
 		case *CompactionEntry:
-			// 保留区间内可能残留更早的 compaction，只有最新的这个产出摘要
+			// 保留区间内可能残留更早的 compaction，只有最新的这个产出快照与摘要
 			if compaction != nil && e != compaction {
 				continue
+			}
+			// 压缩快照位于摘要之前：它把压缩边界处的 system prompt 合并为一条，
+			// 保留区内的 system 条目由此被取代
+			if e.SystemMessage != nil {
+				ctx.Messages = append(ctx.Messages, *e.SystemMessage)
+				ctx.EntryIDs = append(ctx.EntryIDs, e.base().ID)
 			}
 			ctx.Messages = append(ctx.Messages, llm.UserMessage{
 				Content: []llm.Content{llm.TextContent{Text: compact.WrappedSummary(e.Summary)}},

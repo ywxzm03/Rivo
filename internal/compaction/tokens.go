@@ -58,6 +58,11 @@ func MessageTokens(msg llm.Message) int {
 				total += EstimateTokens(t.Text)
 			}
 		}
+	case llm.SystemMessage:
+		// system prompt 分节文本计入上下文，各节按文本长度估算
+		for _, text := range m.Sections {
+			total += EstimateTokens(text)
+		}
 	}
 	return total
 }

@@ -28,6 +28,12 @@ func (g *Grep) Name() string { return "grep" }
 
 func (g *Grep) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
+func (g *Grep) PromptSnippet() string {
+	return "Search file contents for patterns (respects .gitignore)"
+}
+
+func (g *Grep) PromptGuidelines() []string { return nil }
+
 func (g *Grep) Description() string {
 	return fmt.Sprintf(
 		"Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. "+

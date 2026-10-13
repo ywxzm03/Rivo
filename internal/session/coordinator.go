@@ -8,6 +8,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/prompt"
 )
 
 // Runner 是编排层驱动 Agent 所需的能力，由 *agent.Agent 实现
@@ -15,8 +16,10 @@ type Runner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
 	// Continue 在不追加用户消息的情况下重入运行循环
 	Continue(ctx context.Context) (*llm.AssistantMessage, error)
-	// ReplaceMessages 用投影消息替换 Agent 内存消息序列（SystemPrompt 与 Tools 不变）
+	// ReplaceMessages 用投影消息替换 Agent 内存消息序列（Tools 不变）
 	ReplaceMessages(messages []llm.Message)
+	// AppendMessage 把服务端事件之外的消息压入 Agent 内存消息序列
+	AppendMessage(msg llm.Message)
 }
 
 // 压缩原因，随 compaction 事件暴露给消费者
@@ -41,6 +44,8 @@ type Coordinator struct {
 	pendingRecovery bool
 	// recovered 限制每次 Run 最多做一次溢出恢复
 	recovered bool
+	// promptSections 是当前基线分节，由装配层设置、Reload 时替换；请求前与重放结果 diff
+	promptSections prompt.Sections
 	// mu 串行化 Run 与手动 Compact，避免压缩与进行中的运行并发读写会话与内存
 	mu sync.Mutex
 }
@@ -48,6 +53,38 @@ type Coordinator struct {
 // NewCoordinator 创建编排层：next 为事件转发链（CLI 显示等）
 func NewCoordinator(m *SessionManager, next llm.AgentEventSink) *Coordinator {
 	return &Coordinator{m: m, next: next}
+}
+
+// SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息
+func (c *Coordinator) SetPromptSections(sections prompt.Sections) {
+	c.promptSections = sections
+}
+
+// PromptSections 返回当前基线分节
+func (c *Coordinator) PromptSections() prompt.Sections {
+	return c.promptSections
+}
+
+// preparePrompt 在进入 Agent 之前对齐 system prompt：把重放得到的当前分节与基线 diff，
+// 有差异时先落盘再压入内存；transcript 只增不改，无差异不产生任何条目
+func (c *Coordinator) preparePrompt() error {
+	if len(c.promptSections) == 0 {
+		return nil
+	}
+	var current prompt.Sections
+	if existing := llm.CurrentSystemMessage(c.m.BuildContext().Messages); existing != nil {
+		current = existing.Sections
+	}
+	patch := prompt.DiffSections(current, c.promptSections)
+	if patch == nil {
+		return nil
+	}
+	message := llm.SystemMessage{Sections: patch}
+	if err := c.m.AppendMessage(message); err != nil {
+		return err
+	}
+	c.Agent.AppendMessage(message)
+	return nil
 }
 
 // Handle 处理 agent 事件：转发在前（显示不依赖落盘成功，对齐 pi 的 _emit 顺序），
@@ -73,6 +110,10 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pendingRecovery, c.recovered = false, false
+	// 0.请求前对齐 system prompt，变更以补丁条目追加
+	if err := c.preparePrompt(); err != nil {
+		return nil, err
+	}
 	reply, runErr := c.Agent.Run(ctx, input)
 	// 无压缩器时无法恢复（窗口未知等场景）：按原始错误收场，失败尝试保留在会话中
 	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
@@ -166,7 +207,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	if result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 {
 		usage = &result.Usage
 	}
-	if err := c.m.AppendCompaction(result.Summary, firstKept, tokensBefore, "", usage); err != nil {
+	if err := c.m.AppendCompaction(result.Summary, firstKept, tokensBefore, llm.CurrentSystemMessage(proj.Messages), usage); err != nil {
 		return err
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态

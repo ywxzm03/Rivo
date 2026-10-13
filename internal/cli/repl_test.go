@@ -20,6 +20,7 @@ func TestRunREPL(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		func() {},
 	)
 
 	if code != 0 {
@@ -50,6 +51,7 @@ func TestRunREPLLineBeyondScannerLimit(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		func() {},
 	)
 
 	if code != 0 {
@@ -79,6 +81,7 @@ func TestRunREPLContinuesAfterAgentError(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		func() {},
 	)
 
 	if code != 0 {
@@ -107,6 +110,7 @@ func TestRunREPLEOF(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		func() {},
 	)
 
 	if code != 0 {
@@ -140,7 +144,8 @@ func TestRunREPLCompactCommand(t *testing.T) {
 			return nil
 		},
 		nil,
-		nil)
+		nil,
+		func() {})
 
 	if code != 0 {
 		t.Fatalf("runREPL() code = %d, want 0", code)
@@ -170,7 +175,8 @@ func TestRunREPLCompactErrorContinues(t *testing.T) {
 			return sentinel
 		},
 		nil,
-		nil)
+		nil,
+		func() {})
 
 	if code != 0 {
 		t.Fatalf("runREPL() code = %d, want 0", code)
@@ -181,5 +187,25 @@ func TestRunREPLCompactErrorContinues(t *testing.T) {
 	// 压缩失败后 REPL 继续处理后续输入
 	if got := stdout.String(); got != "> > > " {
 		t.Errorf("stdout = %q, want three prompts", got)
+	}
+}
+
+func TestRunREPLReloadCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	reloaded := 0
+	code := runREPL(strings.NewReader("/reload\n/exit\n"), &stdout, &stderr,
+		func(_ context.Context, _ string) error { return nil },
+		nil,
+		nil,
+		nil,
+		func() { reloaded++ })
+	if code != 0 {
+		t.Fatalf("runREPL() code = %d, want 0", code)
+	}
+	if reloaded != 1 {
+		t.Errorf("reload calls = %d, want 1", reloaded)
+	}
+	if !strings.Contains(stdout.String(), "reloaded") {
+		t.Errorf("stdout = %q, want reload notice", stdout.String())
 	}
 }
