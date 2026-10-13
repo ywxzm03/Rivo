@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atotto/clipboard"
+	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -30,14 +32,19 @@ type tuiRuntime struct {
 	cwd     string
 	branch  string
 
-	messages     []tui.Message
-	sequence     int
-	userID       string
-	assistantID  string
-	started      time.Time
-	inputTokens  int
-	outputTokens int
-	cancel       context.CancelFunc
+	messages           []tui.Message
+	sequence           int
+	userID             string
+	assistantTurn      int
+	currentAssistantID string
+	activeToolAnchorID string
+	toolGroupSequence  int
+	toolStarted        map[string]time.Time
+	turnStarted        time.Time
+	turnRetrying       bool
+	inputTokens        int
+	outputTokens       int
+	cancel             context.CancelFunc
 }
 
 func (r *tuiRuntime) setProgram(program *tea.Program) {
@@ -68,8 +75,13 @@ func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 		case "run":
 			r.mu.Lock()
 			r.sequence++
-			r.started = time.Now()
-			r.userID, r.assistantID = fmt.Sprintf("user-%d", r.sequence), fmt.Sprintf("assistant-%d", r.sequence)
+			r.userID = fmt.Sprintf("user-%d", r.sequence)
+			r.currentAssistantID = ""
+			r.activeToolAnchorID = ""
+			r.assistantTurn, r.toolGroupSequence = 0, 0
+			r.toolStarted = make(map[string]time.Time)
+			r.turnStarted = time.Time{}
+			r.turnRetrying = false
 			r.mu.Unlock()
 			_, err = activeApp.Run(ctx, req.Value)
 		case "compact":
@@ -137,35 +149,72 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	}
 	var message *tui.Message
 	var status string
+	previousToolAnchor := r.activeToolAnchorID
 	switch event := event.(type) {
+	case llm.AgentStartEvent:
+		if r.turnStarted.IsZero() || !r.turnRetrying {
+			r.turnStarted = time.Now()
+		}
+		r.turnRetrying = false
+	case llm.TurnStartEvent:
+		if r.turnStarted.IsZero() {
+			r.turnStarted = time.Now()
+		}
 	case llm.MessageStartEvent:
-		switch event.Message.(type) {
+		switch current := event.Message.(type) {
 		case llm.UserMessage:
+			r.sealToolGroupLocked()
 			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
 			if ok {
 				message = &converted
 			}
 		case llm.AssistantMessage:
-			converted, ok := r.messageFromLLMLocked(event.Message, r.assistantID)
+			r.assistantTurn++
+			r.currentAssistantID = fmt.Sprintf("assistant-%d-%d", r.sequence, r.assistantTurn)
+			converted, ok := r.liveAssistantLocked(current, r.currentAssistantID, nil)
 			if ok {
 				message = &converted
 			}
 		}
 	case llm.MessageUpdateEvent:
-		if _, ok := event.Message.(llm.AssistantMessage); ok {
-			converted, ok := r.messageFromLLMLocked(event.Message, r.assistantID)
+		if assistant, ok := event.Message.(llm.AssistantMessage); ok {
+			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, event.AssistantMessageEvent)
 			if ok {
 				message = &converted
 			}
 		}
 	case llm.MessageEndEvent:
 		if assistant, ok := event.Message.(llm.AssistantMessage); ok && assistant.StopReason != llm.StopReasonError {
-			converted, ok := r.messageFromLLMLocked(assistant, r.assistantID)
+			if r.currentAssistantID == "" {
+				r.assistantTurn++
+				r.currentAssistantID = fmt.Sprintf("assistant-%d-%d", r.sequence, r.assistantTurn)
+			}
+			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
 			if ok {
-				converted.Elapsed = time.Since(r.started)
 				message = &converted
 			}
 		}
+	case llm.TurnEndEvent:
+		// Tool loops stay in one compact group until visible text or agent_end.
+	case llm.AgentEndEvent:
+		if event.WillRetry {
+			r.sealToolGroupLocked()
+			r.turnRetrying = true
+		} else {
+			r.sealToolGroupLocked()
+			r.addDividerLocked()
+			r.turnStarted = time.Time{}
+			r.turnRetrying = false
+		}
+	case llm.ToolExecutionStartEvent:
+		converted := r.toolStartLocked(event)
+		message = &converted
+	case llm.ToolExecutionUpdateEvent:
+		converted := r.toolUpdateLocked(event)
+		message = &converted
+	case llm.ToolExecutionEndEvent:
+		converted := r.toolEndLocked(event)
+		message = &converted
 	case llm.CompactionStartEvent:
 		status = "Compacting context…"
 	case llm.CompactionEndEvent:
@@ -178,6 +227,18 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	if message != nil {
 		r.upsertLocked(*message)
 		r.program.Send(tui.MessageMsg(*message))
+	}
+	if previousToolAnchor != "" && r.activeToolAnchorID == "" {
+		if index := r.messageIndexLocked(previousToolAnchor); index >= 0 {
+			r.program.Send(tui.MessageMsg(r.messages[index]))
+		}
+	}
+	if _, ok := event.(llm.AgentEndEvent); ok {
+		for _, current := range r.messages {
+			if current.ToolGroup != nil || current.Divider != nil {
+				r.program.Send(tui.MessageMsg(current))
+			}
+		}
 	}
 	if status != "" {
 		r.program.Send(tui.StatusMsg(status))
@@ -197,23 +258,24 @@ func (r *tuiRuntime) upsertLocked(message tui.Message) {
 
 func (r *tuiRuntime) replaceMessagesLocked(proj session.SessionContext) {
 	old := make(map[string]time.Duration)
+	dividers := make(map[string]*tui.TurnDividerView)
 	for _, message := range r.messages {
-		old[message.Role+"\x00"+message.Text] = message.Elapsed
+		key := message.Role + "\x00" + message.Text
+		old[key] = message.Elapsed
+		if message.Divider != nil {
+			divider := *message.Divider
+			dividers[key] = &divider
+		}
 	}
-	messages := make([]tui.Message, 0, len(proj.Messages))
-	for i, message := range proj.Messages {
-		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.StopReason == llm.StopReasonError {
-			continue
-		}
-		id := fmt.Sprintf("history-%d", i)
-		converted, ok := r.messageFromLLMLocked(message, id)
-		if !ok {
-			continue
-		}
-		converted.Elapsed = old[converted.Role+"\x00"+converted.Text]
-		messages = append(messages, converted)
+	messages := r.projectSessionMessages(proj.Messages)
+	for i := range messages {
+		key := messages[i].Role + "\x00" + messages[i].Text
+		messages[i].Elapsed = old[key]
+		messages[i].Divider = dividers[key]
 	}
 	r.messages = messages
+	r.activeToolAnchorID = ""
+	r.currentAssistantID = ""
 	if len(messages) > 0 {
 		r.sequence = len(messages)
 	}
@@ -229,7 +291,7 @@ func (r *tuiRuntime) replaceMessagesLocked(proj session.SessionContext) {
 func (r *tuiRuntime) partialAssistantLocked() *tui.Message {
 	for i := len(r.messages) - 1; i >= 0; i-- {
 		message := r.messages[i]
-		if message.Role == "assistant" && message.ID == r.assistantID && (message.Text != "" || message.Thinking != "") {
+		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.Thinking != "" || message.ToolGroup != nil) {
 			copy := message
 			return &copy
 		}
@@ -367,8 +429,19 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	}
 	runtime.app = a
 	runtime.replaceMessagesLocked(a.SessionContext())
-	model := tui.New(runtime.snapshot(), tui.Handlers{Request: runtime.request, Cancel: runtime.cancelCurrent})
-	program := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	model := tui.New(runtime.snapshot(), tui.Handlers{
+		Request:       runtime.request,
+		Cancel:        runtime.cancelCurrent,
+		ReadClipboard: clipboard.ReadAll,
+		WriteClipboard: func(text string) error {
+			if err := clipboard.WriteAll(text); err == nil {
+				return nil
+			}
+			_, err := fmt.Fprint(stderr, osc52.New(text))
+			return err
+		},
+	})
+	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(stdin)), tea.WithOutput(tui.NewCursorWriter(stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	runtime.setProgram(program)
 	_, err = program.Run()
 	runtime.cancelCurrent()

@@ -4,6 +4,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -27,10 +28,56 @@ type SessionOption struct {
 	Path, Summary, Modified string
 }
 
+// ToolStatus 表示工具调用在 compact transcript 中的状态
+type ToolStatus string
+
+const (
+	ToolPending     ToolStatus = "pending"
+	ToolSuccess     ToolStatus = "success"
+	ToolError       ToolStatus = "error"
+	ToolInterrupted ToolStatus = "interrupted"
+)
+
+// ThinkingBlockView 保存一个按 content index 分隔的 reasoning block
+type ThinkingBlockView struct {
+	Index       int
+	Text        string
+	Active      bool
+	Tokens      int
+	TokensExact bool
+}
+
+// ToolCallView 保存完整工具状态；compact/full 只改变展示方式
+type ToolCallView struct {
+	ID, Name  string
+	Arguments string
+	Result    string
+	Status    ToolStatus
+	Elapsed   time.Duration
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
+// ToolGroupView 将连续 thinking 和工具调用作为一个可折叠工作块
+type ToolGroupView struct {
+	ID       string
+	Calls    []ToolCallView
+	Thinking []ThinkingBlockView
+	Active   bool
+	Sealed   bool
+}
+
+// TurnDividerView 标记一个 turn 的最终工作耗时
+type TurnDividerView struct {
+	Elapsed time.Duration
+}
+
 // Message 是显示投影；ID 在流式更新中保持稳定，压缩提示不冒充用户消息
 type Message struct {
 	ID, Role, Text, Thinking string
 	Elapsed                  time.Duration
+	ToolGroup                *ToolGroupView
+	Divider                  *TurnDividerView
 }
 
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
@@ -50,8 +97,10 @@ type Request struct{ Kind, Value string }
 
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
 type Handlers struct {
-	Request func(Request) tea.Cmd
-	Cancel  func()
+	Request        func(Request) tea.Cmd
+	Cancel         func()
+	ReadClipboard  func() (string, error)
+	WriteClipboard func(string) error
 }
 
 // MessageMsg 更新具有同一 ID 的消息；OperationDoneMsg 才结束整个用户操作
@@ -63,11 +112,23 @@ type OperationDoneMsg struct {
 }
 type flushMsg struct{}
 
+type clipboardReadMsg struct {
+	text string
+	err  error
+}
+
+type clipboardWriteMsg struct{ err error }
+
+type clearCopyNoticeMsg uint64
+
+type screenPoint struct{ x, y int }
+
 type cachedMessage struct {
-	message Message
-	width   int
-	hidden  bool
-	view    string
+	message  Message
+	width    int
+	hidden   bool
+	allTools bool
+	view     string
 }
 
 // Model 独占全部显示状态，生命周期与消息定稿分离
@@ -87,17 +148,34 @@ type Model struct {
 	busy, closing    bool
 	status           string
 	hideThinking     bool
+	showAllTools     bool
 	lastCtrlC        time.Time
 	flushPending     bool
 	cache            map[string]cachedMessage
 	markdown         markdownRenderer
 	clock            func() time.Time
+	selectionAnchor  screenPoint
+	selectionFocus   screenPoint
+	selecting        bool
+	lastClick        screenPoint
+	lastClickAt      time.Time
+	mouseFragment    string
+	copyNoticeSeq    uint64
+	copyNotice       bool
+	cursorRow        atomic.Int64
+	cursorColumn     atomic.Int64
 }
 
 // New 创建界面；预览与正式运行共享同一套组件和消息处理
 func New(state Snapshot, handlers Handlers) *Model {
 	ed := textarea.New()
-	ed.Prompt, ed.Placeholder = "> ", ""
+	ed.Prompt, ed.Placeholder = "❯ ", ""
+	ed.SetPromptFunc(2, func(line int) string {
+		if line == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
 	ed.ShowLineNumbers = false
 	ed.EndOfBufferCharacter = ' '
 	ed.CharLimit, ed.MaxWidth = 0, 0
@@ -107,7 +185,7 @@ func New(state Snapshot, handlers Handlers) *Model {
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
 	m := &Model{handlers: handlers, editor: ed, viewport: viewport.New(0, 0),
-		spinner: spinner.New(spinner.WithSpinner(spinner.Dot)), cache: make(map[string]cachedMessage), clock: time.Now}
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), clock: time.Now}
 	m.applySnapshot(state)
 	return m
 }
@@ -122,13 +200,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.refreshTranscript()
 	case tea.KeyMsg:
+		if filtered, handled := m.filterMouseKey(msg); handled {
+			if filtered == "" {
+				return m, nil
+			}
+			msg.Runes = []rune(filtered)
+		}
+		if wheel, ok := rawMouseWheel(msg); ok {
+			m.scrollWheel(wheel)
+			return m, nil
+		}
+		if isTerminalControlKey(msg) {
+			return m, nil
+		}
 		return m, m.handleKey(msg)
 	case tea.MouseMsg:
-		if m.selector == nil {
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
-		}
+		return m, m.handleMouse(msg)
 	case MessageMsg:
 		// 1.同一消息原地更新，避免 MessageEnd 与操作结束各追加一次
 		found := false
@@ -164,7 +251,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.busy {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
+			m.refreshTranscript()
 			return m, cmd
+		}
+	case clipboardReadMsg:
+		if msg.err == nil && msg.text != "" {
+			m.editor.InsertString(msg.text)
+			m.clearSelection()
+			m.layout()
+		}
+	case clipboardWriteMsg:
+		if msg.err != nil {
+			m.notice("Clipboard copy failed: " + msg.err.Error())
+			break
+		}
+		m.copyNoticeSeq++
+		sequence := m.copyNoticeSeq
+		m.copyNotice = true
+		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return clearCopyNoticeMsg(sequence) })
+	case clearCopyNoticeMsg:
+		if uint64(msg) == m.copyNoticeSeq {
+			m.copyNotice = false
 		}
 	default:
 		if m.selector != nil {
@@ -193,6 +300,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) applySnapshot(s Snapshot) {
 	m.state = s
 	m.state.Messages = append([]Message(nil), s.Messages...)
+	for i := range m.state.Messages {
+		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
+		if divider := m.state.Messages[i].Divider; divider != nil {
+			copy := *divider
+			m.state.Messages[i].Divider = &copy
+		}
+	}
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	for i := range m.state.Models {
@@ -251,13 +365,14 @@ func (m *Model) refreshTranscript() {
 	}
 	follow := m.viewport.AtBottom()
 	var blocks []string
-	if len(m.state.Messages) == 0 {
-		blocks = append(blocks, colored(accentColor, " Rivo"))
-	}
 	for _, message := range m.state.Messages {
 		cached := m.cache[message.ID]
-		if cached.message != message || cached.width != m.width || cached.hidden != m.hideThinking {
-			cached = cachedMessage{message, m.width, m.hideThinking, m.renderMessage(message)}
+		animate := false
+		if m.busy && message.ToolGroup != nil {
+			_, _, animate = groupState(message.ToolGroup)
+		}
+		if animate || cached.message != message || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
+			cached = cachedMessage{message: message, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
 			m.cache[message.ID] = cached
 		}
 		blocks = append(blocks, cached.view)

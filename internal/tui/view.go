@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -17,10 +18,23 @@ func (m *Model) layout() {
 		return
 	}
 	follow := m.viewport.AtBottom()
-	m.editor.SetWidth(max(1, m.width-1))
+	previousWidth, previousHeight := m.editor.Width(), m.editor.Height()
+	targetLine := m.editor.Line()
+	lineInfo := m.editor.LineInfo()
+	targetColumn := lineInfo.StartColumn + lineInfo.ColumnOffset
+	m.editor.SetWidth(max(1, m.width))
+	m.editor.SetCursor(targetColumn)
 	rows := 0
 	probe := textarea.New()
-	probe.SetWidth(max(1, m.width-1))
+	probe.Prompt = "❯ "
+	probe.SetPromptFunc(2, func(line int) string {
+		if line == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
+	probe.ShowLineNumbers = false
+	probe.SetWidth(max(1, m.width))
 	for _, line := range strings.Split(m.editor.Value(), "\n") {
 		// 使用编辑器自身的软换行规则，包含行尾光标和按单词换行占用的空间
 		probe.SetValue(line)
@@ -28,6 +42,9 @@ func (m *Model) layout() {
 	}
 	limit := min(max(5, m.height*3/10), max(1, m.height-5))
 	m.editor.SetHeight(max(1, min(rows, limit)))
+	if previousWidth != m.editor.Width() || previousHeight != m.editor.Height() {
+		refreshEditorViewport(&m.editor, targetLine, targetColumn)
+	}
 	dock := m.editor.Height() + 2
 	if m.selector != nil {
 		m.selector.input.Width = max(1, m.width-3)
@@ -42,37 +59,96 @@ func (m *Model) layout() {
 	}
 }
 
+// refreshEditorViewport repositions the textarea after its dock height changes.
+func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int) {
+	// Bubble's textarea keeps its private viewport offset when SetHeight or
+	// SetWidth changes. Re-anchor at the input start, then walk back to the
+	// original logical line so the cursor remains where the user left it.
+	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyCtrlHome})
+	for steps := 0; steps < 100000; steps++ {
+		line := editor.Line()
+		if line >= targetLine {
+			break
+		}
+		var next tea.Cmd
+		*editor, next = editor.Update(tea.KeyMsg{Type: tea.KeyDown})
+		_ = next
+	}
+	editor.SetCursor(targetColumn)
+	// An empty rune message runs textarea's repositionView without changing
+	// the restored value or cursor column.
+	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyRunes})
+}
+
 // View 只拼接显示缓存，不调用后台运行器或 Markdown 解析器
 func (m *Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
-	var parts []string
-	if m.viewport.Height > 0 {
-		parts = append(parts, m.viewport.View())
+	lines := m.frameLines()
+	if m.hasSelection() {
+		paintSelection(lines, m.selectionAnchor, m.selectionFocus)
 	}
-	if m.selector != nil {
-		parts = append(parts, m.selector.view(m.width, max(1, m.height-3)))
-	} else {
-		label := ""
-		if m.busy {
-			label = m.spinner.View() + " " + m.status
-		}
-		parts = append(parts, rule(m.width, label, inputBorder, false), m.editor.View(), rule(m.width, "", inputBorder, false))
-		if completions := m.completionView(); completions != "" {
-			parts = append(parts, completions)
-		}
+	if len(lines) < m.height {
+		lines = append(lines, make([]string, m.height-len(lines))...)
 	}
-	parts = append(parts, m.footer())
-	lines := strings.Split(strings.Join(parts, "\n"), "\n")
-	// 极小终端仍遵守总高/列宽约束，保留底部输入及 footer
 	if len(lines) > m.height {
-		lines = lines[len(lines)-m.height:]
+		// The dock is measured before rendering; only a malformed child may
+		// overflow. Preserve the fixed footer/input boundary in that case.
+		if m.height <= 1 {
+			lines = lines[len(lines)-1:]
+		} else {
+			footerStart := max(0, len(lines)-2)
+			lines = append(lines[:min(m.height-2, footerStart)], lines[footerStart:]...)
+		}
 	}
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], m.width, "")
 	}
+	m.updateCursorPosition()
 	return strings.Join(lines, "\n")
+}
+
+// frameLines builds the terminal rows in their stable top-to-bottom order.
+func (m *Model) frameLines() []string {
+	var lines []string
+	if m.viewport.Height > 0 {
+		lines = append(lines, splitFrameLines(m.viewport.View())...)
+	}
+	if m.selector != nil {
+		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-3)))...)
+	} else {
+		label := ""
+		if m.busy {
+			label = m.spinner.View() + " " + m.status
+		} else if m.status != "" {
+			label = m.status
+		}
+		border := rule(m.width, label, inputBorder, false)
+		if m.copyNotice {
+			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
+			const notice = " copied! ──"
+			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
+				border = rule(m.width-ansi.StringWidth(notice), label, inputBorder, false) + colored(mutedColor, notice)
+			}
+		}
+		lines = append(lines, border)
+		lines = append(lines, splitFrameLines(m.editor.View())...)
+		lines = append(lines, rule(m.width, "", inputBorder, false))
+		if completions := m.completionView(); completions != "" {
+			lines = append(lines, splitFrameLines(completions)...)
+		}
+	}
+	lines = append(lines, splitFrameLines(m.footer())...)
+	return lines
+}
+
+func splitFrameLines(view string) []string {
+	view = strings.TrimSuffix(view, "\n")
+	if view == "" {
+		return nil
+	}
+	return strings.Split(view, "\n")
 }
 
 func rule(width int, label, color string, centered bool) string {
@@ -88,7 +164,24 @@ func rule(width int, label, color string, centered bool) string {
 	return colored(color, strings.Repeat("─", left)+" "+label+" "+strings.Repeat("─", remaining-left))
 }
 
-func formatElapsed(d time.Duration) string { return fmt.Sprintf("%ds", max(1, int(d.Seconds()))) }
+func formatElapsed(d time.Duration) string {
+	total := max(1, int(d.Round(time.Second).Seconds()))
+	hours, total := total/3600, total%3600
+	minutes, seconds := total/60, total%60
+	if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	if minutes > 0 {
+		if seconds > 0 {
+			return fmt.Sprintf("%dm %ds", minutes, seconds)
+		}
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
 
 func formatTokens(n int) string {
 	switch {

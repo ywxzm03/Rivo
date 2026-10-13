@@ -37,6 +37,11 @@ func testModel(width, height int) *Model {
 }
 
 func typeText(m *Model, value string) {
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value)})
+}
+
+// pasteText 模拟终端 bracketed paste，整段内容以单条 KeyMsg 进入
+func pasteText(m *Model, value string) {
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(value), Paste: true})
 }
 func press(m *Model, key tea.KeyType) tea.Cmd {
@@ -78,7 +83,14 @@ func TestLayout(t *testing.T) {
 			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Thinking: "Let me think", Text: "```go\n" + strings.Repeat("long_code", 40), Elapsed: 12 * time.Second}}
 			m.refreshTranscript()
 			assertFrame(t, m)
-			for _, line := range strings.Split(m.renderMessage(m.state.Messages[0]), "\n") {
+			for i, line := range strings.Split(m.renderMessage(m.state.Messages[0]), "\n") {
+				prefix := "  "
+				if i == 0 {
+					prefix = "❯ "
+				}
+				if !strings.HasPrefix(ansi.Strip(line), prefix) {
+					t.Fatalf("user row %d must start with %q: %q", i, prefix, line)
+				}
 				if ansi.StringWidth(line) != m.width {
 					t.Fatalf("user background width %d, want %d", ansi.StringWidth(line), m.width)
 				}
@@ -108,6 +120,10 @@ func TestEditorWrapHistoryAndBusyDraft(t *testing.T) {
 	if m.editor.Height() != 2 {
 		t.Fatal("exact-width input must reserve the cursor row")
 	}
+	inputView := strings.Split(strings.TrimSuffix(ansi.Strip(m.editor.View()), "\n"), "\n")
+	if len(inputView) < 2 || !strings.HasPrefix(inputView[0], "❯ ") {
+		t.Fatalf("wrapped input hid its first row: %q", inputView)
+	}
 	press(m, tea.KeyCtrlJ)
 	typeText(m, "second")
 	if !strings.Contains(m.editor.Value(), "\nsecond") || m.editor.Height() != 3 {
@@ -127,6 +143,18 @@ func TestEditorWrapHistoryAndBusyDraft(t *testing.T) {
 	press(m, tea.KeyEnter)
 	if m.editor.Value() != "draft" || !m.busy {
 		t.Fatal("busy submission must preserve draft and operation")
+	}
+}
+
+func TestEditorViewportReanchorsAfterGrowth(t *testing.T) {
+	m := testModel(80, 30)
+	typeText(m, strings.Repeat("a", 500))
+	lines := strings.Split(strings.TrimSuffix(ansi.Strip(m.editor.View()), "\n"), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "❯ ") {
+		t.Fatalf("editor viewport hid the first wrapped row: %q", lines[:min(3, len(lines))])
+	}
+	if m.editor.Line() != 0 || m.editor.LineInfo().CharOffset == 0 {
+		t.Fatalf("cursor moved while reanchoring: line=%d info=%+v", m.editor.Line(), m.editor.LineInfo())
 	}
 }
 
@@ -288,5 +316,122 @@ func TestProgramStreamingAndExit(t *testing.T) {
 	output, err := io.ReadAll(tm.FinalOutput(t))
 	if err != nil || !strings.Contains(ansi.Strip(string(output)), "streamed response") {
 		t.Fatalf("final render missing stream: %v", err)
+	}
+}
+
+func TestEditorUsesSinglePromptAndFixedDock(t *testing.T) {
+	m := testModel(40, 16)
+	typeText(m, "first\nsecond\nthird")
+	editorLines := strings.Split(strings.TrimSuffix(m.editor.View(), "\n"), "\n")
+	if len(editorLines) < 3 {
+		t.Fatalf("editor lines = %d, want multiline view", len(editorLines))
+	}
+	plain := ansi.Strip(strings.Join(editorLines, "\n"))
+	if strings.Count(plain, "❯ ") != 1 {
+		t.Fatalf("prompt repeated in multiline input: %q", plain)
+	}
+	for _, line := range editorLines[1:] {
+		if strings.HasPrefix(ansi.Strip(line), "❯ ") {
+			t.Fatalf("continuation line has a new prompt: %q", line)
+		}
+	}
+	footerBefore := strings.Join(strings.Split(m.View(), "\n")[m.height-2:], "\n")
+	typeText(m, strings.Repeat("x\n", 20))
+	footerAfter := strings.Join(strings.Split(m.View(), "\n")[m.height-2:], "\n")
+	if footerBefore != footerAfter {
+		t.Fatalf("footer moved while editor grew:\nbefore=%q\nafter=%q", footerBefore, footerAfter)
+	}
+}
+
+func TestFrameFitsVerySmallTerminal(t *testing.T) {
+	for _, height := range []int{1, 2, 3} {
+		m := testModel(20, height)
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) != height {
+			t.Fatalf("height %d rendered %d lines", height, len(lines))
+		}
+	}
+}
+
+func TestTerminalMouseAndClipboardInput(t *testing.T) {
+	m := testModel(60, 18)
+	for i := 0; i < 30; i++ {
+		m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprint(i), Role: "assistant", Text: "scrollable line"})
+	}
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	before := m.viewport.YOffset
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\x1b[<64;2;3M")})
+	if m.editor.Value() != "" || m.viewport.YOffset >= before {
+		t.Fatalf("raw mouse report leaked or failed to scroll: value=%q offset=%d before=%d", m.editor.Value(), m.viewport.YOffset, before)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\x1b[<65;2;3M")})
+	if m.editor.Value() != "" {
+		t.Fatal("raw mouse report changed editor text")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[<64;2;3M[<64;2;4M")})
+	if m.editor.Value() != "" {
+		t.Fatal("batched raw mouse reports changed editor text")
+	}
+
+	var copied string
+	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
+	m.editor.SetValue("hello")
+	m.layout()
+	y := m.viewport.Height + 1
+	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	cmd := func() tea.Msg {
+		_, command := m.Update(tea.MouseMsg{X: 6, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+		if command == nil {
+			return nil
+		}
+		return command()
+	}()
+	if cmd != nil {
+		m.Update(cmd)
+	}
+	if copied != "ell" {
+		t.Fatalf("selected text = %q, want %q", copied, "ell")
+	}
+
+	m.handlers.ReadClipboard = func() (string, error) { return "paste", nil }
+	_, paste := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	if paste == nil {
+		t.Fatal("Ctrl+V did not request clipboard")
+	}
+	m.Update(paste())
+	if !strings.Contains(m.editor.Value(), "paste") {
+		t.Fatalf("clipboard paste missing: %q", m.editor.Value())
+	}
+}
+
+func TestDoubleClickCopiesWord(t *testing.T) {
+	m := testModel(60, 18)
+	m.busy, m.status = true, "Working"
+	m.editor.SetValue("hello world")
+	m.layout()
+	var copied string
+	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
+	now := time.Unix(1000, 0)
+	m.clock = func() time.Time { return now }
+	y := m.viewport.Height + 1
+	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	now = now.Add(100 * time.Millisecond)
+	_, cmd := m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if cmd == nil {
+		t.Fatal("double click did not copy")
+	}
+	m.Update(cmd())
+	if copied != "hello" || m.editor.Value() != "hello world" {
+		t.Fatalf("double click copied %q or changed input to %q", copied, m.editor.Value())
+	}
+	border := ansi.Strip(m.frameLines()[m.viewport.Height])
+	if !strings.HasSuffix(border, " copied! ──") || !strings.Contains(border, "Working") {
+		t.Fatalf("copy confirmation must be on the right beside working status: %q", border)
+	}
+	assertFrame(t, m)
+	m.Update(clearCopyNoticeMsg(m.copyNoticeSeq))
+	if strings.Contains(ansi.Strip(m.View()), "copied!") || m.status != "Working" {
+		t.Fatal("clearing copy confirmation changed the operation status")
 	}
 }

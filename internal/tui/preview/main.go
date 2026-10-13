@@ -19,6 +19,19 @@ const exampleThinking = "The user just said hello. I will answer briefly and wai
 const exampleAnswer = "Hi! I'm ready to help with your code — reading files, editing code, running commands, and debugging. What would you like to do?"
 const exampleMarkdown = "## A small Go example\n\n中文、emoji 👋 和 **Markdown** 使用同一套宽度规则。\n\n```go\nfunc greet(name string) string {\n    return \"Hello, \" + name\n}\n```\n\n- Inline `code` and **bold text**\n- [Rivo](https://github.com/ywxzm03/Rivo)\n\n> A quoted paragraph with a long line that wraps inside the transcript.\n\n| State | Result |\n| --- | --- |\n| streaming | visible |\n| completed | cached |"
 
+func exampleToolGroup() *tui.ToolGroupView {
+	return &tui.ToolGroupView{
+		ID: "preview-tools", Sealed: true,
+		Calls: []tui.ToolCallView{
+			{ID: "read", Name: "read", Arguments: `{"path":"/Users/wm/IdeaProjects/Rivo/internal/tui/model.go"}`, Result: "package tui\n\ntype Model struct {\n\tstate Snapshot\n}", Status: tui.ToolSuccess, Elapsed: 120 * time.Millisecond},
+			{ID: "grep", Name: "grep", Arguments: `{"pattern":"Ctrl+O","path":"internal/tui"}`, Result: "internal/tui/editor.go:case \"ctrl+o\":", Status: tui.ToolSuccess, Elapsed: 180 * time.Millisecond},
+			{ID: "bash", Name: "bash", Arguments: `{"command":"go test ./..."}`, Result: "ok   github.com/ywxzm03/Rivo/internal/tui  0.42s", Status: tui.ToolSuccess, Elapsed: 420 * time.Millisecond},
+			{ID: "write", Name: "write", Arguments: `{"path":"/tmp/preview.txt"}`, Result: "Successfully wrote to /tmp/preview.txt", Status: tui.ToolSuccess, Elapsed: 90 * time.Millisecond},
+		},
+		Thinking: []tui.ThinkingBlockView{{Index: 0, Text: exampleThinking, Tokens: 260, TokensExact: false}},
+	}
+}
+
 // preview 持有模拟运行状态；只通过 UI 消息交付值副本
 type preview struct {
 	state    tui.Snapshot
@@ -76,7 +89,6 @@ func (p *preview) request(request tui.Request) tea.Cmd {
 					p.state.Messages = []tui.Message{{ID: "resumed-user", Role: "user", Text: session.Summary}, {ID: "resumed-assistant", Role: "assistant", Text: exampleMarkdown}}
 				}
 			}
-			p.state.InputTokens, p.state.OutputTokens, p.state.ContextTokens = 4200, 320, 4520
 		case "compact":
 			p.send(tui.StatusMsg("Compacting context…"))
 			if !wait(ctx, 600*time.Millisecond) {
@@ -126,7 +138,7 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 		aborted = !wait(ctx, 40*time.Millisecond)
 	}
 	if !aborted {
-		message.Elapsed = time.Since(start)
+		message.Divider = &tui.TurnDividerView{Elapsed: time.Since(start)}
 	}
 	p.state.Messages = append(p.state.Messages, message)
 	if aborted {
@@ -195,7 +207,11 @@ func main() {
 		if *scene == "markdown" {
 			answer = exampleMarkdown
 		}
-		driver.state.Messages = []tui.Message{{ID: "hello", Role: "user", Text: "hello"}, {ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Elapsed: 12 * time.Second}}
+		assistant := tui.Message{ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Divider: &tui.TurnDividerView{Elapsed: 12 * time.Second}}
+		if *scene == "conversation" || *scene == "model" {
+			assistant.ToolGroup = exampleToolGroup()
+		}
+		driver.state.Messages = []tui.Message{{ID: "hello", Role: "user", Text: "hello"}, assistant}
 		driver.state.InputTokens, driver.state.OutputTokens, driver.state.ContextTokens = 17000, 130, 17130
 	}
 	model := &previewModel{Model: tui.New(driver.state, tui.Handlers{Request: driver.request, Cancel: func() {
@@ -203,7 +219,7 @@ func main() {
 			driver.cancel()
 		}
 	}}), scene: *scene}
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(os.Stdin)), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	driver.send = program.Send
 	_, err := program.Run()
 	if driver.cancel != nil {

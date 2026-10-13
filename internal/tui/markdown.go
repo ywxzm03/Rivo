@@ -28,6 +28,9 @@ func markdownStyle(role string) style.StyleConfig {
 		text = primitive(thinkingColor)
 		text.Italic = &yes
 	}
+	if role == "tool" {
+		text = primitive(mutedColor)
+	}
 	if role == "user" {
 		bg := userBg
 		text.BackgroundColor = &bg
@@ -93,6 +96,19 @@ func (m *Model) renderMessage(message Message) string {
 	if message.Role == "notice" || message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
+	if message.Role == "divider" && message.Divider != nil {
+		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
+	}
+	if message.ToolGroup != nil {
+		parts := []string{m.renderToolGroup(message.ToolGroup, width)}
+		if message.Divider != nil && message.Text != "" {
+			parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
+		}
+		if message.Text != "" {
+			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
+		}
+		return strings.Join(parts, "\n\n")
+	}
 	if message.Role == "user" {
 		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
 		body := ansi.Strip(m.markdown.render(message.Text, "user", width))
@@ -100,8 +116,13 @@ func (m *Model) renderMessage(message Message) string {
 		prefixStyle := lipgloss.NewStyle().Background(lipgloss.Color(userBg)).Foreground(lipgloss.Color(mutedColor))
 		textStyle := lipgloss.NewStyle().Background(lipgloss.Color(userBg)).Foreground(lipgloss.Color(textColor))
 		for i, line := range lines {
-			padding := max(0, m.width-ansi.StringWidth("> "+line))
-			lines[i] = prefixStyle.Render("> ") + textStyle.Render(line+strings.Repeat(" ", padding))
+			// 仅首行显示箭头，换行后的正文保持相同缩进
+			prefix := "  "
+			if i == 0 {
+				prefix = "❯ "
+			}
+			padding := max(0, m.width-ansi.StringWidth(prefix+line))
+			lines[i] = prefixStyle.Render(prefix) + textStyle.Render(line+strings.Repeat(" ", padding))
 		}
 		return strings.Join(lines, "\n")
 	}
@@ -113,8 +134,8 @@ func (m *Model) renderMessage(message Message) string {
 		}
 		parts = append(parts, indent(m.markdown.render(thinking, "thinking", width)))
 	}
-	if message.Elapsed > 0 {
-		parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Elapsed), mutedColor, true))
+	if message.Divider != nil && message.Text != "" {
+		parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
 	}
 	if message.Text != "" {
 		parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))

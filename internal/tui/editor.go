@@ -85,7 +85,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	switch msg.String() {
+	case "ctrl+v":
+		return m.readClipboard()
 	case "ctrl+c":
+		if m.hasSelection() {
+			return m.copySelection()
+		}
 		now := m.clock()
 		if !m.lastCtrlC.IsZero() && now.Sub(m.lastCtrlC) < timeDoublePress {
 			return m.quit()
@@ -109,6 +114,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.openSelector("model", "")
 	case "ctrl+t":
 		m.hideThinking = !m.hideThinking
+		m.refreshTranscript()
+		return nil
+	case "ctrl+o":
+		m.showAllTools = !m.showAllTools
 		m.refreshTranscript()
 		return nil
 	case "shift+tab":
@@ -154,6 +163,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	if m.editor.Value() != before {
+		m.clearSelection()
 		m.completion, m.completionHidden = 0, false
 		m.layout()
 	}
