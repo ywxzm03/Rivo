@@ -355,14 +355,15 @@ func (r *tuiRuntime) projectSessionMessages(messages []llm.Message) []tui.Messag
 				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: role, Text: text})
 			}
 		case llm.AssistantMessage:
-			if current.StopReason == llm.StopReasonError || current.StopReason == llm.StopReasonAborted {
+			if current.StopReason == llm.StopReasonError {
 				continue
 			}
+			aborted := current.StopReason == llm.StopReasonAborted
 			text, thinking, calls := assistantContent(current)
 			if len(calls) == 0 {
 				seal()
-				if text != "" || len(thinking) > 0 {
-					converted := tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text}
+				if text != "" || len(thinking) > 0 || aborted {
+					converted := tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text, Aborted: aborted}
 					if len(thinking) > 0 {
 						converted.ToolGroup = &tui.ToolGroupView{ID: fmt.Sprintf("history-thinking-%d", index), Thinking: thinking, Sealed: true}
 					}
@@ -374,9 +375,12 @@ func (r *tuiRuntime) projectSessionMessages(messages []llm.Message) []tui.Messag
 				groupSequence++
 				group = &tui.ToolGroupView{ID: fmt.Sprintf("history-tools-%d", groupSequence)}
 				groupIndex = len(projected)
-				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text, ToolGroup: cloneToolGroup(group)})
+				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text, Aborted: aborted, ToolGroup: cloneToolGroup(group)})
 			} else {
 				projected[groupIndex].Text += text
+				if aborted {
+					projected[groupIndex].Aborted = true
+				}
 			}
 			group.Thinking = append(group.Thinking, thinking...)
 			for _, call := range calls {
