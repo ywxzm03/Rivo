@@ -1032,20 +1032,30 @@ func TestAgentLengthAtMaxTokensNotRecovered(t *testing.T) {
 	}
 }
 
-// TestAgentCompactionDeadlineEndsRun 验证压缩回调超时中止直接结束运行
+// TestAgentCompactionDeadlineEndsRun 验证压缩回调超时中止以 aborted 事件收场，
+// 不把超时当运行错误上抛（对齐 Pi 的 signal 语义：取消与超时都归 aborted）
 func TestAgentCompactionDeadlineEndsRun(t *testing.T) {
 	calls := 0
 	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
 	coord := &recordingCoordinator{compactErr: context.DeadlineExceeded}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	var events []llm.AgentEvent
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
 	a.Coordinator = coord
 
-	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
+	message, err := a.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (deadline settles via aborted)", err)
+	}
+	if message == nil || message.StopReason != llm.StopReasonAborted {
+		t.Fatalf("message = %+v, want aborted stop reason", message)
 	}
 	if calls != 0 {
 		t.Errorf("stream calls = %d, want 0 (expired ctx must not reach the model)", calls)
 	}
+	assertAbortedEventSequence(t, events)
 }
 
 // TestAgentRecoverableLengthWithoutCoordinatorRunsTools 验证未启用编排层时，

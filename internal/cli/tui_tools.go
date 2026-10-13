@@ -355,7 +355,7 @@ func (r *tuiRuntime) projectSessionMessages(messages []llm.Message) []tui.Messag
 				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: role, Text: text})
 			}
 		case llm.AssistantMessage:
-			if current.StopReason == llm.StopReasonError {
+			if current.StopReason == llm.StopReasonError || current.StopReason == llm.StopReasonAborted {
 				continue
 			}
 			text, thinking, calls := assistantContent(current)

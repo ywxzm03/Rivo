@@ -68,6 +68,7 @@ func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 			r.mu.Unlock()
 		}()
 		var err error
+		var abortedReply *llm.AssistantMessage
 		switch req.Kind {
 		case "run":
 			r.mu.Lock()
@@ -80,7 +81,11 @@ func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 			r.turnStarted = time.Time{}
 			r.turnRetrying = false
 			r.mu.Unlock()
-			_, err = activeApp.Run(ctx, req.Value)
+			var reply *llm.AssistantMessage
+			reply, err = activeApp.Run(ctx, req.Value)
+			r.mu.Lock()
+			abortedReply = reply
+			r.mu.Unlock()
 		case "compact":
 			err = activeApp.Compact(ctx, req.Value)
 		case "model":
@@ -112,17 +117,15 @@ func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 		}
 		snapshot := r.snapshotLocked()
 		program := r.program
-		sequence := r.sequence
 		r.mu.Unlock()
 		if program != nil {
-			aborted := errors.Is(err, context.Canceled)
+			// 取消判定以消息 stopReason 为准（agent 以事件收场，err 为 nil）；
+			// errors.Is 兜底覆盖未携带消息的取消路径
+			aborted := (abortedReply != nil && abortedReply.StopReason == llm.StopReasonAborted) || errors.Is(err, context.Canceled)
 			if aborted {
 				err = nil
 			}
 			program.Send(tui.OperationDoneMsg{Snapshot: &snapshot, Err: err})
-			if aborted {
-				program.Send(tui.MessageMsg{ID: fmt.Sprintf("aborted-%d", sequence), Role: "notice", Text: "Operation aborted"})
-			}
 		}
 		return nil
 	}
@@ -188,6 +191,8 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 			}
 			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
 			if ok {
+				// aborted 的 assistant 保留 partial 正文并带取消标记，由渲染层追加提示行
+				converted.Aborted = assistant.StopReason == llm.StopReasonAborted
 				message = &converted
 			}
 		}

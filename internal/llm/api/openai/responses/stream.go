@@ -50,8 +50,24 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	go func() {
 		defer close(events)
 		defer stream.Close()
+		// abortPartial 返回终止时携带已收到内容的 partial；对齐 Pi 保留 abort 时的部分输出
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
+		abortPartial := func() *llm.AssistantMessage {
+			snapshot := assistantMessageSnapshot(partial)
+			snapshot.StopReason = llm.StopReasonAborted
+			return snapshot
+		}
+		// 终止事件用阻塞式发送保证必达；普通事件保留 select 以便取消时及时退出
+		abort := func(cause error) {
+			sendTerminal(ctx, events, llm.AssistantMessageErrorEvent{
+				Reason:  classifyTerminalReason(ctx, cause),
+				Err:     cause,
+				Partial: abortPartial(),
+			})
+		}
 		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: assistantMessageSnapshot(partial)}) {
+			// Start 事件被取消拦截时同样要送达终止事件；否则消费端只见通道关闭、无任何失败信息
+			abort(fmt.Errorf("openai: stream setup canceled: %w", context.Canceled))
 			return
 		}
 		slots := map[outputSlotKey]outputSlot{}
@@ -163,13 +179,28 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		}
 		if !terminal {
 			if err := stream.Err(); err != nil {
-				send(llm.AssistantMessageErrorEvent{Err: classifyStreamError("openai: stream interrupted", err)})
+				abort(classifyStreamError("openai: stream interrupted", err))
 			} else {
-				send(llm.AssistantMessageErrorEvent{Err: errors.New("openai: stream ended before a terminal event")})
+				abort(errors.New("openai: stream ended before a terminal event"))
 			}
 		}
 	}()
 	return events, nil
+}
+
+// sendTerminal 向通道投递终止事件；消费端始终在 range 通道，阻塞发送保证必达，
+// 消除取消竞态（对齐 Pi 的 EventStream.push 无条件入队语义）
+func sendTerminal(ctx context.Context, events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) {
+	events <- event
+}
+
+// classifyTerminalReason 判断终止原因：取消/超时属于 aborted，其余按真实错误；
+// 与 Pi 的 options?.signal?.aborted ? "aborted" : "error" 语义一致
+func classifyTerminalReason(ctx context.Context, err error) llm.StopReason {
+	if ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return llm.StopReasonAborted
+	}
+	return llm.StopReasonError
 }
 
 // sendEvent 在上下文未取消时向模型事件通道发送事件

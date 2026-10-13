@@ -118,6 +118,8 @@ func (AssistantMessageDoneEvent) Type() string           { return EventDone }
 func (AssistantMessageDoneEvent) assistantMessageEvent() {}
 
 type AssistantMessageErrorEvent struct {
+	// Reason 区分 aborted（用户取消）与 error（真实失败），对齐 Pi 的 error 事件 reason
+	Reason  StopReason
 	Err     error
 	Partial *AssistantMessage
 }

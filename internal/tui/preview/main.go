@@ -141,7 +141,8 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 	}
 	p.state.Messages = append(p.state.Messages, message)
 	if aborted {
-		p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("aborted-%d", p.sequence), Role: "notice", Text: "Operation aborted"})
+		// 与真实行为一致：partial 正文 + 消息级取消标记，渲染层追加提示行
+		message.Aborted = true
 	}
 	if input == "error" {
 		return tui.OperationDoneMsg{Snapshot: &p.state, Err: errors.New("simulated request failure")}

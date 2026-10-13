@@ -21,13 +21,14 @@ func (UserMessage) Role() Role { return RoleUser }
 func (UserMessage) message()   {}
 
 type AssistantMessage struct {
-	API        API
-	Provider   string
-	Model      string
-	ResponseID string
-	Content    []Content
-	StopReason StopReason
-	Usage      Usage
+	API          API
+	Provider     string
+	Model        string
+	ResponseID   string
+	Content      []Content
+	StopReason   StopReason
+	ErrorMessage string
+	Usage        Usage
 }
 
 func (AssistantMessage) Role() Role { return RoleAssistant }
@@ -51,6 +52,7 @@ const (
 	StopReasonToolUse StopReason = "toolUse"
 	StopReasonLength  StopReason = "length"
 	StopReasonError   StopReason = "error"
+	StopReasonAborted StopReason = "aborted"
 )
 
 type Usage struct {

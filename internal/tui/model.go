@@ -76,6 +76,7 @@ type TurnDividerView struct {
 type Message struct {
 	ID, Role, Text, Thinking string
 	Elapsed                  time.Duration
+	Aborted                  bool
 	ToolGroup                *ToolGroupView
 	Divider                  *TurnDividerView
 }

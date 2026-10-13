@@ -125,9 +125,9 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		if a.Coordinator != nil {
 			compacted, err := a.Coordinator.CompactIfNeeded(ctx)
 			if err != nil {
-				// 中止（取消或超时）直接结束运行，带着失效的 ctx 继续没有意义
+				// 中止（取消或超时）：以 aborted 事件收场，保持与其他取消路径一致的 UI 语义
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil, err
+					return a.finishModelFailure(firstMessageIndex, llm.StopReasonAborted, err, nil)
 				}
 			} else if compacted {
 				// 压缩重排了消息，运行起点改记压缩后的上下文长度，保证 agent_end 汇总不越界
@@ -145,6 +145,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
 
 		var final *llm.AssistantMessage
+		var streamReason llm.StopReason
 		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
 			for event := range events {
@@ -175,6 +176,14 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					if streamErr == nil {
 						streamErr = errors.New("agent: model stream returned empty error")
 					}
+					// 流层区分取消与真实失败：aborted 走事件收场，error 保留错误上抛
+					streamReason = ev.Reason
+					if streamReason != llm.StopReasonAborted && streamReason != llm.StopReasonError {
+						streamReason = llm.StopReasonError
+					}
+					if ev.Partial != nil {
+						partial = cloneAssistantMessage(*ev.Partial)
+					}
 					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
 				}
@@ -186,14 +195,23 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		// 本轮流已结束（正常关闭或已中止），统一收尾
 		streamCancel()
 		if streamErr == nil && final == nil {
-			streamErr = errors.New("agent: stream ended without a final message")
+			// 流层静默关闭（防御路径）：取消时以 aborted 收场，其余按真实缺陷报告
+			if errors.Is(streamCtx.Err(), context.Canceled) || errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
+				streamReason = llm.StopReasonAborted
+			} else {
+				streamErr = errors.New("agent: stream ended without a final message")
+			}
 		}
-		if streamErr != nil {
+		if streamErr != nil || streamReason == llm.StopReasonAborted {
 			// 可恢复的溢出：通知编排层驱动轮外恢复（它会标注 willRetry 并省略失败尝试），本轮按错误收场
 			if a.Coordinator != nil && llm.IsContextOverflow(streamErr) {
 				a.Coordinator.NotifyOverflow()
 			}
-			return a.finishModelError(firstMessageIndex, streamErr)
+			reason := streamReason
+			if reason != llm.StopReasonAborted {
+				reason = llm.StopReasonError
+			}
+			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
 		// 3.提交最终 assistant 消息，并检查是否需要执行工具
 		setAssistantMetadata(final, a.AgentConfig.Model)
@@ -264,7 +282,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 func contextForModel(agentContext llm.Context) llm.Context {
 	messages := make([]llm.Message, 0, len(agentContext.Messages))
 	for _, message := range agentContext.Messages {
-		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.StopReason == llm.StopReasonError {
+		if assistant, ok := message.(llm.AssistantMessage); ok && (assistant.StopReason == llm.StopReasonError || assistant.StopReason == llm.StopReasonAborted) {
 			continue
 		}
 		messages = append(messages, message)
@@ -394,17 +412,33 @@ func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
 	return true
 }
 
-// finishModelError 将模型流错误记录为 assistant 消息并结束本次运行
-func (a *Agent) finishModelError(firstMessageIndex int, err error) (*llm.AssistantMessage, error) {
+// finishModelFailure 将模型流终止记录为 assistant 消息并结束本次运行；
+// aborted 保留已收到的 partial 内容，error 记录错误文本（对齐 Pi 的 stopReason 语义）
+func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason, err error, partial *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	message := a.newAssistantMessage()
-	message.StopReason = llm.StopReasonError
-	message.Content = []llm.Content{llm.TextContent{Text: err.Error()}}
+	message.StopReason = reason
+	if reason == llm.StopReasonAborted {
+		// 取消属于用户操作而非故障：固定文案，保留已收到的 partial 内容
+		message.ErrorMessage = "Operation aborted"
+		if partial != nil && len(partial.Content) > 0 {
+			message.Content = append([]llm.Content(nil), partial.Content...)
+		} else {
+			message.Content = []llm.Content{llm.TextContent{Text: ""}}
+		}
+	} else {
+		message.ErrorMessage = err.Error()
+		message.Content = []llm.Content{llm.TextContent{Text: err.Error()}}
+	}
 	a.AgentContext.Messages = append(a.AgentContext.Messages, message)
 	if emitErr := a.emit(llm.MessageEndEvent{Message: message}); emitErr != nil {
 		return nil, emitErr
 	}
 	if emitErr := a.emitAgentEnd(firstMessageIndex); emitErr != nil {
 		return nil, emitErr
+	}
+	if reason == llm.StopReasonAborted {
+		// 取消不是运行错误：事件收场后向调用方返回 nil 错误
+		return &message, nil
 	}
 	return &message, err
 }
@@ -463,7 +497,14 @@ func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall
 		if err := a.emitToolStart(call); err != nil {
 			return nil, err
 		}
-		result, isError := executeToolCall(ctx, a, call)
+		var result llm.ToolResult
+		var isError bool
+		if ctx.Err() != nil {
+			// 已取消：剩余工具不再执行，以 aborted 结果收场（对齐 Pi 的 signal 检查）
+			result, isError = abortedToolResult(), true
+		} else {
+			result, isError = executeToolCall(ctx, a, call)
+		}
 		if err := a.emitToolEnd(call, result, isError); err != nil {
 			return nil, err
 		}
@@ -472,6 +513,9 @@ func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall
 			return nil, err
 		}
 		results = append(results, message)
+		if isError && ctx.Err() != nil {
+			break
+		}
 	}
 	return results, nil
 }
@@ -498,7 +542,14 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 		wg.Add(1)
 		go func(index int, toolCall llm.ToolCall) {
 			defer wg.Done()
-			result, isError := executeToolCall(batchCtx, a, toolCall)
+			var result llm.ToolResult
+			var isError bool
+			if batchCtx.Err() != nil {
+				// 已取消：工具不再启动，以 aborted 结果收场（对齐 Pi 的启动前检查）
+				result, isError = abortedToolResult(), true
+			} else {
+				result, isError = executeToolCall(batchCtx, a, toolCall)
+			}
 			completed <- toolCompletion{index: index, result: result, isError: isError}
 		}(i, call)
 	}
@@ -536,10 +587,23 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
-		result.Content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
+		if ctx.Err() != nil {
+			// 取消是用户操作：统一为固定文案，与 Pi 的 createErrorToolResult("Operation aborted") 一致
+			result.Content = []llm.Content{llm.TextContent{Text: "Operation aborted"}}
+		} else {
+			result.Content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
+		}
 		result.IsError = true
 	}
 	return result, result.IsError
+}
+
+// abortedToolResult 生成取消后未执行工具的结构化错误结果
+func abortedToolResult() llm.ToolResult {
+	return llm.ToolResult{
+		Content: []llm.Content{llm.TextContent{Text: "Operation aborted"}},
+		IsError: true,
+	}
 }
 
 func (a *Agent) emitToolStart(call llm.ToolCall) error {

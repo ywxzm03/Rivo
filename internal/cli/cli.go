@@ -337,6 +337,15 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 		fmt.Fprintf(stderr, "Rivo: request %s\n", msg.StopReason)
 		return 1
 	}
+	if msg.StopReason == llm.StopReasonAborted {
+		// 取消不是故障：输出已收到的部分内容，退出码 130 对齐 Ctrl+C 惯例
+		for _, content := range msg.Content {
+			if text, ok := content.(llm.TextContent); ok && text.Text != "" {
+				fmt.Fprintln(stdout, text.Text)
+			}
+		}
+		return 130
+	}
 	for _, content := range msg.Content {
 		if text, ok := content.(llm.TextContent); ok {
 			fmt.Fprintln(stdout, text.Text)

@@ -96,6 +96,15 @@ func (m *Model) renderMessage(message Message) string {
 	if message.Role == "notice" || message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
+	if message.Aborted {
+		// 取消属于用户操作：partial 正文后追加固定红色提示（对齐 Pi 的 aborted 渲染）
+		parts := []string{}
+		if trimmed := strings.TrimSpace(message.Text); trimmed != "" {
+			parts = append(parts, m.markdown.render(trimmed, "assistant", width))
+		}
+		parts = append(parts, colored(redColor, "Operation aborted"))
+		return strings.Join(parts, "\n")
+	}
 	if message.Role == "divider" && message.Divider != nil {
 		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
 	}
