@@ -40,7 +40,7 @@ func (m *Model) layout() {
 		probe.SetValue(line)
 		rows += probe.LineInfo().Height
 	}
-	limit := min(max(5, m.height*3/10), max(1, m.height-5))
+	limit := min(max(5, m.height*3/10), max(1, m.height-4))
 	m.editor.SetHeight(max(1, min(rows, limit)))
 	if previousWidth != m.editor.Width() || previousHeight != m.editor.Height() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
@@ -48,12 +48,12 @@ func (m *Model) layout() {
 	dock := m.editor.Height() + 2
 	if m.selector != nil {
 		m.selector.input.Width = max(1, m.width-3)
-		dock = m.selector.height(max(1, m.height-3))
+		dock = m.selector.height(max(1, m.height-2))
 	} else {
 		dock += len(m.completionItems())
 	}
 	m.viewport.Width = m.width
-	m.viewport.Height = max(0, m.height-2-dock)
+	m.viewport.Height = max(0, m.height-1-dock)
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -98,8 +98,8 @@ func (m *Model) View() string {
 		if m.height <= 1 {
 			lines = lines[len(lines)-1:]
 		} else {
-			footerStart := max(0, len(lines)-2)
-			lines = append(lines[:min(m.height-2, footerStart)], lines[footerStart:]...)
+			footerStart := max(0, len(lines)-1)
+			lines = append(lines[:min(m.height-1, footerStart)], lines[footerStart:]...)
 		}
 	}
 	for i := range lines {
@@ -116,7 +116,7 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, splitFrameLines(m.viewport.View())...)
 	}
 	if m.selector != nil {
-		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-3)))...)
+		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
 		label := ""
 		if m.busy {
@@ -183,21 +183,7 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-func formatTokens(n int) string {
-	switch {
-	case n < 1000:
-		return fmt.Sprint(n)
-	case n < 10000:
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	case n < 1000000:
-		return fmt.Sprintf("%.0fk", float64(n)/1000)
-	case n < 10000000:
-		return fmt.Sprintf("%.1fM", float64(n)/1000000)
-	default:
-		return fmt.Sprintf("%.0fM", float64(n)/1000000)
-	}
-}
-
+// footer 输出单行状态栏：左侧工作目录与分支，右侧模型与思考等级，两端对齐
 func (m *Model) footer() string {
 	cwd := m.state.Cwd
 	if home, err := os.UserHomeDir(); err == nil {
@@ -208,36 +194,10 @@ func (m *Model) footer() string {
 		}
 	}
 	if m.state.Branch != "" {
-		cwd += " (" + m.state.Branch + ")"
+		cwd += " [" + m.state.Branch + "]"
 	}
-	var stats []string
-	if m.state.InputTokens > 0 {
-		stats = append(stats, "↑"+formatTokens(m.state.InputTokens))
-	}
-	if m.state.OutputTokens > 0 {
-		stats = append(stats, "↓"+formatTokens(m.state.OutputTokens))
-	}
+	left := colored(dimColor, ansi.Truncate(cwd, m.width, "…"))
 	model := m.currentModel()
-	context := "?/?"
-	percent := 0.0
-	if model.ContextWindow > 0 {
-		context = "?/" + formatTokens(model.ContextWindow)
-		if m.state.ContextKnown {
-			percent = float64(m.state.ContextTokens) * 100 / float64(model.ContextWindow)
-			context = fmt.Sprintf("%.1f%%/%s", percent, formatTokens(model.ContextWindow))
-		}
-	}
-	if m.state.AutoCompact {
-		context += " (auto)"
-	}
-	color := dimColor
-	if percent > 90 {
-		color = redColor
-	} else if percent > 70 {
-		color = yellowColor
-	}
-	stats = append(stats, colored(color, context))
-	left := ansi.Truncate(colored(dimColor, strings.Join(stats, " ")), m.width, "")
 	right := model.ID
 	if len(model.Levels) > 1 {
 		level := m.state.Thinking
@@ -246,16 +206,18 @@ func (m *Model) footer() string {
 		}
 		right += " • " + level
 	}
-	providers := make(map[string]bool)
-	for _, model := range m.state.Models {
-		providers[model.Provider] = true
-	}
+	available := m.width - ansi.StringWidth(ansi.Strip(left))
 	withProvider := "(" + model.Provider + ") " + right
-	available := m.width - ansi.StringWidth(left) - 2
-	if len(providers) > 1 && ansi.StringWidth(withProvider) <= available {
-		right = withProvider
+	if len(m.state.Models) > 1 {
+		providers := make(map[string]bool)
+		for _, model := range m.state.Models {
+			providers[model.Provider] = true
+		}
+		if len(providers) > 1 && ansi.StringWidth(withProvider) <= available {
+			right = withProvider
+		}
 	}
-	right = ansi.Truncate(right, max(0, available), "")
-	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(left)-ansi.StringWidth(right)))
-	return colored(dimColor, ansi.Truncate(cwd, m.width, "…")) + "\n" + left + gap + colored(dimColor, right)
+	right = colored(dimColor, ansi.Truncate(right, max(0, available), "…"))
+	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(ansi.Strip(left))-ansi.StringWidth(ansi.Strip(right))))
+	return left + gap + right
 }

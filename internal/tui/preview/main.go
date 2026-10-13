@@ -48,7 +48,7 @@ func initialState() tui.Snapshot {
 	models := []tui.ModelOption{
 		{ID: "deepseek-v4.1-flash", Provider: "deepseek", Name: "DeepSeek V4.1 Flash", ContextWindow: 1000000, Levels: levels},
 	}
-	return tui.Snapshot{Cwd: cwd, Branch: strings.TrimSpace(string(branch)), Models: models, ModelKey: models[0].Key(), DefaultModelKey: models[0].Key(), Thinking: "max", ContextKnown: true, AutoCompact: true,
+	return tui.Snapshot{Cwd: cwd, Branch: strings.TrimSpace(string(branch)), Models: models, ModelKey: models[0].Key(), DefaultModelKey: models[0].Key(), Thinking: "max",
 		Sessions: []tui.SessionOption{
 			{Path: "preview/session-1", Summary: "Investigate a streaming response", Modified: "2m ago"},
 			{Path: "preview/session-2", Summary: "设计一个中文终端界面", Modified: "1h ago"},
@@ -96,7 +96,6 @@ func (p *preview) request(request tui.Request) tea.Cmd {
 			}
 			p.sequence++
 			p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("summary-%d", p.sequence), Role: "summary", Text: "Context compacted. The conversation is ready to continue."})
-			p.state.ContextKnown = false
 		}
 		return tui.OperationDoneMsg{Snapshot: &p.state}
 	}
@@ -143,10 +142,6 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 	p.state.Messages = append(p.state.Messages, message)
 	if aborted {
 		p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("aborted-%d", p.sequence), Role: "notice", Text: "Operation aborted"})
-	} else {
-		p.state.InputTokens += 17000
-		p.state.OutputTokens += 130
-		p.state.ContextTokens, p.state.ContextKnown = 17130, true
 	}
 	if input == "error" {
 		return tui.OperationDoneMsg{Snapshot: &p.state, Err: errors.New("simulated request failure")}
@@ -212,7 +207,6 @@ func main() {
 			assistant.ToolGroup = exampleToolGroup()
 		}
 		driver.state.Messages = []tui.Message{{ID: "hello", Role: "user", Text: "hello"}, assistant}
-		driver.state.InputTokens, driver.state.OutputTokens, driver.state.ContextTokens = 17000, 130, 17130
 	}
 	model := &previewModel{Model: tui.New(driver.state, tui.Handlers{Request: driver.request, Cancel: func() {
 		if driver.cancel != nil {

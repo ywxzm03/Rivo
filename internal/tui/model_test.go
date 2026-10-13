@@ -21,7 +21,7 @@ func TestMain(m *testing.M) {
 }
 
 func testState() Snapshot {
-	s := Snapshot{Cwd: "/project/Rivo", Branch: "feat(tui)/fullscreen-tui", Thinking: "high", ContextKnown: true, AutoCompact: true}
+	s := Snapshot{Cwd: "/project/Rivo", Branch: "feat(tui)/fullscreen-tui", Thinking: "high"}
 	for i := 0; i < 12; i++ {
 		s.Models = append(s.Models, ModelOption{ID: fmt.Sprintf("model-%02d", i), Provider: fmt.Sprintf("provider-%d", i%2), Name: fmt.Sprintf("Model %d", i), ContextWindow: 1000000, Levels: []string{"off", "low", "high"}})
 	}
@@ -54,12 +54,12 @@ func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
 	dock := m.editor.Height() + 2 + len(m.completionItems())
 	if m.selector != nil {
-		dock = len(strings.Split(m.selector.view(m.width, m.height-3), "\n"))
-		if dock != m.selector.height(m.height-3) {
-			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-3), dock)
+		dock = len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
+		if dock != m.selector.height(m.height-2) {
+			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), dock)
 		}
 	}
-	if got := m.viewport.Height + dock + 2; got != m.height {
+	if got := m.viewport.Height + dock + 1; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
 	}
 	lines := strings.Split(m.View(), "\n")
@@ -71,7 +71,7 @@ func assertFrame(t *testing.T, m *Model) {
 			t.Fatalf("line %d width = %d, want <= %d", i, width, m.width)
 		}
 	}
-	if !strings.Contains(ansi.Strip(lines[len(lines)-2]), "/project/Rivo") {
+	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "/project/Rivo") {
 		t.Fatal("cwd footer moved or disappeared")
 	}
 }
@@ -280,6 +280,32 @@ func TestStreamingUpsertFlushAndScroll(t *testing.T) {
 	}
 }
 
+func TestFooterSingleLine(t *testing.T) {
+	m := testModel(120, 30)
+	footer := ansi.Strip(m.footer())
+	if strings.Count(footer, "\n") != 0 {
+		t.Fatalf("footer should be a single line: %q", footer)
+	}
+	if ansi.StringWidth(footer) != 120 {
+		t.Fatalf("footer width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(footer), footer)
+	}
+	if !strings.HasPrefix(footer, "/project/Rivo [feat(tui)/fullscreen-tui]") {
+		t.Fatalf("footer should start with cwd [branch]: %q", footer)
+	}
+	if !strings.HasSuffix(footer, "model-00 • high") {
+		t.Fatalf("footer should end with model and thinking: %q", footer)
+	}
+}
+
+func TestFooterWithoutBranch(t *testing.T) {
+	m := testModel(120, 30)
+	m.state.Branch = ""
+	footer := ansi.Strip(m.footer())
+	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "[") {
+		t.Fatalf("empty branch should drop brackets: %q", footer)
+	}
+}
+
 func TestSnapshotIsolationAndFooter(t *testing.T) {
 	s := testState()
 	m := New(s, Handlers{})
@@ -292,11 +318,10 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatal("wide footer should include provider")
 	}
 	s = testState()
-	s.ModelKey, s.Thinking, s.ContextKnown = s.Models[3].Key(), "low", false
+	s.ModelKey, s.Thinking = s.Models[3].Key(), "low"
 	m.Update(OperationDoneMsg{Snapshot: &s})
-	footer := ansi.Strip(m.footer())
-	if !strings.Contains(footer, "?/1.0M") || !strings.Contains(footer, "model-03 • low") {
-		t.Fatalf("snapshot footer = %q", footer)
+	if !strings.Contains(ansi.Strip(m.footer()), "model-03 • low") {
+		t.Fatalf("snapshot footer = %q", ansi.Strip(m.footer()))
 	}
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
 	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
@@ -335,9 +360,9 @@ func TestEditorUsesSinglePromptAndFixedDock(t *testing.T) {
 			t.Fatalf("continuation line has a new prompt: %q", line)
 		}
 	}
-	footerBefore := strings.Join(strings.Split(m.View(), "\n")[m.height-2:], "\n")
+	footerBefore := strings.Join(strings.Split(m.View(), "\n")[m.height-1:], "\n")
 	typeText(m, strings.Repeat("x\n", 20))
-	footerAfter := strings.Join(strings.Split(m.View(), "\n")[m.height-2:], "\n")
+	footerAfter := strings.Join(strings.Split(m.View(), "\n")[m.height-1:], "\n")
 	if footerBefore != footerAfter {
 		t.Fatalf("footer moved while editor grew:\nbefore=%q\nafter=%q", footerBefore, footerAfter)
 	}

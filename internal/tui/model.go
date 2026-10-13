@@ -84,12 +84,10 @@ type Message struct {
 type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
 	// CurrentModel 保留运行中的模型，即使选择器暂时只展示有限目录
-	CurrentModel                             ModelOption
-	Models                                   []ModelOption
-	Sessions                                 []SessionOption
-	Messages                                 []Message
-	InputTokens, OutputTokens, ContextTokens int
-	ContextKnown, AutoCompact                bool
+	CurrentModel ModelOption
+	Models       []ModelOption
+	Sessions     []SessionOption
+	Messages     []Message
 }
 
 // Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact

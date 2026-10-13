@@ -16,7 +16,6 @@ import (
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
-	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
@@ -42,8 +41,6 @@ type tuiRuntime struct {
 	toolStarted        map[string]time.Time
 	turnStarted        time.Time
 	turnRetrying       bool
-	inputTokens        int
-	outputTokens       int
 	cancel             context.CancelFunc
 }
 
@@ -279,13 +276,6 @@ func (r *tuiRuntime) replaceMessagesLocked(proj session.SessionContext) {
 	if len(messages) > 0 {
 		r.sequence = len(messages)
 	}
-	r.inputTokens, r.outputTokens = 0, 0
-	for _, message := range proj.Messages {
-		if assistant, ok := message.(llm.AssistantMessage); ok {
-			r.inputTokens += assistant.Usage.InputTokens
-			r.outputTokens += assistant.Usage.OutputTokens
-		}
-	}
 }
 
 func (r *tuiRuntime) partialAssistantLocked() *tui.Message {
@@ -349,7 +339,6 @@ func textContent(contents []llm.Content) string {
 
 func (r *tuiRuntime) snapshotLocked() tui.Snapshot {
 	model := r.app.CurrentModel()
-	proj := r.app.SessionContext()
 	thinking := r.app.CurrentThinkingLevel()
 	if thinking == "" {
 		thinking = llm.ThinkingLevelOff
@@ -367,15 +356,8 @@ func (r *tuiRuntime) snapshotLocked() tui.Snapshot {
 	for _, item := range sessions {
 		sessionOptions = append(sessionOptions, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: relativeTime(item.ModTime)})
 	}
-	contextKnown := false
-	contextTokens := 0
-	if len(proj.Messages) > 0 && !proj.UsageStale {
-		contextTokens = compaction.ContextTokens(proj.Messages)
-		contextKnown = hasUsage(proj.Messages)
-	}
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Sessions: sessionOptions, Messages: append([]tui.Message(nil), r.messages...),
-		InputTokens: r.inputTokens, OutputTokens: r.outputTokens, ContextTokens: contextTokens, ContextKnown: contextKnown, AutoCompact: r.app.AutoCompactionEnabled()}
+		Thinking: string(thinking), Models: models, Sessions: sessionOptions, Messages: append([]tui.Message(nil), r.messages...)}
 }
 
 func modelOption(model llm.Model) tui.ModelOption {
@@ -386,15 +368,6 @@ func (r *tuiRuntime) snapshot() tui.Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.snapshotLocked()
-}
-
-func hasUsage(messages []llm.Message) bool {
-	for _, message := range messages {
-		if assistant, ok := message.(llm.AssistantMessage); ok && assistant.Usage.InputTokens > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func thinkingLevels(model llm.Model) []string {
