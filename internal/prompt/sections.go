@@ -46,8 +46,14 @@ func BuildSections(opts Options) Sections {
 	if skills := formatSkills(opts.Skills); skills != "" {
 		sections["skills"] = skills
 	}
-	sections["cwd"] = strings.ReplaceAll(opts.Cwd, "\\", "/")
+	sections["cwd"] = wrap("cwd", strings.ReplaceAll(opts.Cwd, "\\", "/"))
 	return sections
+}
+
+// wrap 把分节内容包进同名标签，保证分节文本自包含（模型能根据标签把更新关联回原文）；
+// 分节名与 llm.SystemSectionOrder 的一致性由测试锁定
+func wrap(name, content string) string {
+	return "<" + name + ">\n" + content + "\n</" + name + ">"
 }
 
 // buildTools 渲染工具清单，每行一条 name 与 snippet；无 snippet 的工具不出现
@@ -58,7 +64,7 @@ func buildTools(tools []llm.Tool) string {
 			lines = append(lines, "- "+t.Name()+": "+snippet)
 		}
 	}
-	return "<tools>\n" + strings.Join(lines, "\n") + "\n</tools>"
+	return wrap("tools", strings.Join(lines, "\n"))
 }
 
 // buildRules 按工具装载顺序收集 guideline，trim 后精确去重，末尾追加固定两条
@@ -81,20 +87,16 @@ func buildRules(tools []llm.Tool) string {
 	for _, rule := range trailingRules {
 		add(rule)
 	}
-	return "<rules>\n" + strings.Join(rules, "\n") + "\n</rules>"
+	return wrap("rules", strings.Join(rules, "\n"))
 }
 
 // buildInstructions 渲染 AGENTS.md 链：固定前缀后每份文件一段，段间空行
 func buildInstructions(files []ContextFile) string {
-	var b strings.Builder
-	b.WriteString("<instructions>\nProject-specific instructions and guidelines:")
+	body := "Project-specific instructions and guidelines:"
 	for _, file := range files {
-		b.WriteString("\n\n<instructions path=\"" + file.Path + "\">\n")
-		b.WriteString(file.Content)
-		b.WriteString("\n</instructions>")
+		body += "\n\n<instructions path=\"" + escapeXML(file.Path) + "\">\n" + file.Content + "\n</instructions>"
 	}
-	b.WriteString("\n</instructions>")
-	return b.String()
+	return wrap("instructions", body)
 }
 
 // DiffSections 比较当前分节与目标分节：只返回发生变化或需要删除的节，值指向目标文本；

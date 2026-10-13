@@ -2,8 +2,16 @@ package llm
 
 import "strings"
 
-// SystemSectionOrder 分节渲染顺序的唯一来源：prompt 包构建分节与本包渲染都按它排序
-var SystemSectionOrder = []string{"preamble", "tools", "rules", "instructions", "skills", "cwd"}
+// SystemSectionOrder 分节渲染顺序的唯一来源：prompt 包构建分节与本包渲染都按它排序。
+// 声明为数组以表达不可变；需要切片时用 SystemSectionNames
+var SystemSectionOrder = [...]string{"preamble", "tools", "rules", "instructions", "skills", "cwd"}
+
+// SystemSectionNames 返回分节名列表，供需要切片或遍历的调用方使用
+func SystemSectionNames() []string {
+	names := make([]string, len(SystemSectionOrder))
+	copy(names, SystemSectionOrder[:])
+	return names
+}
 
 // CurrentSystemMessage 按消息序重放所有 system 消息：同名分节后者覆盖前者，空串表示该节被删除；
 // 消息序列中没有 system 消息时返回 nil

@@ -197,10 +197,12 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			if systemCount == 0 {
 				text = llm.RenderSystemMessageText(msg)
 			}
-			systemCount++
-			if text != "" {
-				items = append(items, responses.ResponseInputItemParamOfMessage(text, responses.EasyInputMessageRoleSystem))
+			// 只有真正产出文本的消息才占首位，空快照不得把后续完整声明挤成补丁渲染
+			if text == "" {
+				continue
 			}
+			systemCount++
+			items = append(items, responses.ResponseInputItemParamOfMessage(text, responses.EasyInputMessageRoleSystem))
 		default:
 			return nil, fmt.Errorf("openai: unsupported message type %T", m)
 		}

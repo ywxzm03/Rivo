@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -51,8 +52,8 @@ func TestBuildSectionsRendersAllSections(t *testing.T) {
 	if !strings.HasPrefix(sections["rules"], "<rules>\n") || !strings.HasSuffix(sections["rules"], "\n</rules>") {
 		t.Errorf("rules = %q, want <rules> wrapper", sections["rules"])
 	}
-	if sections["cwd"] != "/work" {
-		t.Errorf("cwd = %q, want /work", sections["cwd"])
+	if sections["cwd"] != "<cwd>\n/work\n</cwd>" {
+		t.Errorf("cwd = %q, want tagged cwd section", sections["cwd"])
 	}
 }
 
@@ -112,10 +113,11 @@ func TestBuildSectionsInstructionsRendering(t *testing.T) {
 	}
 }
 
+// TestBuildSectionsCwdNormalizesBackslashes cwd 保留标签并归一化反斜杠
 func TestBuildSectionsCwdNormalizesBackslashes(t *testing.T) {
 	sections := BuildSections(Options{Cwd: `C:\Users\me\proj`})
-	if sections["cwd"] != "C:/Users/me/proj" {
-		t.Errorf("cwd = %q, want forward slashes", sections["cwd"])
+	if sections["cwd"] != "<cwd>\nC:/Users/me/proj\n</cwd>" {
+		t.Errorf("cwd = %q, want tagged path with forward slashes", sections["cwd"])
 	}
 }
 
@@ -165,5 +167,26 @@ func TestDiffSectionsReturnsNilWhenEqual(t *testing.T) {
 	sections := Sections{"preamble": "p", "cwd": "/a"}
 	if patch := DiffSections(sections, Sections{"preamble": "p", "cwd": "/a"}); patch != nil {
 		t.Errorf("patch = %v, want nil", patch)
+	}
+}
+
+// TestBuildSectionsKeysMatchSectionOrder 分节键与 llm.SystemSectionOrder 必须一致，
+// 防止新增分节时只改一侧导致渲染静默丢弃内容
+func TestBuildSectionsKeysMatchSectionOrder(t *testing.T) {
+	sections := BuildSections(Options{
+		Cwd:          "/work",
+		Tools:        testTools(),
+		ContextFiles: []ContextFile{{Path: "/a/AGENTS.md", Content: "body"}},
+		Skills:       []Skill{{Name: "one", Description: "d", FilePath: "/s/one/SKILL.md"}},
+	})
+	for _, name := range llm.SystemSectionNames() {
+		if _, ok := sections[name]; !ok {
+			t.Errorf("section %q missing from BuildSections, want present", name)
+		}
+	}
+	for name := range sections {
+		if !slices.Contains(llm.SystemSectionNames(), name) {
+			t.Errorf("section %q produced by BuildSections but absent from SystemSectionOrder", name)
+		}
 	}
 }

@@ -180,3 +180,49 @@ func TestValidSkillName(t *testing.T) {
 		}
 	}
 }
+
+// TestParseFrontmatterEmptyFrontmatter 空 frontmatter 不 panic 且按无字段处理
+func TestParseFrontmatterEmptyFrontmatter(t *testing.T) {
+	frontmatter, err := parseFrontmatter("---\n---")
+	if err != nil {
+		t.Fatalf("parseFrontmatter() error = %v, want nil", err)
+	}
+	if frontmatter.Name != "" || frontmatter.Description != "" {
+		t.Errorf("frontmatter = %+v, want zero value", frontmatter)
+	}
+}
+
+// TestParseFrontmatterEmptyFrontmatterWithBody 空 frontmatter 后仍有正文
+func TestParseFrontmatterEmptyFrontmatterWithBody(t *testing.T) {
+	frontmatter, err := parseFrontmatter("---\n---\n\n# Body\n")
+	if err != nil {
+		t.Fatalf("parseFrontmatter() error = %v, want nil", err)
+	}
+	if frontmatter.Name != "" {
+		t.Errorf("name = %q, want empty", frontmatter.Name)
+	}
+}
+
+// TestParseFrontmatterSingleLine 单行 frontmatter 正常解析
+func TestParseFrontmatterSingleLine(t *testing.T) {
+	frontmatter, err := parseFrontmatter("---\nname: one\ndescription: d\n---\nbody")
+	if err != nil {
+		t.Fatalf("parseFrontmatter() error = %v", err)
+	}
+	if frontmatter.Name != "one" || frontmatter.Description != "d" {
+		t.Errorf("frontmatter = %+v, want parsed fields", frontmatter)
+	}
+}
+
+// TestLoadSkillFromFileEmptyFrontmatterDoesNotPanic 空 frontmatter 的 SKILL.md 走目录名回退
+func TestLoadSkillFromFileEmptyFrontmatterDoesNotPanic(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agent")
+	skillsDir := filepath.Join(agentDir, "skills")
+	writeSkill(t, skillsDir, "emptyfm", "---\n---\n\n# Body\n")
+
+	// 无 description 应被跳过，关键是不得 panic
+	if skills := discoverSkills(root, agentDir); len(skills) != 0 {
+		t.Fatalf("skills = %+v, want skipped without description", skills)
+	}
+}

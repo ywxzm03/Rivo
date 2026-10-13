@@ -212,3 +212,29 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 		t.Errorf("snapshot = %v, want current prompt", first.Sections)
 	}
 }
+
+// TestSetPromptSectionsConcurrentWithRun 并发设置基线与 Run 请求前 diff 不得构成数据竞争；
+// preparePrompt 由 Run 持锁调用，因此经 Run 走真实路径
+func TestSetPromptSectionsConcurrentWithRun(t *testing.T) {
+	dir := t.TempDir()
+	sm := New("/project", dir)
+	coord := NewCoordinator(sm, nil)
+	runner := &fakeRunner{}
+	coord.Agent = runner
+	coord.SetPromptSections(prompt.Sections{"preamble": "base", "cwd": "/old"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			coord.SetPromptSections(prompt.Sections{"preamble": "base", "cwd": "/new"})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		if _, err := coord.Run(context.Background(), "hi"); err != nil {
+			t.Errorf("Run() error = %v", err)
+			break
+		}
+	}
+	<-done
+}

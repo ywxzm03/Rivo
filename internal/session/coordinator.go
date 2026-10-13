@@ -55,13 +55,18 @@ func NewCoordinator(m *SessionManager, next llm.AgentEventSink) *Coordinator {
 	return &Coordinator{m: m, next: next}
 }
 
-// SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息
+// SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
+// 加锁与 preparePrompt 的读取互斥，避免并发路径（如 TUI 事件回调）下数据竞争
 func (c *Coordinator) SetPromptSections(sections prompt.Sections) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.promptSections = sections
 }
 
 // PromptSections 返回当前基线分节
 func (c *Coordinator) PromptSections() prompt.Sections {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.promptSections
 }
 

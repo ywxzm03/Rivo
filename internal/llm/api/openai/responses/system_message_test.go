@@ -71,3 +71,19 @@ func TestBuildParamsKeepsSystemPromptEntryFirst(t *testing.T) {
 			`{"role":"system","content":"summarizer"},`+
 			`{"role":"user","content":[{"type":"input_text","text":"text"}]}]}`)
 }
+
+// TestBuildParamsEmptyLeadingSystemMessageDoesNotShift 空的首条 system 消息不占首位，
+// 后续完整声明仍按全文渲染
+func TestBuildParamsEmptyLeadingSystemMessageDoesNotShift(t *testing.T) {
+	c := llm.Context{Messages: []llm.Message{
+		llm.SystemMessage{Sections: map[string]string{}},
+		llm.SystemMessage{Sections: map[string]string{"preamble": "base"}},
+	}}
+	params, err := BuildParams(testModel(), c, llm.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 空消息不产出 item，完整声明渲染为全文而非补丁框定
+	assertWire(t, params,
+		`{"model":"gpt-5","input":[{"role":"system","content":"base"}]}`)
+}

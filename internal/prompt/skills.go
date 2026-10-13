@@ -102,19 +102,20 @@ func loadSkillFromFile(path, baseDir string) (Skill, bool) {
 	}, true
 }
 
-// parseFrontmatter 解析 YAML frontmatter；无 frontmatter 时返回零值结构，
+// parseFrontmatter 解析 YAML frontmatter；无 frontmatter 或 frontmatter 为空时返回零值结构，
 // 有 frontmatter 但解析失败时返回错误
 func parseFrontmatter(content string) (skillFrontmatter, error) {
 	normalized := strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\r", "\n")
 	if !strings.HasPrefix(normalized, "---") {
 		return skillFrontmatter{}, nil
 	}
+	// 从 3 起查找结束标记，YAML 容忍前导换行；end 为 0 时区间为空，覆盖 "---\n---" 这种空 frontmatter
 	end := strings.Index(normalized[3:], "\n---")
 	if end == -1 {
 		return skillFrontmatter{}, nil
 	}
 	var frontmatter skillFrontmatter
-	if err := yaml.Unmarshal([]byte(normalized[4:end+3]), &frontmatter); err != nil {
+	if err := yaml.Unmarshal([]byte(normalized[3:end+3]), &frontmatter); err != nil {
 		return skillFrontmatter{}, err
 	}
 	return frontmatter, nil
