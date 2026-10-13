@@ -160,6 +160,8 @@ type Model struct {
 	mouseFragment    string
 	copyNoticeSeq    uint64
 	copyNotice       bool
+	pastes           map[int]string
+	pasteCounter     int
 	cursorRow        atomic.Int64
 	cursorColumn     atomic.Int64
 }
@@ -254,9 +256,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case clipboardReadMsg:
 		if msg.err == nil && msg.text != "" {
-			m.editor.InsertString(msg.text)
-			m.clearSelection()
-			m.layout()
+			m.handlePaste(msg.text)
 		}
 	case clipboardWriteMsg:
 		if msg.err != nil {

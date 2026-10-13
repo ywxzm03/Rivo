@@ -61,6 +61,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.selector != nil {
 		return m.selectorKey(msg)
 	}
+	// 终端 bracketed paste 整段到达：只有粘贴走折叠路径，手动输入不经过这里
+	if msg.Paste {
+		m.handlePaste(string(msg.Runes))
+		return nil
+	}
 	items := m.completionItems()
 	if len(items) > 0 {
 		switch msg.String() {
@@ -77,6 +82,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "tab", "enter":
 			m.editor.SetValue("/" + commands[items[min(m.completion, len(items)-1)]].name + " ")
 			m.editor.CursorEnd()
+			m.resetPastes()
 			m.completionHidden = true
 			m.layout()
 			if msg.String() == "tab" {
@@ -97,6 +103,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.lastCtrlC = now
 		m.editor.Reset()
+		m.resetPastes()
 		m.completionHidden = true
 		m.layout()
 		return nil
@@ -147,6 +154,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return cmd
 	case "enter":
 		return m.submit()
+	case "backspace":
+		if m.backspaceAtMarker() {
+			m.layout()
+			return nil
+		}
 	case "up":
 		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
 			m.browseHistory(-1)
@@ -192,12 +204,13 @@ func (m *Model) browseHistory(direction int) {
 	}
 	m.editor.SetValue(value)
 	m.editor.CursorEnd()
+	m.resetPastes()
 	m.completionHidden = true
 	m.layout()
 }
 
 func (m *Model) submit() tea.Cmd {
-	input := strings.TrimSpace(m.editor.Value())
+	input := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if input == "" {
 		return nil
 	}
@@ -209,6 +222,7 @@ func (m *Model) submit() tea.Cmd {
 	m.historyPos = len(m.history)
 	m.draft = ""
 	m.editor.Reset()
+	m.resetPastes()
 	m.completionHidden = true
 	m.layout()
 	if !strings.HasPrefix(input, "/") {
