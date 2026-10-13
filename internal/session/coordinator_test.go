@@ -114,10 +114,16 @@ func TestCoordinatorPersistFailureAborts(t *testing.T) {
 type fakeRunner struct {
 	coord         *Coordinator
 	replaced      [][]llm.Message
+	appended      []llm.Message
 	continueCalls int
 	// runFn/contFn 非空时定制 Run/Continue 行为
 	runFn  func() (*llm.AssistantMessage, error)
 	contFn func() (*llm.AssistantMessage, error)
+}
+
+// AppendMessage 记录编排层压入的 system prompt 补丁
+func (f *fakeRunner) AppendMessage(msg llm.Message) {
+	f.appended = append(f.appended, msg)
 }
 
 func (f *fakeRunner) Run(_ context.Context, _ string) (*llm.AssistantMessage, error) {
@@ -370,7 +376,7 @@ func TestCoordinatorStaleUsageUsesEstimate(t *testing.T) {
 		}
 		ids = append(ids, coord.m.leafID)
 	}
-	if err := coord.m.AppendCompaction(summaryText, ids[1], 9804, "", nil); err != nil {
+	if err := coord.m.AppendCompaction(summaryText, ids[1], 9804, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 陈旧 usage 期间改用纯估算：小投影不再触发第二次压缩

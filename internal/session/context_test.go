@@ -102,7 +102,7 @@ func TestBuildContextCompaction(t *testing.T) {
 		ids = append(ids, m.leafID)
 	}
 	// 保留 u2 起的历史
-	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, "system prompt", &llm.Usage{InputTokens: 100, OutputTokens: 10}); err != nil {
+	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, nil, &llm.Usage{InputTokens: 100, OutputTokens: 10}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u3")); err != nil {
@@ -131,7 +131,7 @@ func TestBuildContextCompactionZeroRetain(t *testing.T) {
 		if err := m.AppendMessage(userMsg("u1")); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.AppendCompaction("all summarized", "", 1, "", nil); err != nil {
+		if err := m.AppendCompaction("all summarized", "", 1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(userMsg("u2")); err != nil {
@@ -151,7 +151,7 @@ func TestBuildContextCompactionZeroRetain(t *testing.T) {
 		if err := m.AppendMessage(userMsg("u1")); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.AppendCompaction("all summarized", "deadbeef", 1, "", nil); err != nil {
+		if err := m.AppendCompaction("all summarized", "deadbeef", 1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(userMsg("u2")); err != nil {
@@ -169,13 +169,13 @@ func TestBuildContextIgnoresOlderCompaction(t *testing.T) {
 	if err := m.AppendMessage(userMsg("u1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendCompaction("first summary", m.leafID, 1, "", nil); err != nil {
+	if err := m.AppendCompaction("first summary", m.leafID, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u2")); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendCompaction("second summary", m.entries[0].base().ID, 2, "", nil); err != nil {
+	if err := m.AppendCompaction("second summary", m.entries[0].base().ID, 2, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u3")); err != nil {
@@ -314,7 +314,7 @@ func TestBuildContextProjectionEntryIDs(t *testing.T) {
 		}
 		ids = append(ids, m.leafID)
 	}
-	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, "", nil); err != nil {
+	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	compactionID := m.leafID
@@ -348,7 +348,7 @@ func TestBuildContextStaleUsage(t *testing.T) {
 			}
 			ids = append(ids, m.leafID)
 		}
-		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+		if err := m.AppendCompaction("summarized", ids[1], 5000, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		// 压缩后只有 user 消息，最后一条 assistant 仍带着压缩前的 usage
@@ -368,7 +368,7 @@ func TestBuildContextStaleUsage(t *testing.T) {
 			}
 			ids = append(ids, m.leafID)
 		}
-		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+		if err := m.AppendCompaction("summarized", ids[1], 5000, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(assistantMsg("a2")); err != nil {

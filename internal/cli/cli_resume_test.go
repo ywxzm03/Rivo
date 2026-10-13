@@ -70,6 +70,7 @@ func TestRunREPLResumeEmptyList(t *testing.T) {
 			t.Errorf("resume called with %q, want no call", path)
 			return nil
 		},
+		func() {},
 	)
 
 	if code != 0 {
@@ -96,6 +97,7 @@ func TestRunREPLResumeSelectsByNumber(t *testing.T) {
 			resumed = path
 			return nil
 		},
+		func() {},
 	)
 
 	if code != 0 {
@@ -134,6 +136,7 @@ func TestRunREPLResumeInvalidInputCancels(t *testing.T) {
 					t.Errorf("resume called with %q, want no call", path)
 					return nil
 				},
+				func() {},
 			)
 
 			if code != 0 {
@@ -161,6 +164,7 @@ func TestRunREPLResumeErrorStaysInSession(t *testing.T) {
 		nil,
 		func() ([]session.SessionInfo, error) { return infos, nil },
 		func(path string) error { return sentinel },
+		func() {},
 	)
 
 	if code != 0 {
@@ -184,6 +188,7 @@ func TestRunREPLResumeListErrorStaysInSession(t *testing.T) {
 			t.Errorf("resume called with %q, want no call", path)
 			return nil
 		},
+		func() {},
 	)
 
 	if code != 0 {

@@ -21,6 +21,8 @@ type fakeTool struct {
 func (t *fakeTool) Name() string               { return t.name }
 func (t *fakeTool) Description() string        { return "" }
 func (t *fakeTool) Parameters() map[string]any { return nil }
+func (t *fakeTool) PromptSnippet() string      { return "" }
+func (t *fakeTool) PromptGuidelines() []string { return nil }
 func (t *fakeTool) ExecutionMode() llm.ToolExecutionMode {
 	return llm.ToolExecutionParallel
 }
@@ -41,6 +43,8 @@ type controlledTool struct {
 func (t *controlledTool) Name() string               { return t.name }
 func (t *controlledTool) Description() string        { return "" }
 func (t *controlledTool) Parameters() map[string]any { return nil }
+func (t *controlledTool) PromptSnippet() string      { return "" }
+func (t *controlledTool) PromptGuidelines() []string { return nil }
 func (t *controlledTool) ExecutionMode() llm.ToolExecutionMode {
 	return t.mode
 }

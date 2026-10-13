@@ -8,7 +8,9 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/config"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tool"
 )
@@ -17,6 +19,11 @@ type App struct {
 	agent       *agent.Agent
 	session     *session.SessionManager
 	coordinator *session.Coordinator
+	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
+	loader *prompt.Loader
+	// cwd 与 tools 在 Reload 重建基线分节时复用
+	cwd   string
+	tools []llm.Tool
 	// modelFallback 非空表示恢复时投影模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
@@ -52,6 +59,8 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
 	}
 	a.modelFallback = warning
+	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills，变更留给下次请求前 diff
+	a.Reload()
 	return a, nil
 }
 
@@ -138,18 +147,36 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
 	}
 
+	// 1.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+	}
+	agentDir, err := config.Dir()
+	if err != nil {
+		return nil, err
+	}
+	loader := prompt.NewLoader(cwd, agentDir)
+	loader.Reload()
+
+	// 2.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
+	coord.SetPromptSections(prompt.BuildSections(prompt.Options{
+		Cwd:          cwd,
+		Tools:        tools,
+		ContextFiles: loader.ContextFiles(),
+		Skills:       loader.Skills(),
+	}))
 	ag := agent.NewAgent(
 		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel},
 		llm.Context{
-			SystemPrompt: systemPrompt,
-			Tools:        tools,
+			Tools: tools,
 		},
 		streamFn,
 		coord.Handle,
 	)
 	ag.Coordinator = coord
 	coord.Agent = ag
-	return &App{agent: ag, session: sm, coordinator: coord}, nil
+	return &App{agent: ag, session: sm, coordinator: coord, loader: loader, cwd: cwd, tools: tools}, nil
 }
 
 // Run 经编排层驱动一次运行，溢出恢复由编排层负责
@@ -160,4 +187,16 @@ func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, err
 // Compact 手动触发一次上下文压缩，instructions 为聚焦指令
 func (a *App) Compact(ctx context.Context, instructions string) error {
 	return a.coordinator.Compact(ctx, instructions)
+}
+
+// Reload 重读 AGENTS.md 与 skills 并重建基线分节；不写 system 消息，
+// 变更在下次请求前由编排层 diff 后追加
+func (a *App) Reload() {
+	a.loader.Reload()
+	a.coordinator.SetPromptSections(prompt.BuildSections(prompt.Options{
+		Cwd:          a.cwd,
+		Tools:        a.tools,
+		ContextFiles: a.loader.ContextFiles(),
+		Skills:       a.loader.Skills(),
+	}))
 }
