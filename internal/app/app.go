@@ -50,8 +50,8 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		return nil, err
 	}
 	// 1.投影消息注入运行期上下文，恢复的会话才真正接上历史
-	if len(proj.Messages) > 0 {
-		a.agent.ReplaceMessages(proj.Messages)
+	if messages := proj.Messages(); len(messages) > 0 {
+		a.agent.ReplaceMessages(messages)
 	}
 	// 2.思考等级：newAppWithModel 已按 cfg.ThinkingLevel 装配，
 	// 仅在 settings 未指定时回填会话投影的显式记录（含 off）
@@ -65,7 +65,7 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 }
 
 // assembleResume 按投影模型装配运行链，解析失败回退 env 默认模型并返回回退警告
-func assembleResume(cfg Config, proj session.SessionContext, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
+func assembleResume(cfg Config, proj compaction.ContextView, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
 	if proj.Provider == "" || proj.Model == "" {
 		a, err := newApp(cfg, sm, onEvent)
 		return a, "", err
@@ -83,7 +83,7 @@ func assembleResume(cfg Config, proj session.SessionContext, sm *session.Session
 }
 
 // fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
-func fallbackWarning(cfg Config, proj session.SessionContext) string {
+func fallbackWarning(cfg Config, proj compaction.ContextView) string {
 	modelID := cfg.ModelID
 	if modelID == "" {
 		// 空 ModelID 经装配兜底为 provider 默认模型，文案与实际装配保持一致

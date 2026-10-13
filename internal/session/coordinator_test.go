@@ -91,7 +91,7 @@ func TestCoordinatorForwardsBeforePersisting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(reloaded.BuildContext().Messages); got != 1 {
+	if got := len(reloaded.BuildContext().Messages()); got != 1 {
 		t.Errorf("persisted messages = %d, want 1", got)
 	}
 }
@@ -257,13 +257,13 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := reloaded.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("replayed messages = %d, want 4 (summary, a0, hi, recovered)", len(ctx.Messages))
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("replayed messages = %d, want 4 (summary, a0, hi, recovered)", len(ctx.Messages()))
 	}
-	if !strings.Contains(messageTextForTest(t, ctx.Messages[0]), summaryText) {
-		t.Errorf("messages[0] = %q, want wrapped summary", messageTextForTest(t, ctx.Messages[0]))
+	if !strings.Contains(messageTextForTest(t, ctx.Messages()[0]), summaryText) {
+		t.Errorf("messages[0] = %q, want wrapped summary", messageTextForTest(t, ctx.Messages()[0]))
 	}
-	last := ctx.Messages[len(ctx.Messages)-1].(llm.AssistantMessage)
+	last := ctx.Messages()[len(ctx.Messages())-1].(llm.AssistantMessage)
 	if text := last.Content[0].(llm.TextContent).Text; text != "recovered" {
 		t.Errorf("final = %q, want recovered", text)
 	}
@@ -337,7 +337,7 @@ func TestCoordinatorThresholdCompaction(t *testing.T) {
 	if summaryCalls != 1 {
 		t.Fatalf("summary calls = %d, want 1", summaryCalls)
 	}
-	// FirstKeptEntryID 取自投影同序 EntryIDs：保留区间从 a1 起
+	// FirstKeptEntryID 取自结构化上下文条目的来源 ID：保留区间从 a1 起
 	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	reloaded, err := Open(files[0], "/project")
 	if err != nil {
@@ -499,6 +499,68 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 	if !hasCompaction {
 		t.Error("manual compaction not persisted")
+	}
+}
+
+func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.T) {
+	dir := t.TempDir()
+	var prompts []string
+	var summaryCalls int
+	summaryStreamFn := func(_ context.Context, _ llm.Model, c llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		summaryCalls++
+		prompts = append(prompts, c.Messages[0].(llm.UserMessage).Content[0].(llm.TextContent).Text)
+		reply := "FIRST-SUMMARY"
+		if summaryCalls == 2 {
+			reply = "SECOND-SUMMARY"
+		}
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: reply}}}}
+		close(ch)
+		return ch, nil
+	}
+	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
+	coord.Compactor.Config.KeepRecentTokens = 2
+	if err := coord.m.AppendMessage(systemMsg(map[string]string{"preamble": "base"})); err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range []llm.Message{
+		textMsg("u1"),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1"}}},
+		textMsg("u2"),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a2"}}},
+	} {
+		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coord.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range []llm.Message{
+		textMsg("u3"),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a3"}}},
+		textMsg("u4"),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a4"}}},
+	} {
+		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coord.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if summaryCalls != 2 {
+		t.Fatalf("summary calls = %d, want 2", summaryCalls)
+	}
+	if strings.Contains(prompts[1], compaction.WrappedSummary("FIRST-SUMMARY")) {
+		t.Error("second compaction prompt reserialized the previous wrapped summary")
+	}
+	if got := strings.Count(prompts[1], "<previous-summary>\nFIRST-SUMMARY\n</previous-summary>"); got != 1 {
+		t.Errorf("previous summary block count = %d, want 1", got)
+	}
+	view := coord.m.BuildContext()
+	if view.Entries[0].Summary != "SECOND-SUMMARY" {
+		t.Errorf("latest summary = %q, want SECOND-SUMMARY", view.Entries[0].Summary)
 	}
 }
 

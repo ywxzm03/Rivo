@@ -3,6 +3,7 @@ package compaction
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -36,6 +37,27 @@ func compactFixture() []llm.Message {
 	}
 }
 
+func contextView(messages []llm.Message) ContextView {
+	entries := make([]ContextEntry, 0, len(messages))
+	for i, message := range messages {
+		entries = append(entries, ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ContextMessage, Messages: []llm.Message{message}})
+	}
+	return ContextView{Entries: entries}
+}
+
+func contextViewWithCompaction(summary string, snapshot *llm.SystemMessage, messages []llm.Message) ContextView {
+	compactionMessages := make([]llm.Message, 0, 2)
+	if snapshot != nil {
+		compactionMessages = append(compactionMessages, *snapshot)
+	}
+	compactionMessages = append(compactionMessages, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: WrappedSummary(summary)}}})
+	entries := []ContextEntry{{SourceID: "compaction", Kind: ContextCompaction, Messages: compactionMessages, Summary: summary}}
+	for i, message := range messages {
+		entries = append(entries, ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ContextMessage, Messages: []llm.Message{message}})
+	}
+	return ContextView{Entries: entries}
+}
+
 // singleCallConfig 让预算落在 index 2 的 user 消息上，切割点在轮次边界，走单次摘要路径
 func singleCallConfig() Config {
 	return Config{KeepRecentTokens: 150}
@@ -44,15 +66,15 @@ func singleCallConfig() Config {
 func TestCompactGeneratesSummary(t *testing.T) {
 	streamFn, seen := recordingStreamFn("SUMMARY")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	result, err := c.Compact(context.Background(), compactFixture(), "", "")
+	result, err := c.Compact(context.Background(), contextView(compactFixture()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Summary != "SUMMARY" {
 		t.Errorf("summary = %q, want SUMMARY", result.Summary)
 	}
-	if result.KeptCount != 2 {
-		t.Errorf("KeptCount = %d, want 2", result.KeptCount)
+	if result.KeptMessageCount != 2 {
+		t.Errorf("KeptMessageCount = %d, want 2", result.KeptMessageCount)
 	}
 	if result.TokensBefore == 0 {
 		t.Error("TokensBefore should be estimated")
@@ -78,11 +100,8 @@ func TestCompactGeneratesSummary(t *testing.T) {
 func TestCompactUsesUpdatePromptWithPreviousSummary(t *testing.T) {
 	streamFn, seen := recordingStreamFn("MERGED")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	// messages[0] 是上次回插的摘要消息，序列化必须跳过它
-	messages := append([]llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped previous"}}},
-	}, compactFixture()...)
-	if _, err := c.Compact(context.Background(), messages, "old summary", "focus on tests"); err != nil {
+	view := contextViewWithCompaction("old summary", nil, compactFixture())
+	if _, err := c.Compact(context.Background(), view, "focus on tests"); err != nil {
 		t.Fatal(err)
 	}
 	prompt := (*seen)[0].Messages[0].(llm.UserMessage).Content[0].(llm.TextContent).Text
@@ -97,11 +116,35 @@ func TestCompactUsesUpdatePromptWithPreviousSummary(t *testing.T) {
 	}
 }
 
+func TestCompactSkipsCompactionSnapshotAndSummary(t *testing.T) {
+	streamFn, seen := recordingStreamFn("MERGED")
+	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
+	snapshot := &llm.SystemMessage{Sections: map[string]string{"instructions": "snapshot"}}
+	view := contextViewWithCompaction("old summary", snapshot, compactFixture())
+	result, err := c.Compact(context.Background(), view, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FirstKeptSourceID == "compaction" || result.FirstKeptSourceID == "" {
+		t.Fatalf("FirstKeptSourceID = %q, want retained message entry", result.FirstKeptSourceID)
+	}
+	prompt := (*seen)[0].Messages[0].(llm.UserMessage).Content[0].(llm.TextContent).Text
+	if strings.Contains(prompt, "The conversation history before this point was compacted") {
+		t.Error("wrapped previous summary should not be serialized into incremental conversation")
+	}
+	if strings.Contains(prompt, "snapshot") {
+		t.Error("compaction system snapshot should not be serialized into summary input")
+	}
+	if strings.Count(prompt, "<previous-summary>\nold summary\n</previous-summary>") != 1 {
+		t.Errorf("previous summary block count = %d, want 1", strings.Count(prompt, "<previous-summary>\nold summary\n</previous-summary>"))
+	}
+}
+
 func TestCompactSplitTurnMergesSummaries(t *testing.T) {
 	streamFn, seen := recordingStreamFn("HISTORY", "PREFIX")
 	// 预算 99 token：预算边界落在最后一条 assistant 上，保留尾部以 assistant 开头，触发 split turn
 	c := &Compactor{StreamFn: streamFn, Config: Config{KeepRecentTokens: 99}}
-	result, err := c.Compact(context.Background(), compactFixture(), "", "")
+	result, err := c.Compact(context.Background(), contextView(compactFixture()), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +170,7 @@ func TestCompactSplitTurnMergesSummaries(t *testing.T) {
 func TestCompactRejectsEmptySummary(t *testing.T) {
 	streamFn, _ := recordingStreamFn("")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "empty summary") {
+	if _, err := c.Compact(context.Background(), contextView(compactFixture()), ""); err == nil || !strings.Contains(err.Error(), "empty summary") {
 		t.Fatalf("err = %v, want empty summary error", err)
 	}
 }
@@ -143,7 +186,7 @@ func TestCompactRejectsTruncatedSummary(t *testing.T) {
 		return ch, nil
 	}
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); err == nil || !strings.Contains(err.Error(), "truncated by output length") {
+	if _, err := c.Compact(context.Background(), contextView(compactFixture()), ""); err == nil || !strings.Contains(err.Error(), "truncated by output length") {
 		t.Fatalf("err = %v, want truncated error", err)
 	}
 }
@@ -157,7 +200,7 @@ func TestCompactPropagatesStreamError(t *testing.T) {
 		return ch, nil
 	}
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), compactFixture(), "", ""); !errors.Is(err, sentinel) {
+	if _, err := c.Compact(context.Background(), contextView(compactFixture()), ""); !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want boom", err)
 	}
 }
@@ -165,7 +208,7 @@ func TestCompactPropagatesStreamError(t *testing.T) {
 func TestCompactRejectsEmptyRegion(t *testing.T) {
 	streamFn, _ := recordingStreamFn("SUMMARY")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), nil, "", ""); err == nil {
+	if _, err := c.Compact(context.Background(), ContextView{}, ""); err == nil {
 		t.Fatal("compacting empty messages should fail")
 	}
 }
@@ -173,14 +216,12 @@ func TestCompactRejectsEmptyRegion(t *testing.T) {
 func TestCompactSplitTurnEmptyHistoryKeepsPreviousSummary(t *testing.T) {
 	streamFn, seen := recordingStreamFn("PREFIX")
 	c := &Compactor{StreamFn: streamFn, Config: Config{KeepRecentTokens: 99}}
-	// messages[0] 是上次回插的摘要消息，被截断轮次的 user 紧贴序列化起点：历史区为空，
-	// 上次摘要必须作为合并基线保留，而不是被轮次前缀摘要取代
-	messages := []llm.Message{
-		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped previous"}}},
+	// 截断轮次的 user 紧贴序列化起点：历史区为空，上次摘要必须作为合并基线保留
+	view := contextViewWithCompaction("old summary", nil, []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}},
-	}
-	result, err := c.Compact(context.Background(), messages, "old summary", "")
+	})
+	result, err := c.Compact(context.Background(), view, "")
 	if err != nil {
 		t.Fatal(err)
 	}

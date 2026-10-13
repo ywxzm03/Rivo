@@ -25,12 +25,12 @@ func TestPreparePromptDeclaresOnFirstRequest(t *testing.T) {
 
 	// 落盘一条，且压入内存一条
 	ctx := sm.BuildContext()
-	if len(ctx.Messages) != 1 {
-		t.Fatalf("messages = %d, want 1 declaration", len(ctx.Messages))
+	if len(ctx.Messages()) != 1 {
+		t.Fatalf("messages = %d, want 1 declaration", len(ctx.Messages()))
 	}
-	msg, ok := ctx.Messages[0].(llm.SystemMessage)
+	msg, ok := ctx.Messages()[0].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("message = %T, want SystemMessage", ctx.Messages[0])
+		t.Fatalf("message = %T, want SystemMessage", ctx.Messages()[0])
 	}
 	if msg.Sections["preamble"] != "base" || msg.Sections["cwd"] != "/work" {
 		t.Errorf("sections = %v, want full baseline", msg.Sections)
@@ -58,8 +58,8 @@ func TestPreparePromptNoChangeNoMessage(t *testing.T) {
 	}
 
 	ctx := sm.BuildContext()
-	if len(ctx.Messages) != 1 {
-		t.Fatalf("messages = %d, want still 1 after no-op", len(ctx.Messages))
+	if len(ctx.Messages()) != 1 {
+		t.Fatalf("messages = %d, want still 1 after no-op", len(ctx.Messages()))
 	}
 	if len(runner.appended) != 1 {
 		t.Fatalf("appended = %d, want 1", len(runner.appended))
@@ -85,19 +85,19 @@ func TestPreparePromptEmitsPatchForChangedSection(t *testing.T) {
 	}
 
 	ctx := sm.BuildContext()
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("messages = %d, want declaration + patch", len(ctx.Messages))
+	if len(ctx.Messages()) != 2 {
+		t.Fatalf("messages = %d, want declaration + patch", len(ctx.Messages()))
 	}
-	patch, ok := ctx.Messages[1].(llm.SystemMessage)
+	patch, ok := ctx.Messages()[1].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("message = %T, want SystemMessage patch", ctx.Messages[1])
+		t.Fatalf("message = %T, want SystemMessage patch", ctx.Messages()[1])
 	}
 	// 补丁只含变化的分节
 	if len(patch.Sections) != 1 || patch.Sections["cwd"] != "/new" {
 		t.Errorf("patch = %v, want only cwd", patch.Sections)
 	}
 	// 重放后与基线一致
-	current := llm.CurrentSystemMessage(ctx.Messages)
+	current := llm.CurrentSystemMessage(ctx.Messages())
 	if current.Sections["cwd"] != "/new" || current.Sections["preamble"] != "base" {
 		t.Errorf("replayed = %v, want baseline", current.Sections)
 	}
@@ -121,15 +121,15 @@ func TestPreparePromptEmitsRemovalWhenSectionDisappears(t *testing.T) {
 	}
 
 	ctx := sm.BuildContext()
-	patch, ok := ctx.Messages[1].(llm.SystemMessage)
+	patch, ok := ctx.Messages()[1].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("message = %T, want SystemMessage patch", ctx.Messages[1])
+		t.Fatalf("message = %T, want SystemMessage patch", ctx.Messages()[1])
 	}
 	if value, present := patch.Sections["instructions"]; !present || value != "" {
 		t.Errorf("patch = %v, want instructions removal marker", patch.Sections)
 	}
 	// 重放后该节确实消失
-	if current := llm.CurrentSystemMessage(ctx.Messages); current.Sections["instructions"] != "" {
+	if current := llm.CurrentSystemMessage(ctx.Messages()); current.Sections["instructions"] != "" {
 		t.Errorf("replayed = %v, want instructions removed", current.Sections)
 	}
 }
@@ -162,8 +162,8 @@ func TestPreparePromptDisabledWithoutBaseline(t *testing.T) {
 	if err := coord.preparePrompt(); err != nil {
 		t.Fatal(err)
 	}
-	if len(sm.BuildContext().Messages) != 0 {
-		t.Errorf("messages = %d, want none without baseline", len(sm.BuildContext().Messages))
+	if len(sm.BuildContext().Messages()) != 0 {
+		t.Errorf("messages = %d, want none without baseline", len(sm.BuildContext().Messages()))
 	}
 }
 
@@ -179,7 +179,7 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 	coord.Compactor = &compaction.Compactor{
 		StreamFn: summaryStreamFn,
 		Model:    llm.Model{ID: "m1"},
-		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
+		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 2},
 	}
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -204,9 +204,9 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 
 	// 压缩条目携带快照，压缩后投影首条仍是 system prompt
 	ctx := sm.BuildContext()
-	first, ok := ctx.Messages[0].(llm.SystemMessage)
+	first, ok := ctx.Messages()[0].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("first message = %T, want SystemMessage snapshot", ctx.Messages[0])
+		t.Fatalf("first message = %T, want SystemMessage snapshot", ctx.Messages()[0])
 	}
 	if first.Sections["preamble"] != "base" {
 		t.Errorf("snapshot = %v, want current prompt", first.Sections)
