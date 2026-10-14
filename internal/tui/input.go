@@ -5,8 +5,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/cancelreader"
 )
 
 type terminalFile interface {
@@ -15,6 +17,8 @@ type terminalFile interface {
 }
 
 var sgrMouse = regexp.MustCompile(`\x1b?\[<([0-9]+);[0-9]+;[0-9]+[mM]`)
+
+const escapeWait = 25 * time.Millisecond
 
 // mouseReportEnd validates the numeric SGR mouse grammar and returns the byte
 // after a complete report. An incomplete numeric prefix is kept for the next
@@ -80,10 +84,11 @@ func mouseCandidate(value string, index int) (payload int, prefix int, ok bool) 
 	}
 }
 
-// NewInputReader removes malformed mouse reports before Bubble Tea turns them
-// into ordinary runes. Valid reports with the ESC prefix remain untouched.
-func NewInputReader(source io.Reader) io.Reader {
-	reader := &inputReader{source: source}
+// NewInputReader delivers complete mouse reports to Bubble Tea and removes
+// reports lacking ESC. Close releases the reader without closing the terminal.
+func NewInputReader(source io.Reader) io.ReadCloser {
+	cancelable, err := cancelreader.NewReader(source)
+	reader := &inputReader{source: cancelable, err: err}
 	if file, ok := source.(terminalFile); ok {
 		reader.file = file
 	}
@@ -91,36 +96,69 @@ func NewInputReader(source io.Reader) io.Reader {
 }
 
 type inputReader struct {
-	source  io.Reader
+	source  cancelreader.CancelReader
 	pending []byte
+	ready   []byte
+	reads   chan inputRead
+	err     error
 	file    terminalFile
 }
 
+type inputRead struct {
+	data []byte
+	err  error
+}
+
+// Read drains a complete input packet before fetching more terminal bytes
 func (r *inputReader) Read(dst []byte) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
 	for {
-		buf := make([]byte, 256)
-		n, err := r.source.Read(buf)
-		if n > 0 {
-			data := append(r.pending, buf[:n]...)
-			clean, pending := stripMalformedMouse(data)
-			r.pending = pending
-			if len(clean) > 0 {
-				count := copy(dst, clean)
-				if count < len(clean) {
-					r.pending = append(clean[count:], r.pending...)
-				}
-				return count, nil
+		// 1. Keep packet leftovers separate from unfinished reports
+		if len(r.ready) > 0 {
+			count := copy(dst, r.ready)
+			r.ready = r.ready[count:]
+			return count, nil
+		}
+		if len(r.pending) > 0 {
+			r.ready, r.pending = stripMalformedMouse(r.pending)
+			if len(r.ready) > 0 {
+				continue
 			}
 		}
-		if err != nil {
-			if len(r.pending) > 0 {
-				count := copy(dst, r.pending)
-				r.pending = r.pending[count:]
-				if count > 0 {
-					return count, nil
-				}
+		if r.err != nil {
+			if string(r.pending) == "\x1b" {
+				r.ready, r.pending = r.pending, nil
+				continue
 			}
-			return 0, err
+			return 0, r.err
+		}
+		// 2. A lone ESC may be a key or the first byte of a mouse report
+		if r.reads == nil {
+			reads := make(chan inputRead, 1)
+			r.reads = reads
+			go func() {
+				buf := make([]byte, 256)
+				n, err := r.source.Read(buf)
+				reads <- inputRead{data: buf[:n], err: err}
+			}()
+		}
+		var timeout <-chan time.Time
+		var timer *time.Timer
+		if string(r.pending) == "\x1b" {
+			timer = time.NewTimer(escapeWait)
+			timeout = timer.C
+		}
+		select {
+		case result := <-r.reads:
+			if timer != nil {
+				timer.Stop()
+			}
+			r.reads, r.err = nil, result.err
+			r.pending = append(r.pending, result.data...)
+		case <-timeout:
+			r.ready, r.pending = r.pending, nil
 		}
 	}
 }
@@ -140,25 +178,45 @@ func (r *inputReader) Write(data []byte) (int, error) {
 }
 
 func (r *inputReader) Close() error {
-	if r.file == nil {
+	if r.source == nil {
 		return nil
 	}
-	return r.file.Close()
+	r.source.Cancel()
+	return r.source.Close()
 }
 
+// stripMalformedMouse returns one input packet and retains unfinished prefixes
 func stripMalformedMouse(data []byte) ([]byte, []byte) {
 	value := string(data)
 	var clean []byte
 	for i := 0; i < len(value); {
+		// Keep the introducer together, including a split bracketed paste prefix
+		if value[i:] == "\x1b" || value[i:] == "\x1b[" || strings.HasPrefix("\x1b[200~", value[i:]) {
+			return clean, data[i:]
+		}
 		if strings.HasPrefix(value[i:], "\x1b[200~") {
+			if len(clean) > 0 {
+				return clean, data[i:]
+			}
 			end := strings.Index(value[i+len("\x1b[200~"):], "\x1b[201~")
 			if end < 0 {
 				return clean, []byte(value[i:])
 			}
 			end += i + len("\x1b[200~") + len("\x1b[201~")
-			clean = append(clean, value[i:end]...)
-			i = end
-			continue
+			return data[i:end], data[end:]
+		}
+		if strings.HasPrefix(value[i:], "\x1b[<") {
+			if len(clean) > 0 {
+				return clean, data[i:]
+			}
+			end, complete, incomplete := mouseReportEnd(value, i+3)
+			if incomplete {
+				return clean, data[i:]
+			}
+			if complete {
+				// One report per packet avoids splitting it at Bubble Tea's buffer edge
+				return data[i:end], data[end:]
+			}
 		}
 		payload, prefix, ok := mouseCandidate(value, i)
 		if !ok {

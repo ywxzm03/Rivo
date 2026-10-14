@@ -48,7 +48,9 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 			return writeOSC52(output, text)
 		},
 	})
-	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(stdin)), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	input := tui.NewInputReader(stdin)
+	defer input.Close()
+	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	runtime.SetProgram(program)
 	_, err = program.Run()
 	runtime.Cancel()

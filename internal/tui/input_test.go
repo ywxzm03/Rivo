@@ -1,10 +1,15 @@
 package tui
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
@@ -13,7 +18,9 @@ func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, ok := NewInputReader(file).(terminalFile); !ok {
+	input := NewInputReader(file)
+	defer input.Close()
+	if _, ok := input.(terminalFile); !ok {
 		t.Fatal("input wrapper lost terminal file methods")
 	}
 	if _, ok := NewCursorWriter(file, nil).(terminalFile); !ok {
@@ -93,4 +100,157 @@ func TestInputReaderPreservesBracketedPaste(t *testing.T) {
 	if string(data) != value {
 		t.Fatalf("bracketed paste changed: %q", data)
 	}
+}
+
+func TestInputReaderParsesSplitMouseReports(t *testing.T) {
+	report := "\x1b[<64;105;13M"
+	for split := 1; split < len(report); split++ {
+		t.Run(fmt.Sprint(split), func(t *testing.T) {
+			input := io.MultiReader(strings.NewReader("draft"+report[:split]), strings.NewReader(report[split:]+"\r"))
+			model, mice := runTerminalInput(t, input)
+			if model.editor.Value() != "draft" || len(mice) != 1 || mice[0].Button != tea.MouseButtonWheelUp {
+				t.Fatalf("split %d: editor=%q mouse=%+v", split, model.editor.Value(), mice)
+			}
+		})
+	}
+}
+
+func TestInputReaderParsesRapidMouseReports(t *testing.T) {
+	input := "draft" + strings.Repeat("\x1b[<64;105;13M\x1b[<65;105;13M", 100) + "\r"
+	model, mice := runTerminalInput(t, strings.NewReader(input))
+	if model.editor.Value() != "draft" || len(mice) != 200 {
+		t.Fatalf("rapid scroll: editor=%q mouse count=%d", model.editor.Value(), len(mice))
+	}
+	for i, mouse := range mice {
+		button := tea.MouseButtonWheelUp
+		if i%2 != 0 {
+			button = tea.MouseButtonWheelDown
+		}
+		if mouse.Button != button || mouse.X != 104 || mouse.Y != 12 {
+			t.Fatalf("report %d = %+v", i, mouse)
+		}
+	}
+}
+
+func TestInputReaderParsesBytewiseMouseAndPaste(t *testing.T) {
+	for _, test := range []struct {
+		name, input, want string
+		mice              int
+	}{
+		{name: "mouse", input: "draft\x1b[<64;105;13M\x1b[<65;105;13M\r", want: "draft", mice: 2},
+		{name: "paste", input: "\x1b[200~[<64;105;13M [Markdown] 中文\x1b[201~\r", want: "[<64;105;13M [Markdown] 中文"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var parts []io.Reader
+			for i := range len(test.input) {
+				parts = append(parts, strings.NewReader(test.input[i:i+1]))
+			}
+			model, mice := runTerminalInput(t, io.MultiReader(parts...))
+			if model.editor.Value() != test.want || len(mice) != test.mice {
+				t.Fatalf("editor=%q mouse count=%d", model.editor.Value(), len(mice))
+			}
+		})
+	}
+}
+
+func TestInputReaderPreservesSmallReads(t *testing.T) {
+	value := "hello\x1b[<64;105;13M\x1b[200~" + strings.Repeat("[<65;2;3M", 100) + "\x1b[201~world"
+	reader := NewInputReader(strings.NewReader(value))
+	defer reader.Close()
+	var got strings.Builder
+	buf := make([]byte, 3)
+	for {
+		n, err := reader.Read(buf)
+		got.Write(buf[:n])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got.String() != value {
+		t.Fatalf("small reads changed input: %q", got.String())
+	}
+}
+
+func TestInputReaderPreservesStandaloneEscape(t *testing.T) {
+	source, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	defer writer.Close()
+	reader := NewInputReader(source)
+	defer reader.Close()
+	if _, err := writer.WriteString("\x1b"); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan inputRead, 1)
+	go func() {
+		buf := make([]byte, 256)
+		n, err := reader.Read(buf)
+		result <- inputRead{data: buf[:n], err: err}
+	}()
+	select {
+	case got := <-result:
+		if string(got.data) != "\x1b" || got.err != nil {
+			t.Fatalf("standalone escape = %q, err=%v", got.data, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standalone Escape blocked waiting for more input")
+	}
+}
+
+func TestInputReaderCloseInterruptsTerminalRead(t *testing.T) {
+	source, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	defer writer.Close()
+	reader := NewInputReader(source)
+	started, stopped := make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := reader.Read(make([]byte, 256))
+		stopped <- err
+	}()
+	<-started
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-stopped:
+		if err == nil {
+			t.Fatal("closed reader returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal read survived Close")
+	}
+}
+
+// runTerminalInput exercises Bubble Tea's byte parser before events reach the editor
+func runTerminalInput(t *testing.T, input io.Reader) (*Model, []tea.MouseMsg) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	model := testModel(80, 24)
+	var mice []tea.MouseMsg
+	reader := NewInputReader(input)
+	defer reader.Close()
+	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if mouse, ok := msg.(tea.MouseMsg); ok {
+				mice = append(mice, mouse)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
+				return tea.QuitMsg{}
+			}
+			return msg
+		}))
+	if _, err := program.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return model, mice
 }
