@@ -125,6 +125,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		snapshot := r.snapshotLocked(reset)
 
 		r.mu.Unlock()
+		snapshot.Sessions = listSessionOptions(snapshot.Cwd)
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
@@ -399,17 +400,22 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate)})
 	}
 	current := modelOption(model)
-	sessions, _ := session.ListSessions(r.cwd)
-	sessionOptions := make([]tui.SessionOption, 0, len(sessions))
-	for _, item := range sessions {
-		sessionOptions = append(sessionOptions, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: session.RelativeTime(item.ModTime)})
-	}
 	var messages []tui.Message
 	if includeMessages {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Sessions: sessionOptions, Messages: messages}
+		Thinking: string(thinking), Models: models, Messages: messages}
+}
+
+// listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
+func listSessionOptions(cwd string) []tui.SessionOption {
+	sessions, _ := session.ListSessions(cwd)
+	options := make([]tui.SessionOption, 0, len(sessions))
+	for _, item := range sessions {
+		options = append(options, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: session.RelativeTime(item.ModTime)})
+	}
+	return options
 }
 
 func modelOption(model llm.Model) tui.ModelOption {
@@ -418,8 +424,10 @@ func modelOption(model llm.Model) tui.ModelOption {
 
 func (r *Runtime) snapshot() tui.Snapshot {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.snapshotLocked(true)
+	snapshot := r.snapshotLocked(true)
+	r.mu.Unlock()
+	snapshot.Sessions = listSessionOptions(snapshot.Cwd)
+	return snapshot
 }
 
 func thinkingLevels(model llm.Model) []string {
