@@ -184,8 +184,10 @@ func TestToolBatchKeepsCompletedResultsAfterCancel(t *testing.T) {
 
 type blockingTool struct{}
 
-func (blockingTool) Name() string        { return "blocking" }
-func (blockingTool) Description() string { return "blocks until cancelled" }
+func (blockingTool) Name() string               { return "blocking" }
+func (blockingTool) Description() string        { return "blocks until cancelled" }
+func (blockingTool) PromptSnippet() string      { return "" }
+func (blockingTool) PromptGuidelines() []string { return nil }
 func (blockingTool) Parameters() map[string]any {
 	return map[string]any{}
 }
@@ -197,8 +199,10 @@ func (blockingTool) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecu
 
 type slowTool struct{}
 
-func (slowTool) Name() string        { return "slow" }
-func (slowTool) Description() string { return "slow tool" }
+func (slowTool) Name() string               { return "slow" }
+func (slowTool) Description() string        { return "slow tool" }
+func (slowTool) PromptSnippet() string      { return "" }
+func (slowTool) PromptGuidelines() []string { return nil }
 func (slowTool) Parameters() map[string]any {
 	return map[string]any{}
 }
@@ -214,8 +218,10 @@ func (slowTool) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecution
 
 type instantTool struct{}
 
-func (instantTool) Name() string        { return "instant" }
-func (instantTool) Description() string { return "instant tool" }
+func (instantTool) Name() string               { return "instant" }
+func (instantTool) Description() string        { return "instant tool" }
+func (instantTool) PromptSnippet() string      { return "" }
+func (instantTool) PromptGuidelines() []string { return nil }
 func (instantTool) Parameters() map[string]any {
 	return map[string]any{}
 }

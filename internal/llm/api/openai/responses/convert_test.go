@@ -44,6 +44,8 @@ type fakeTool struct {
 func (t fakeTool) Name() string               { return t.name }
 func (t fakeTool) Description() string        { return t.description }
 func (t fakeTool) Parameters() map[string]any { return t.parameters }
+func (t fakeTool) PromptSnippet() string      { return "" }
+func (t fakeTool) PromptGuidelines() []string { return nil }
 func (t fakeTool) ExecutionMode() llm.ToolExecutionMode {
 	return llm.ToolExecutionParallel
 }

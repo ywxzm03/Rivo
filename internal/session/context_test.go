@@ -15,10 +15,10 @@ func TestBuildContextPathWalkAndBranch(t *testing.T) {
 		}
 	}
 	ctx := m.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4", len(ctx.Messages))
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("messages = %d, want 4", len(ctx.Messages()))
 	}
-	if messageRole(ctx.Messages[0]) != "user" || messageRole(ctx.Messages[3]) != "assistant" {
+	if messageRole(ctx.Messages()[0]) != "user" || messageRole(ctx.Messages()[3]) != "assistant" {
 		t.Error("path order wrong, want root-to-leaf")
 	}
 	if ctx.ThinkingLevel != "off" {
@@ -30,8 +30,8 @@ func TestBuildContextPathWalkAndBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx = m.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("messages after usage entry = %d, want 4 (usage not in context)", len(ctx.Messages))
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("messages after usage entry = %d, want 4 (usage not in context)", len(ctx.Messages()))
 	}
 
 	// Branch 到 u1 后追加，路径只含 u1 与新消息
@@ -43,11 +43,11 @@ func TestBuildContextPathWalkAndBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx = m.BuildContext()
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("messages after branch = %d, want 2", len(ctx.Messages))
+	if len(ctx.Messages()) != 2 {
+		t.Fatalf("messages after branch = %d, want 2", len(ctx.Messages()))
 	}
-	if messageText(t, ctx.Messages[0]) != "u1" || messageText(t, ctx.Messages[1]) != "u3" {
-		t.Errorf("branch path = [%s, %s], want [u1, u3]", messageText(t, ctx.Messages[0]), messageText(t, ctx.Messages[1]))
+	if messageText(t, ctx.Messages()[0]) != "u1" || messageText(t, ctx.Messages()[1]) != "u3" {
+		t.Errorf("branch path = [%s, %s], want [u1, u3]", messageText(t, ctx.Messages()[0]), messageText(t, ctx.Messages()[1]))
 	}
 }
 
@@ -102,7 +102,7 @@ func TestBuildContextCompaction(t *testing.T) {
 		ids = append(ids, m.leafID)
 	}
 	// 保留 u2 起的历史
-	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, "system prompt", &llm.Usage{InputTokens: 100, OutputTokens: 10}); err != nil {
+	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, nil, &llm.Usage{InputTokens: 100, OutputTokens: 10}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u3")); err != nil {
@@ -110,15 +110,15 @@ func TestBuildContextCompaction(t *testing.T) {
 	}
 
 	ctx := m.BuildContext()
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4 (summary, u2, a2, u3)", len(ctx.Messages))
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("messages = %d, want 4 (summary, u2, a2, u3)", len(ctx.Messages()))
 	}
-	summary := messageText(t, ctx.Messages[0])
+	summary := messageText(t, ctx.Messages()[0])
 	if !strings.HasPrefix(summary, "The conversation history before this point was compacted") || !strings.Contains(summary, "early chat summarized") || !strings.HasSuffix(summary, "</summary>") {
 		t.Errorf("summary message not wrapped: %q", summary)
 	}
-	if messageText(t, ctx.Messages[1]) != "u2" || messageText(t, ctx.Messages[2]) != "a2" || messageText(t, ctx.Messages[3]) != "u3" {
-		t.Errorf("kept range wrong: [%s, %s, %s]", messageText(t, ctx.Messages[1]), messageText(t, ctx.Messages[2]), messageText(t, ctx.Messages[3]))
+	if messageText(t, ctx.Messages()[1]) != "u2" || messageText(t, ctx.Messages()[2]) != "a2" || messageText(t, ctx.Messages()[3]) != "u3" {
+		t.Errorf("kept range wrong: [%s, %s, %s]", messageText(t, ctx.Messages()[1]), messageText(t, ctx.Messages()[2]), messageText(t, ctx.Messages()[3]))
 	}
 	if ctx.Model != "gpt-5" {
 		t.Errorf("model = %q, want gpt-5 (assistant fallback still works)", ctx.Model)
@@ -131,15 +131,15 @@ func TestBuildContextCompactionZeroRetain(t *testing.T) {
 		if err := m.AppendMessage(userMsg("u1")); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.AppendCompaction("all summarized", "", 1, "", nil); err != nil {
+		if err := m.AppendCompaction("all summarized", "", 1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(userMsg("u2")); err != nil {
 			t.Fatal(err)
 		}
 		ctx := m.BuildContext()
-		if len(ctx.Messages) != 2 {
-			t.Fatalf("messages = %d, want 2 (summary, u2)", len(ctx.Messages))
+		if len(ctx.Messages()) != 2 {
+			t.Fatalf("messages = %d, want 2 (summary, u2)", len(ctx.Messages()))
 		}
 		compaction := m.entries[1].(*CompactionEntry)
 		if compaction.FirstKeptEntryID != compaction.ID {
@@ -151,15 +151,15 @@ func TestBuildContextCompactionZeroRetain(t *testing.T) {
 		if err := m.AppendMessage(userMsg("u1")); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.AppendCompaction("all summarized", "deadbeef", 1, "", nil); err != nil {
+		if err := m.AppendCompaction("all summarized", "deadbeef", 1, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(userMsg("u2")); err != nil {
 			t.Fatal(err)
 		}
 		ctx := m.BuildContext()
-		if len(ctx.Messages) != 2 {
-			t.Fatalf("messages = %d, want 2 (summary, u2)", len(ctx.Messages))
+		if len(ctx.Messages()) != 2 {
+			t.Fatalf("messages = %d, want 2 (summary, u2)", len(ctx.Messages()))
 		}
 	})
 }
@@ -169,13 +169,13 @@ func TestBuildContextIgnoresOlderCompaction(t *testing.T) {
 	if err := m.AppendMessage(userMsg("u1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendCompaction("first summary", m.leafID, 1, "", nil); err != nil {
+	if err := m.AppendCompaction("first summary", m.leafID, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u2")); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendCompaction("second summary", m.entries[0].base().ID, 2, "", nil); err != nil {
+	if err := m.AppendCompaction("second summary", m.entries[0].base().ID, 2, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.AppendMessage(userMsg("u3")); err != nil {
@@ -183,13 +183,13 @@ func TestBuildContextIgnoresOlderCompaction(t *testing.T) {
 	}
 	ctx := m.BuildContext()
 	// 期望：第二个摘要 + u1 + u2 + u3，第一个摘要不产出消息
-	if len(ctx.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4", len(ctx.Messages))
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("messages = %d, want 4", len(ctx.Messages()))
 	}
-	if got := messageText(t, ctx.Messages[0]); !strings.Contains(got, "second summary") {
+	if got := messageText(t, ctx.Messages()[0]); !strings.Contains(got, "second summary") {
 		t.Errorf("first message = %q, want second summary", got)
 	}
-	for _, msg := range ctx.Messages[1:] {
+	for _, msg := range ctx.Messages()[1:] {
 		if strings.Contains(messageText(t, msg), "summary") {
 			t.Error("older compaction produced a message")
 		}
@@ -212,8 +212,8 @@ func TestBuildContextContextEdit(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := m.BuildContext()
-		if messageText(t, ctx.Messages[0]) != "edited" {
-			t.Errorf("edited user = %q, want edited", messageText(t, ctx.Messages[0]))
+		if messageText(t, ctx.Messages()[0]) != "edited" {
+			t.Errorf("edited user = %q, want edited", messageText(t, ctx.Messages()[0]))
 		}
 
 		// 省略 assistant
@@ -221,11 +221,11 @@ func TestBuildContextContextEdit(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx = m.BuildContext()
-		if len(ctx.Messages) != 1 {
-			t.Fatalf("messages = %d, want 1 (assistant omitted)", len(ctx.Messages))
+		if len(ctx.Messages()) != 1 {
+			t.Fatalf("messages = %d, want 1 (assistant omitted)", len(ctx.Messages()))
 		}
-		if messageText(t, ctx.Messages[0]) != "edited" {
-			t.Errorf("kept message = %q, want edited", messageText(t, ctx.Messages[0]))
+		if messageText(t, ctx.Messages()[0]) != "edited" {
+			t.Errorf("kept message = %q, want edited", messageText(t, ctx.Messages()[0]))
 		}
 	})
 	t.Run("latest edit wins", func(t *testing.T) {
@@ -240,8 +240,8 @@ func TestBuildContextContextEdit(t *testing.T) {
 		if err := m.AppendContextEdit(u1, &Replacement{Content: []llm.Content{llm.TextContent{Text: "second"}}}); err != nil {
 			t.Fatal(err)
 		}
-		if ctx := m.BuildContext(); messageText(t, ctx.Messages[0]) != "second" {
-			t.Errorf("edited = %q, want second (latest wins)", messageText(t, ctx.Messages[0]))
+		if ctx := m.BuildContext(); messageText(t, ctx.Messages()[0]) != "second" {
+			t.Errorf("edited = %q, want second (latest wins)", messageText(t, ctx.Messages()[0]))
 		}
 	})
 	t.Run("branch relative", func(t *testing.T) {
@@ -262,8 +262,8 @@ func TestBuildContextContextEdit(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := m.BuildContext()
-		if messageText(t, ctx.Messages[0]) != "original" {
-			t.Errorf("u1 after branch away from edit = %q, want original", messageText(t, ctx.Messages[0]))
+		if messageText(t, ctx.Messages()[0]) != "original" {
+			t.Errorf("u1 after branch away from edit = %q, want original", messageText(t, ctx.Messages()[0]))
 		}
 	})
 }
@@ -305,7 +305,7 @@ func messageText(t *testing.T, msg llm.Message) string {
 	return ""
 }
 
-func TestBuildContextProjectionEntryIDs(t *testing.T) {
+func TestBuildContextContextEntries(t *testing.T) {
 	m := New("/project", t.TempDir())
 	var ids []string
 	for _, msg := range []llm.Message{userMsg("u1"), assistantMsg("a1"), userMsg("u2"), assistantMsg("a2")} {
@@ -314,7 +314,7 @@ func TestBuildContextProjectionEntryIDs(t *testing.T) {
 		}
 		ids = append(ids, m.leafID)
 	}
-	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, "", nil); err != nil {
+	if err := m.AppendCompaction("early chat summarized", ids[2], 5000, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	compactionID := m.leafID
@@ -323,18 +323,18 @@ func TestBuildContextProjectionEntryIDs(t *testing.T) {
 	}
 
 	ctx := m.BuildContext()
-	// 消息与 entry ID 一一同序：[摘要(compaction), u2, a2, u3]
-	if len(ctx.Messages) != len(ctx.EntryIDs) {
-		t.Fatalf("messages = %d, entryIDs = %d, want same length", len(ctx.Messages), len(ctx.EntryIDs))
+	// 结构化条目保持来源：[摘要(compaction), u2, a2, u3]
+	if len(ctx.Entries) != 4 {
+		t.Fatalf("entries = %d, want 4", len(ctx.Entries))
 	}
 	want := []string{compactionID, ids[2], ids[3], m.leafID}
 	for i, id := range want {
-		if ctx.EntryIDs[i] != id {
-			t.Errorf("EntryIDs[%d] = %q, want %q", i, ctx.EntryIDs[i], id)
+		if ctx.Entries[i].SourceID != id {
+			t.Errorf("Entries[%d].SourceID = %q, want %q", i, ctx.Entries[i].SourceID, id)
 		}
 	}
-	if ctx.LastSummary != "early chat summarized" {
-		t.Errorf("LastSummary = %q", ctx.LastSummary)
+	if ctx.Entries[0].Summary != "early chat summarized" {
+		t.Errorf("compaction summary = %q", ctx.Entries[0].Summary)
 	}
 }
 
@@ -348,7 +348,7 @@ func TestBuildContextStaleUsage(t *testing.T) {
 			}
 			ids = append(ids, m.leafID)
 		}
-		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+		if err := m.AppendCompaction("summarized", ids[1], 5000, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		// 压缩后只有 user 消息，最后一条 assistant 仍带着压缩前的 usage
@@ -368,7 +368,7 @@ func TestBuildContextStaleUsage(t *testing.T) {
 			}
 			ids = append(ids, m.leafID)
 		}
-		if err := m.AppendCompaction("summarized", ids[1], 5000, "", nil); err != nil {
+		if err := m.AppendCompaction("summarized", ids[1], 5000, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if err := m.AppendMessage(assistantMsg("a2")); err != nil {

@@ -118,6 +118,9 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 			fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 		}
 		return nil
+	}, func() {
+		// 经闭包取当前 a，/resume 替换实例后 reload 作用于新会话
+		a.Reload()
 	})
 }
 
@@ -137,7 +140,7 @@ func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, erro
 	return app.Open(infos[0].Path, cfg, onEvent)
 }
 
-func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error, compact func(context.Context, string) error, listSessions func() ([]session.SessionInfo, error), resume func(string) error) int {
+func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error, compact func(context.Context, string) error, listSessions func() ([]session.SessionInfo, error), resume func(string) error, reload func()) int {
 	reader := bufio.NewReader(stdin)
 	for {
 		if _, err := fmt.Fprint(stdout, "> "); err != nil {
@@ -173,6 +176,12 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 			if !handleResume(reader, stdout, stderr, listSessions, resume) {
 				return 1
 			}
+			continue
+		}
+		// /reload 重读 AGENTS.md 与 skills，变更在下次请求前生效
+		if input == "/reload" {
+			reload()
+			fmt.Fprintln(stdout, "[reloaded context files and skills]")
 			continue
 		}
 		if err := run(context.Background(), input); err != nil {

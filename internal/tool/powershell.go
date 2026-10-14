@@ -17,6 +17,10 @@ func (p *PowerShell) Name() string { return "powershell" }
 
 func (p *PowerShell) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
+func (p *PowerShell) PromptSnippet() string { return "Execute PowerShell commands" }
+
+func (p *PowerShell) PromptGuidelines() []string { return nil }
+
 func (p *PowerShell) Description() string {
 	return fmt.Sprintf("Execute a PowerShell command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", defaultMaxLines, defaultMaxBytes/1024)
 }

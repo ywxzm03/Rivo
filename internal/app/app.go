@@ -8,7 +8,9 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/config"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tool"
 )
@@ -19,6 +21,11 @@ type App struct {
 	coordinator *session.Coordinator
 	cfg         Config
 	onEvent     llm.AgentEventSink
+	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
+	loader *prompt.Loader
+	// cwd 与 tools 在 Reload 重建基线分节时复用
+	cwd   string
+	tools []llm.Tool
 	// modelFallback 非空表示恢复时投影模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
@@ -45,8 +52,8 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		return nil, err
 	}
 	// 1.投影消息注入运行期上下文，恢复的会话才真正接上历史
-	if len(proj.Messages) > 0 {
-		a.agent.ReplaceMessages(proj.Messages)
+	if messages := proj.Messages(); len(messages) > 0 {
+		a.agent.ReplaceMessages(messages)
 	}
 	// 2.思考等级：newAppWithModel 已按 cfg.ThinkingLevel 装配，
 	// 仅在 settings 未指定时回填会话投影的显式记录（含 off）
@@ -54,11 +61,13 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
 	}
 	a.modelFallback = warning
+	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills，变更留给下次请求前 diff
+	a.Reload()
 	return a, nil
 }
 
 // assembleResume 按投影模型装配运行链，解析失败回退 env 默认模型并返回回退警告
-func assembleResume(cfg Config, proj session.SessionContext, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
+func assembleResume(cfg Config, proj compaction.ContextView, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
 	if proj.Provider == "" || proj.Model == "" {
 		a, err := newApp(cfg, sm, onEvent)
 		return a, "", err
@@ -76,7 +85,7 @@ func assembleResume(cfg Config, proj session.SessionContext, sm *session.Session
 }
 
 // fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
-func fallbackWarning(cfg Config, proj session.SessionContext) string {
+func fallbackWarning(cfg Config, proj compaction.ContextView) string {
 	modelID := cfg.ModelID
 	if modelID == "" {
 		// 空 ModelID 经装配兜底为 provider 默认模型，文案与实际装配保持一致
@@ -140,18 +149,45 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
 	}
 
+	// 1.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+	}
+	agentDir, err := config.Dir()
+	if err != nil {
+		return nil, err
+	}
+	loader := prompt.NewLoader(cwd, agentDir)
+	loader.Reload()
+
+	// 2.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
+	coord.SetPromptSections(prompt.BuildSections(prompt.Options{
+		Cwd:          cwd,
+		Tools:        tools,
+		ContextFiles: loader.ContextFiles(),
+		Skills:       loader.Skills(),
+	}))
 	ag := agent.NewAgent(
 		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel},
 		llm.Context{
-			SystemPrompt: systemPrompt,
-			Tools:        tools,
+			Tools: tools,
 		},
 		streamFn,
 		coord.Handle,
 	)
 	ag.Coordinator = coord
 	coord.Agent = ag
-	return &App{agent: ag, session: sm, coordinator: coord, cfg: cfg, onEvent: onEvent}, nil
+	return &App{
+		agent:       ag,
+		session:     sm,
+		coordinator: coord,
+		cfg:         cfg,
+		onEvent:     onEvent,
+		loader:      loader,
+		cwd:         cwd,
+		tools:       tools,
+	}, nil
 }
 
 // Run 经编排层驱动一次运行，溢出恢复由编排层负责
@@ -166,7 +202,7 @@ func (a *App) Compact(ctx context.Context, instructions string) error {
 
 // SessionContext 返回当前会话的显示/模型投影副本
 func (a *App) SessionContext() session.SessionContext {
-	proj := a.session.BuildContext()
+	proj := a.session.BuildSessionContext()
 	proj.Messages = append([]llm.Message(nil), proj.Messages...)
 	proj.EntryIDs = append([]string(nil), proj.EntryIDs...)
 	return proj
@@ -246,4 +282,16 @@ func validThinkingLevel(level llm.ThinkingLevel) bool {
 	default:
 		return false
 	}
+}
+
+// Reload 重读 AGENTS.md 与 skills 并重建基线分节；不写 system 消息，
+// 变更在下次请求前由编排层 diff 后追加
+func (a *App) Reload() {
+	a.loader.Reload()
+	a.coordinator.SetPromptSections(prompt.BuildSections(prompt.Options{
+		Cwd:          a.cwd,
+		Tools:        a.tools,
+		ContextFiles: a.loader.ContextFiles(),
+		Skills:       a.loader.Skills(),
+	}))
 }

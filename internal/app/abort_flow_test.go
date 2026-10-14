@@ -78,8 +78,14 @@ func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 
 	// 下一次请求不得携带 aborted 消息（contextForModel 过滤）
 	next := func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		if got := len(c.Messages); got != 2 {
-			t.Fatalf("replay messages = %d, want user + new user only", got)
+		messageCount := 0
+		for _, message := range c.Messages {
+			if _, ok := message.(llm.SystemMessage); !ok {
+				messageCount++
+			}
+		}
+		if messageCount != 2 {
+			t.Fatalf("replay messages = %d non-system messages, want user + new user only", messageCount)
 		}
 		for _, m := range c.Messages {
 			if assistant, ok := m.(llm.AssistantMessage); ok {

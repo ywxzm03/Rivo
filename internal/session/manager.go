@@ -133,12 +133,12 @@ func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usa
 }
 
 // AppendCompaction 追加压缩点；firstKeptEntryID 为空时存自身 ID 表示零保留
-func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, tokensBefore int, systemPrompt string, usage *llm.Usage) error {
+func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage) error {
 	e := &CompactionEntry{
 		Summary:          summary,
 		FirstKeptEntryID: firstKeptEntryID,
 		TokensBefore:     tokensBefore,
-		SystemPrompt:     systemPrompt,
+		SystemMessage:    systemMessage,
 	}
 	if usage != nil {
 		wire := usageWire(*usage)

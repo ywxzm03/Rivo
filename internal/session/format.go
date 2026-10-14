@@ -82,14 +82,14 @@ type UsageEntry struct {
 	Note     string `json:"note,omitempty"`
 }
 
-// CompactionEntry 上下文压缩点：摘要 + firstKeptEntryId + 压缩时的系统提示词快照
+// CompactionEntry 上下文压缩点：摘要 + firstKeptEntryId + 压缩时的 system prompt 快照
 type CompactionEntry struct {
 	EntryBase
-	Summary          string `json:"summary"`
-	FirstKeptEntryID string `json:"firstKeptEntryId"`
-	TokensBefore     int    `json:"tokensBefore"`
-	SystemPrompt     string `json:"systemPrompt,omitempty"`
-	Usage            *Usage `json:"usage,omitempty"`
+	Summary          string             `json:"summary"`
+	FirstKeptEntryID string             `json:"firstKeptEntryId"`
+	TokensBefore     int                `json:"tokensBefore"`
+	SystemMessage    *llm.SystemMessage `json:"systemMessage,omitempty"`
+	Usage            *Usage             `json:"usage,omitempty"`
 }
 
 // Replacement context_edit 的替换内容；nil 表示省略目标 entry

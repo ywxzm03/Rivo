@@ -42,8 +42,8 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	}
 	// 1.投影完整重建：消息与模型记录都来自会话文件
 	ctx := a.session.BuildContext()
-	if len(ctx.Messages) != 1 {
-		t.Fatalf("projection messages = %d, want 1", len(ctx.Messages))
+	if len(ctx.Messages()) != 1 {
+		t.Fatalf("projection messages = %d, want 1", len(ctx.Messages()))
 	}
 	if ctx.Provider != openai.ProviderID || ctx.Model != openai.DefaultModel {
 		t.Errorf("projection model = %s/%s, want %s/%s", ctx.Provider, ctx.Model, openai.ProviderID, openai.DefaultModel)
@@ -97,8 +97,8 @@ func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
 	}
 	// 3.会话内容不受模型回退影响
-	if ctx := a.session.BuildContext(); len(ctx.Messages) != 1 {
-		t.Fatalf("projection messages = %d, want 1", len(ctx.Messages))
+	if ctx := a.session.BuildContext(); len(ctx.Messages()) != 1 {
+		t.Fatalf("projection messages = %d, want 1", len(ctx.Messages()))
 	}
 }
 

@@ -52,6 +52,8 @@ func SerializeMessages(messages []llm.Message) string {
 			}
 		case llm.ToolResultMessage:
 			writeLabeled(&b, "Tool result", m.ToolName+": "+truncateRunes(contentsText(m.Content), ToolResultCharLimit))
+		case llm.SystemMessage:
+			// system prompt 声明不进摘要文本：它是上下文前缀而非对话内容
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")

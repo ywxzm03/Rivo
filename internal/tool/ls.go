@@ -23,6 +23,10 @@ func (l *Ls) Name() string { return "ls" }
 
 func (l *Ls) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
+func (l *Ls) PromptSnippet() string { return "List directory contents" }
+
+func (l *Ls) PromptGuidelines() []string { return nil }
+
 func (l *Ls) Description() string {
 	return fmt.Sprintf(
 		"List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. "+
