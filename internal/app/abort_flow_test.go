@@ -39,6 +39,7 @@ func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 					// 发送 delta 途中被取消：静默关闭，覆盖 agent 的 aborted 兜底路径
 					return
 				}
+				<-ctx.Done()
 			}()
 			return events, nil
 		}

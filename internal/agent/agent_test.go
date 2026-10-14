@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -845,32 +844,6 @@ func TestAgentFiltersErrorAssistantFromNextRequest(t *testing.T) {
 	}
 }
 
-// recordingCoordinator 记录回调调用的假编排层
-type recordingCoordinator struct {
-	compactions int
-	notifies    int
-	// replace 内部执行内存替换，模拟编排层压缩后的投影提交
-	replace    func()
-	compactErr error
-}
-
-func (c *recordingCoordinator) CompactIfNeeded(_ context.Context) (bool, error) {
-	c.compactions++
-	if c.compactErr != nil {
-		return false, c.compactErr
-	}
-	if c.replace != nil {
-		// 触发的测试用例通过闭包替换 Agent 内存
-		replace := c.replace
-		c.replace = nil
-		replace()
-		return true, nil
-	}
-	return false, nil
-}
-
-func (c *recordingCoordinator) NotifyOverflow() { c.notifies++ }
-
 // TestAgentContinueContinuesWithoutUserMessage 验证续接不追加用户消息，事件序列与运行同构
 func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 	var events []llm.AgentEvent
@@ -919,147 +892,76 @@ func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 	}
 }
 
-// TestAgentCompactIfNeededReplacesMemory 验证循环顶压缩回调替换内存后，agent_end 汇总不越界
-func TestAgentCompactIfNeededReplacesMemory(t *testing.T) {
+// 请求准备返回替换后的快照，核心汇总只包含新快照之后产生的消息
+func TestAgentPreparedSnapshotResetsRunBoundary(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonToolUse},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
-	)
-	var events []llm.AgentEvent
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, func(event llm.AgentEvent) error {
-		events = append(events, event)
+	var end llm.AgentEndEvent
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}), func(event llm.AgentEvent) error {
+		if e, ok := event.(llm.AgentEndEvent); ok {
+			end = e
+		}
 		return nil
 	})
-	coord.replace = func() {
-		// 模拟编排层压缩：内存替换为摘要 + 保留尾部，只在首轮压缩一次
-		summary := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped summary"}}}
-		a.AgentContext.Messages = append([]llm.Message{summary}, a.AgentContext.Messages...)
-		coord.replace = nil
+	a.PrepareRequest = func(ctx context.Context, request PreparedRequest) (PreparedRequest, error) {
+		request.Context.Messages = []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "summary"}}}}
+		request.Compacted = true
+		return request, nil
 	}
-	a.Coordinator = coord
-
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if coord.compactions < 1 {
-		t.Fatalf("compactions = %d, want >= 1", coord.compactions)
-	}
-	// 压缩后 agent_end 只汇总压缩后的新增消息，不越界
-	var agentEnd *llm.AgentEndEvent
-	for i := range events {
-		if e, ok := events[i].(llm.AgentEndEvent); ok {
-			agentEnd = &e
-		}
-	}
-	if agentEnd == nil {
-		t.Fatal("agent_end event missing")
-	}
-	// agent_end 汇总压缩后的新增消息：工具调用 assistant、工具结果、最终回复
-	if len(agentEnd.Messages) != 3 {
-		t.Errorf("agent_end messages = %d, want 3", len(agentEnd.Messages))
+	if len(end.Messages) != 1 {
+		t.Fatalf("run messages = %d, want final reply only", len(end.Messages))
 	}
 }
 
-// TestAgentNotifiesOverflowOnError 验证显式溢出错误经 finishModelError 收场前通知编排层
-func TestAgentNotifiesOverflowOnError(t *testing.T) {
-	calls := 0
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		calls++
+func TestAgentEndCarriesOverflowCause(t *testing.T) {
+	var end llm.AgentEndEvent
+	stream := func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		ch := make(chan llm.AssistantMessageEvent, 1)
-		ch <- llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)}
+		ch <- llm.AssistantMessageErrorEvent{Err: llm.ErrContextOverflow}
 		close(ch)
 		return ch, nil
 	}
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	a.Coordinator = coord
-
-	message, err := a.Run(context.Background(), "hi")
-	if err == nil {
-		t.Fatal("overflow error should end the run")
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, stream, func(event llm.AgentEvent) error {
+		if e, ok := event.(llm.AgentEndEvent); ok {
+			end = e
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "hi"); !llm.IsContextOverflow(err) {
+		t.Fatalf("err = %v", err)
 	}
-	if message == nil || message.StopReason != llm.StopReasonError {
-		t.Fatalf("message = %+v, want error assistant", message)
-	}
-	if coord.notifies != 1 {
-		t.Errorf("notifies = %d, want 1", coord.notifies)
-	}
-	// 失败尝试照常提交进上下文
-	if got := len(a.AgentContext.Messages); got != 2 {
-		t.Errorf("messages = %d, want 2", got)
+	if !llm.IsContextOverflow(end.Err) {
+		t.Fatalf("end cause = %v", end.Err)
 	}
 }
 
-// TestAgentNotifiesOverflowOnRecoverableLength 验证可恢复的长度截断提交消息后通知编排层，且不执行工具
-func TestAgentNotifiesOverflowOnRecoverableLength(t *testing.T) {
+func TestPreparedRecoverableLengthStopsBeforeTools(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
-	)
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, nil)
-	a.Coordinator = coord
-
+	ping := &fakeTool{name: "ping"}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, doneStreamFn(&calls, llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}), nil)
+	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, nil }
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if coord.notifies != 1 {
-		t.Errorf("notifies = %d, want 1", coord.notifies)
-	}
-	// 截断消息正常提交进上下文
-	if got := len(a.AgentContext.Messages); got != 2 {
-		t.Errorf("messages = %d, want 2", got)
+	if len(ping.arguments) != 0 {
+		t.Fatal("truncated tool calls were executed")
 	}
 }
 
-// TestAgentLengthAtMaxTokensNotRecovered 验证达到输出上限的截断不通知编排层
-func TestAgentLengthAtMaxTokensNotRecovered(t *testing.T) {
+func TestAgentPreparationDeadlineSettlesWithAborted(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "capped"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 100}},
-	)
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{}, streamFn, nil)
-	a.Coordinator = coord
-
-	reply, err := a.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
+	events, sink := collectEvents()
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{}), sink)
+	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) {
+		return r, context.DeadlineExceeded
 	}
-	if coord.notifies != 0 {
-		t.Errorf("notifies = %d, want 0", coord.notifies)
-	}
-	if reply.StopReason != llm.StopReasonLength {
-		t.Errorf("reply stop reason = %q, want length", reply.StopReason)
-	}
-}
-
-// TestAgentCompactionDeadlineEndsRun 验证压缩回调超时中止以 aborted 事件收场，
-// 不把超时当运行错误上抛（对齐 Pi 的 signal 语义：取消与超时都归 aborted）
-func TestAgentCompactionDeadlineEndsRun(t *testing.T) {
-	calls := 0
-	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
-	coord := &recordingCoordinator{compactErr: context.DeadlineExceeded}
-	var events []llm.AgentEvent
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
-		events = append(events, event)
-		return nil
-	})
-	a.Coordinator = coord
-
 	message, err := a.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatalf("Run() error = %v, want nil (deadline settles via aborted)", err)
+	if err != nil || message.StopReason != llm.StopReasonAborted || calls != 0 {
+		t.Fatalf("reply=%+v err=%v calls=%d", message, err, calls)
 	}
-	if message == nil || message.StopReason != llm.StopReasonAborted {
-		t.Fatalf("message = %+v, want aborted stop reason", message)
-	}
-	if calls != 0 {
-		t.Errorf("stream calls = %d, want 0 (expired ctx must not reach the model)", calls)
-	}
-	assertAbortedEventSequence(t, events)
+	assertAbortedEventSequence(t, *events)
 }
 
 // TestAgentRecoverableLengthWithoutCoordinatorRunsTools 验证未启用编排层时，

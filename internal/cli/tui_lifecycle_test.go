@@ -7,30 +7,40 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
-	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 func TestTUISendDoesNotBlockCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	useTestEnv(t)
+	cfg, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 	sending, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	r := &tuiRuntime{cancel: cancel, send: func(tea.Msg) { close(sending); <-release }}
-	go func() {
-		defer close(finished)
-		_ = r.handleEvent(llm.CompactionStartEvent{})
-	}()
+	r := &tuiRuntime{send: func(tea.Msg) { close(sending); <-release }}
+	a, err := app.NewWithSessionDir(cfg, t.TempDir(), r.handleEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.app = a
+	op, err := a.Start(context.Background(), app.OperationRequest{Kind: app.OperationRun, Value: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	<-sending
-	go r.cancelCurrent()
+	go func() { r.cancelCurrent(); close(finished) }()
 	select {
-	case <-ctx.Done():
+	case <-finished:
 	case <-time.After(time.Second):
 		close(release)
-		<-finished
-		t.Fatal("UI notification held the cancellation lock")
+		op.Wait()
+		t.Fatal("UI notification held cancellation lock")
 	}
+	r.mu.Lock()
+	r.send = nil
+	r.mu.Unlock()
 	close(release)
-	<-finished
+	op.Wait()
 }
 
 func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
@@ -55,29 +65,8 @@ func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
 	if result := cmd().(tui.OperationDoneMsg); result.Err == nil {
 		t.Fatal("invalid model should report its error")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cancel != nil || r.done != nil {
-		t.Fatal("completion published before runtime ownership was released")
+	if _, err := a.Start(context.Background(), app.OperationRequest{Kind: app.OperationThinking, Value: "off"}); err != nil {
+		t.Fatal("completion retained operation ownership", err)
 	}
-}
-
-func TestTUIShutdownWaitsForCleanup(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	r := &tuiRuntime{cancel: cancel, done: done}
-	joined := make(chan struct{})
-	go func() { r.cancelCurrent(); r.waitCurrent(); close(joined) }()
-	<-ctx.Done()
-	select {
-	case <-joined:
-		t.Fatal("shutdown returned before cleanup finished")
-	default:
-	}
-	close(done)
-	select {
-	case <-joined:
-	case <-time.After(time.Second):
-		t.Fatal("shutdown did not join the settled operation")
-	}
+	a.Wait()
 }

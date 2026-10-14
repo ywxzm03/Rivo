@@ -155,6 +155,7 @@ func (AgentStartEvent) agentEvent()  {}
 
 type AgentEndEvent struct {
 	Messages []Message
+	Err      error
 	// WillRetry 由编排层在转发时标注：本轮以可恢复的上下文溢出收场且即将续接重试
 	WillRetry bool
 }
@@ -192,6 +193,8 @@ func (MessageUpdateEvent) agentEvent()  {}
 
 type MessageEndEvent struct {
 	Message Message
+	// SourceID 由宿主提交边界提供，模型消息本身不携带显示身份
+	SourceID string
 }
 
 func (MessageEndEvent) Type() string { return AgentEventMessageEnd }

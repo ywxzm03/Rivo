@@ -1,4 +1,4 @@
-package session
+package app
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // eventRecorder 记录转发的事件
@@ -65,49 +66,72 @@ func textMsg(text string) llm.Message {
 	return llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}
 }
 
-func TestCoordinatorForwardsBeforePersisting(t *testing.T) {
-	dir := t.TempDir()
-	sm := New("/project", dir)
+func TestCoordinatorNotificationDoesNotOwnPersistence(t *testing.T) {
+	sm := session.New("/project", t.TempDir())
 	rec := &eventRecorder{fail: true}
 	coord := NewCoordinator(sm, rec.handle)
-
-	// 转发在前：转发失败时不得落盘
-	if err := coord.Handle(llm.MessageEndEvent{Message: textMsg("hi")}); err == nil {
-		t.Fatal("Handle() error = nil, want forward failure propagated")
-	}
-	if files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl")); len(files) != 0 {
-		t.Fatalf("session files = %v, want none (persist skipped after forward failure)", files)
-	}
-	// 转发成功后落盘
-	rec.fail = false
-	if err := coord.Handle(llm.MessageEndEvent{Message: textMsg("hi")}); err != nil {
+	if _, err := coord.CommitMessages([]llm.Message{textMsg("hi")}); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(files) != 1 {
-		t.Fatalf("session files = %v, want exactly 1", files)
+	if err := coord.Handle(llm.MessageEndEvent{Message: textMsg("hi")}); err == nil {
+		t.Fatal("expected display failure")
 	}
-	reloaded, err := Open(files[0], "/project")
+	reloaded, err := session.Open(sm.Path(), "/project")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(reloaded.BuildContext().Messages()); got != 1 {
-		t.Errorf("persisted messages = %d, want 1", got)
+	if len(reloaded.BuildContext().Messages()) != 1 {
+		t.Fatal("display failure changed committed records")
 	}
 }
 
 func TestCoordinatorPersistFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	sm := New("/project", dir)
-	// 模拟残留文件使独占创建失败
-	if err := os.WriteFile(sm.sessionFile, []byte("junk\n"), 0o644); err != nil {
+	sm := session.New("/project", t.TempDir())
+	if err := os.WriteFile(sm.Path(), []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rec := &eventRecorder{}
-	coord := NewCoordinator(sm, rec.handle)
-	if err := coord.Handle(llm.MessageEndEvent{Message: textMsg("hi")}); err == nil {
-		t.Fatal("Handle() error = nil, want persist failure propagated")
+	coord := NewCoordinator(sm, nil)
+	if _, err := coord.CommitMessages([]llm.Message{textMsg("hi")}); err == nil {
+		t.Fatal("expected commit failure")
 	}
+	if len(sm.BuildContext().Messages()) != 0 {
+		t.Fatal("failed commit published context")
+	}
+}
+
+// sessionEntries 通过磁盘记录核对宿主写入的 entry 类型
+func sessionEntries(t *testing.T, sm *session.SessionManager) []session.Entry {
+	t.Helper()
+	data, err := os.ReadFile(sm.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []session.Entry
+	for _, line := range bytes.Split(data, []byte("\n"))[1:] {
+		if len(line) == 0 {
+			continue
+		}
+		var kind struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &kind); err != nil {
+			t.Fatal(err)
+		}
+		if kind.Type == session.TypeCompaction {
+			var e session.CompactionEntry
+			if err := json.Unmarshal(line, &e); err != nil {
+				t.Fatal(err)
+			}
+			entries = append(entries, &e)
+		} else if kind.Type == session.TypeContextEdit {
+			var e session.ContextEditEntry
+			if err := json.Unmarshal(line, &e); err != nil {
+				t.Fatal(err)
+			}
+			entries = append(entries, &e)
+		}
+	}
+	return entries
 }
 
 // fakeRunner 记录编排层调用的假运行器
@@ -148,7 +172,7 @@ func (f *fakeRunner) ReplaceMessages(messages []llm.Message) {
 // newTestCoordinator 组装协调器与假运行器，返回摘要流计数器
 func newTestCoordinator(t *testing.T, dir string, summarizerStreamFn llm.StreamFn) (*Coordinator, *fakeRunner, *eventRecorder) {
 	t.Helper()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	rec := &eventRecorder{}
 	coord := NewCoordinator(sm, rec.handle)
 	if summarizerStreamFn != nil {
@@ -172,7 +196,7 @@ func seedHistory(t *testing.T, coord *Coordinator, a *agent.Agent) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "earlier reply"}}},
 	}
 	for _, msg := range seed {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -189,7 +213,7 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 	summaryStreamFn := countingStreamFn(&summaryCalls,
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 	)
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	rec := &eventRecorder{}
 	coord := NewCoordinator(sm, rec.handle)
 	coord.Compactor = &compaction.Compactor{
@@ -198,7 +222,8 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
 	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.Coordinator = coord
+	a.PrepareRequest = coord.PrepareRequest
+	a.CommitMessages = coord.CommitMessages
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -241,10 +266,10 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		if json.Unmarshal(line, &obj) != nil {
 			continue
 		}
-		if obj.Type == TypeContextEdit && obj.Replacement == nil {
+		if obj.Type == session.TypeContextEdit && obj.Replacement == nil {
 			hasOmission = true
 		}
-		if obj.Type == TypeCompaction {
+		if obj.Type == session.TypeCompaction {
 			hasCompaction = true
 		}
 	}
@@ -252,7 +277,7 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		t.Fatalf("omission = %v, compaction = %v, want both persisted", hasOmission, hasCompaction)
 	}
 	// 重载投影：失败尝试被省略，最终消息在场
-	reloaded, err := Open(files[0], "/project")
+	reloaded, err := session.Open(files[0], "/project")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +318,7 @@ func TestCoordinatorOverflowRecoveryOnlyOnce(t *testing.T) {
 	summaryStreamFn := countingStreamFn(&summaryCalls,
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}},
 	)
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	rec := &eventRecorder{}
 	coord := NewCoordinator(sm, rec.handle)
 	coord.Compactor = &compaction.Compactor{
@@ -302,7 +327,8 @@ func TestCoordinatorOverflowRecoveryOnlyOnce(t *testing.T) {
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
 	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.Coordinator = coord
+	a.PrepareRequest = coord.PrepareRequest
+	a.CommitMessages = coord.CommitMessages
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -321,13 +347,13 @@ func TestCoordinatorThresholdCompaction(t *testing.T) {
 	summaryStreamFn := countingStreamFn(&summaryCalls,
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 	)
-	coord, runner, _ := newTestCoordinator(t, dir, summaryStreamFn)
+	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
 	var ids []string
 	for _, msg := range []llm.Message{textMsg("u1 content here"), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1 content"}}, Usage: llm.Usage{InputTokens: 9800}}} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
-		ids = append(ids, coord.m.leafID)
+		ids = append(ids, coord.m.LastEntryID())
 	}
 
 	compacted, err := coord.CompactIfNeeded(context.Background())
@@ -339,13 +365,13 @@ func TestCoordinatorThresholdCompaction(t *testing.T) {
 	}
 	// FirstKeptEntryID 取自结构化上下文条目的来源 ID：保留区间从 a1 起
 	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	reloaded, err := Open(files[0], "/project")
+	reloaded, err := session.Open(files[0], "/project")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var firstKept string
-	for _, e := range reloaded.entries {
-		if c, ok := e.(*CompactionEntry); ok {
+	for _, e := range sessionEntries(t, reloaded) {
+		if c, ok := e.(*session.CompactionEntry); ok {
 			firstKept = c.FirstKeptEntryID
 		}
 	}
@@ -353,10 +379,7 @@ func TestCoordinatorThresholdCompaction(t *testing.T) {
 		t.Errorf("FirstKeptEntryID = %q, want %q", firstKept, ids[1])
 	}
 	// 内存替换为投影：[摘要, a1]
-	if len(runner.replaced) == 0 {
-		t.Fatal("ReplaceMessages not called")
-	}
-	replaced := runner.replaced[len(runner.replaced)-1]
+	replaced := coord.m.BuildContext().Messages()
 	if len(replaced) != 2 {
 		t.Errorf("replaced messages = %d, want 2 (summary, a1)", len(replaced))
 	}
@@ -371,10 +394,10 @@ func TestCoordinatorStaleUsageUsesEstimate(t *testing.T) {
 	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
 	var ids []string
 	for _, msg := range []llm.Message{textMsg("u1"), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1"}}, Usage: llm.Usage{InputTokens: 9800}}} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
-		ids = append(ids, coord.m.leafID)
+		ids = append(ids, coord.m.LastEntryID())
 	}
 	if err := coord.m.AppendCompaction(summaryText, ids[1], 9804, nil, nil); err != nil {
 		t.Fatal(err)
@@ -400,10 +423,10 @@ func TestCoordinatorSilentOverflowReason(t *testing.T) {
 	)
 	coord, _, rec := newTestCoordinator(t, dir, summaryStreamFn)
 	// 最后一条 assistant 的 usage 超窗：静默溢出，原因记为 overflow
-	if err := coord.Handle(llm.MessageEndEvent{Message: textMsg("u1 content here")}); err != nil {
+	if err := coord.m.AppendMessage(textMsg("u1 content here")); err != nil {
 		t.Fatal(err)
 	}
-	if err := coord.Handle(llm.MessageEndEvent{Message: llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1 content"}}, Usage: llm.Usage{InputTokens: 20000}}}); err != nil {
+	if err := coord.m.AppendMessage(llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1 content"}}, Usage: llm.Usage{InputTokens: 20000}}); err != nil {
 		t.Fatal(err)
 	}
 	compacted, err := coord.CompactIfNeeded(context.Background())
@@ -431,12 +454,12 @@ func TestCoordinatorCompactFailureKeepsMemory(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	coord, runner, rec := newTestCoordinator(t, dir, summaryStreamFn)
+	coord, _, rec := newTestCoordinator(t, dir, summaryStreamFn)
 	for _, msg := range []llm.Message{
 		textMsg("u1 content"),
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1 content"}}, Usage: llm.Usage{InputTokens: 9800}},
 	} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -457,13 +480,10 @@ func TestCoordinatorCompactFailureKeepsMemory(t *testing.T) {
 	if failEvent == nil {
 		t.Fatal("failure event not forwarded")
 	}
-	for _, e := range coord.m.entries {
-		if _, ok := e.(*CompactionEntry); ok {
+	for _, e := range sessionEntries(t, coord.m) {
+		if _, ok := e.(*session.CompactionEntry); ok {
 			t.Fatal("failed compaction must not be persisted")
 		}
-	}
-	if len(runner.replaced) != 0 {
-		t.Error("ReplaceMessages called on failure")
 	}
 }
 
@@ -481,7 +501,7 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
 	for _, msg := range []llm.Message{textMsg("u1 content"), textMsg("u2 content")} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -492,8 +512,8 @@ func TestCoordinatorManualCompact(t *testing.T) {
 		t.Errorf("prompt = %q, want additional focus", prompts[0])
 	}
 	var hasCompaction bool
-	for _, e := range coord.m.entries {
-		if _, ok := e.(*CompactionEntry); ok {
+	for _, e := range sessionEntries(t, coord.m) {
+		if _, ok := e.(*session.CompactionEntry); ok {
 			hasCompaction = true
 		}
 	}
@@ -520,7 +540,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 	}
 	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
 	coord.Compactor.Config.KeepRecentTokens = 2
-	if err := coord.m.AppendMessage(systemMsg(map[string]string{"preamble": "base"})); err != nil {
+	if err := coord.m.AppendMessage(llm.SystemMessage{Sections: map[string]string{"preamble": "base"}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, msg := range []llm.Message{
@@ -529,7 +549,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 		textMsg("u2"),
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a2"}}},
 	} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -542,7 +562,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 		textMsg("u4"),
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a4"}}},
 	} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -567,7 +587,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 	dir := t.TempDir()
 	// 窗口未知等场景下 Compactor 为 nil：溢出按原始错误收场，失败尝试保留，不得 panic
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	rec := &eventRecorder{}
 	coord := NewCoordinator(sm, rec.handle)
 	modelCalls := 0
@@ -576,19 +596,20 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
 	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, coord.Handle)
-	a.Coordinator = coord
+	a.PrepareRequest = coord.PrepareRequest
+	a.CommitMessages = coord.CommitMessages
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
 	runner := &fakeRunner{coord: coord}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 模拟真实 Agent：溢出收场时先通知编排层
-		coord.NotifyOverflow()
+		coord.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "boom"}}, StopReason: llm.StopReasonError}
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
-		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}})
+		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}, Err: llm.ErrContextOverflow})
 		return &msg, fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)
 	}
 	runner.contFn = func() (*llm.AssistantMessage, error) {
@@ -608,14 +629,14 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 		t.Errorf("continue calls = %d, want 0", runner.continueCalls)
 	}
 	// 失败尝试保留在会话中，未追加省略标记
-	for _, e := range coord.m.entries {
-		if ce, ok := e.(*ContextEditEntry); ok && ce.Replacement == nil {
+	for _, e := range sessionEntries(t, coord.m) {
+		if ce, ok := e.(*session.ContextEditEntry); ok && ce.Replacement == nil {
 			t.Fatal("omission marker should not be added without a Compactor")
 		}
 	}
 	// WillRetry 不得报告不会发生的重试
 	coord.next = rec.handle
-	coord.NotifyOverflow()
+	coord.pendingRecovery = true
 	if err := coord.Handle(llm.AgentEndEvent{}); err != nil {
 		t.Fatal(err)
 	}
@@ -641,20 +662,21 @@ func TestCoordinatorRecoveryFailureSurfacesError(t *testing.T) {
 		return ch, nil
 	}
 	coord, runner, _ := newTestCoordinator(t, dir, summaryStreamFn)
+	coord.model = llm.Model{MaxTokens: 100}
 	// 预置可压缩的历史，让恢复流程走到摘要调用
 	for _, msg := range []llm.Message{textMsg("u1 content"), textMsg("u2 content")} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 可恢复的长度截断：正常返回无错误，恢复失败的原因必须透出
-		coord.NotifyOverflow()
+		coord.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "truncated"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
-		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}})
+		coord.Handle(llm.AgentEndEvent{Messages: []llm.Message{msg}, Err: llm.ErrContextOverflow})
 		return &msg, nil
 	}
 

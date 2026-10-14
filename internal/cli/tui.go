@@ -41,8 +41,6 @@ type tuiRuntime struct {
 	toolStarted        map[string]time.Time
 	turnStarted        time.Time
 	turnRetrying       bool
-	cancel             context.CancelFunc
-	done               <-chan struct{}
 }
 
 func (r *tuiRuntime) setProgram(program *tea.Program) {
@@ -51,102 +49,58 @@ func (r *tuiRuntime) setProgram(program *tea.Program) {
 	r.mu.Unlock()
 }
 
-// request 接受操作后立即启动后台工作，tea.Cmd 只等待完成结果
+// request 由 App 接受并立即执行工作，tea.Cmd 只等待结果并转换显示快照
 func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
-	if r.cancel != nil {
-		r.mu.Unlock()
-		return func() tea.Msg { return tui.OperationDoneMsg{Err: errors.New("an operation is running")} }
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	r.cancel = cancel
-	done := make(chan struct{})
-	r.done = done
 	activeApp := r.app
-	r.mu.Unlock()
-	results := make(chan tea.Msg, 1)
-	go func() {
-		result := r.execute(ctx, activeApp, req)
-		cancel()
-		r.mu.Lock()
-		r.cancel, r.done = nil, nil
-		close(done)
-		r.mu.Unlock()
-		results <- result
-	}()
-	return func() tea.Msg { return <-results }
-}
-
-// execute 运行操作并生成快照；完成通知由 tea.Cmd 返回，晚于活动句柄的清理
-func (r *tuiRuntime) execute(ctx context.Context, activeApp *app.App, req tui.Request) tea.Msg {
-	var err error
-	switch req.Kind {
-	case "run":
-		r.mu.Lock()
+	if req.Kind == "run" {
 		r.sequence++
 		r.userID = fmt.Sprintf("user-%d", r.sequence)
-		r.currentAssistantID = ""
-		r.activeToolAnchorID = ""
+		r.currentAssistantID, r.activeToolAnchorID = "", ""
 		r.assistantTurn, r.toolGroupSequence = 0, 0
 		r.toolStarted = make(map[string]time.Time)
 		r.turnStarted = time.Time{}
 		r.turnRetrying = false
-		r.mu.Unlock()
-		_, err = activeApp.Run(ctx, req.Value)
-	case "compact":
-		err = activeApp.Compact(ctx, req.Value)
-	case "model":
-		provider, model, _ := strings.Cut(req.Value, "/")
-		err = activeApp.SetModel(provider, model)
-	case "thinking":
-		err = activeApp.SetThinkingLevel(llm.ThinkingLevel(req.Value))
-	case "resume":
-		var next *app.App
-		next, err = app.Open(req.Value, r.cfg, r.handleEvent)
-		if err == nil {
-			r.mu.Lock()
-			r.app = next
-			r.messages = nil
-			r.replaceMessagesLocked(next.SessionContext())
-			r.mu.Unlock()
-		}
 	}
-	r.mu.Lock()
-	if r.app != nil {
-		var partial *tui.Message
-		if req.Kind == "run" {
-			partial = r.partialAssistantLocked()
+	r.mu.Unlock()
+	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: req.Value})
+	if err != nil {
+		return func() tea.Msg { return tui.OperationDoneMsg{Err: err} }
+	}
+	return func() tea.Msg {
+		result := op.Wait()
+		r.mu.Lock()
+		if result.Next != nil {
+			r.app = result.Next
+			r.messages = nil
 		}
+		partial := r.partialAssistantLocked()
 		r.replaceMessagesLocked(r.app.SessionContext())
 		if partial != nil && !r.hasMessageLocked(*partial) {
 			r.upsertLocked(*partial)
 		}
+		snapshot := r.snapshotLocked()
+		r.mu.Unlock()
+		if errors.Is(result.Err, context.Canceled) {
+			result.Err = nil
+		}
+		return tui.OperationDoneMsg{Snapshot: &snapshot, Err: result.Err}
 	}
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-	if errors.Is(err, context.Canceled) {
-		err = nil
-	}
-	return tui.OperationDoneMsg{Snapshot: &snapshot, Err: err}
 }
 
 func (r *tuiRuntime) cancelCurrent() {
 	r.mu.Lock()
-	cancel := r.cancel
+	activeApp := r.app
 	r.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+	activeApp.Cancel()
 }
 
-// waitCurrent 等待已接受的操作收尾；在 Bubble Tea 恢复终端后调用
+// waitCurrent 在终端恢复后等待 App 收尾，不依赖未执行的 tea.Cmd
 func (r *tuiRuntime) waitCurrent() {
 	r.mu.Lock()
-	done := r.done
+	activeApp := r.app
 	r.mu.Unlock()
-	if done != nil {
-		<-done
-	}
+	activeApp.Wait()
 }
 
 // handleEvent 只发送消息/状态事件；OperationDoneMsg 由请求命令在 app 返回后发送
