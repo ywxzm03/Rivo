@@ -347,18 +347,17 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 		group, groupIndex = nil, -1
 	}
 	for _, entry := range view.Entries {
+		// 压缩快照与摘要只供模型使用，不进入显示投影
+		if entry.Kind == compaction.ContextCompaction {
+			continue
+		}
 		for _, message := range entry.Messages {
 			id := r.sourceID(entry.SourceID, "message")
 			switch current := message.(type) {
 			case llm.UserMessage:
 				seal()
 				if text := textContent(current.Content); text != "" {
-					role := "user"
-					if entry.Kind == compaction.ContextCompaction {
-						id = r.sourceID(entry.SourceID, "summary")
-						role = "summary"
-					}
-					projected = append(projected, tui.Message{ID: id, Role: role, Text: text})
+					projected = append(projected, tui.Message{ID: id, Role: "user", Text: text})
 				}
 			case llm.AssistantMessage:
 				if current.StopReason == llm.StopReasonError {
