@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // 大粘贴折叠阈值，与 Pi v1.0.0 editor.ts 保持一致
@@ -15,11 +16,11 @@ const (
 	pasteTabWidth = 4
 )
 
-// pasteMarkerRegexp 匹配折叠标记；展开时按精确 id 替换，字面文本不受影响
-var pasteMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]`)
+// pasteMarkerRegexp 匹配带折叠统计的生成标记；不带统计的字面文本不展开
+var pasteMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]`)
 
-// pasteTailMarkerRegexp 匹配紧贴文本末尾的完整标记，用于光标整删判断；捕获组 2 是 id
-var pasteTailMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$`)
+// pasteTailMarkerRegexp 匹配紧贴文本末尾的完整标记，用于光标整删判断；捕获组 1 是 id
+var pasteTailMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]$`)
 
 // handlePaste 处理一次终端粘贴：超阈值折叠为标记，否则原样插入
 func (m *Model) handlePaste(text string) {
@@ -36,19 +37,22 @@ func (m *Model) handlePaste(text string) {
 			m.pastes = make(map[int]string)
 		}
 		m.pastes[id] = text
-		var marker string
-		if lines > pasteMaxLines {
-			marker = "[paste #" + strconv.Itoa(id) + " +" + strconv.Itoa(lines) + " lines]"
-		} else {
-			marker = "[paste #" + strconv.Itoa(id) + " " + strconv.Itoa(runes) + " chars]"
-		}
-		m.editor.InsertString(marker)
+		m.editor.InsertString(pasteMarker(id, text))
 	} else {
 		m.editor.InsertString(text)
 	}
 	m.clearSelection()
 	m.completion, m.completionHidden = 0, false
 	m.layout()
+}
+
+// pasteMarker 返回注册内容对应的折叠标记
+func pasteMarker(id int, text string) string {
+	lines := strings.Count(text, "\n") + 1
+	if lines > pasteMaxLines {
+		return "[paste #" + strconv.Itoa(id) + " +" + strconv.Itoa(lines) + " lines]"
+	}
+	return "[paste #" + strconv.Itoa(id) + " " + strconv.Itoa(len([]rune(text))) + " chars]"
 }
 
 // cleanPasteText 规范换行、展开制表符并剔除控制字符（保留换行）
@@ -77,7 +81,9 @@ func (m *Model) expandPasteMarkers(text string) string {
 			return match
 		}
 		if content, ok := m.pastes[id]; ok {
-			return content
+			if match == pasteMarker(id, content) {
+				return content
+			}
 		}
 		return match
 	})
@@ -97,10 +103,10 @@ func (m *Model) backspaceAtMarker() bool {
 		return false
 	}
 	info := m.editor.LineInfo()
-	col := info.StartColumn + info.ColumnOffset
 	current := lines[lineIndex]
 	runes := []rune(current)
-	col = min(col, len(runes))
+	start := min(max(0, info.StartColumn), len(runes))
+	col := min(start+runeOffsetAtWidth(runes[start:], info.CharOffset), len(runes))
 	prefix := string(runes[:col])
 	// 锚定 prefix 末尾：光标左侧必须是一个完整标记；group 1 是 id
 	loc := pasteTailMarkerRegexp.FindStringSubmatchIndex(prefix)
@@ -123,4 +129,23 @@ func (m *Model) backspaceAtMarker() bool {
 	}
 	delete(m.pastes, id)
 	return true
+}
+
+// runeOffsetAtWidth 把软换行片段的显示列换算成 rune 偏移
+func runeOffsetAtWidth(runes []rune, width int) int {
+	if width <= 0 {
+		return 0
+	}
+	used := 0
+	for i, r := range runes {
+		runeWidth := ansi.StringWidth(string(r))
+		if runeWidth > 0 && used+runeWidth > width {
+			return i
+		}
+		used += runeWidth
+		if used >= width {
+			return i + 1
+		}
+	}
+	return len(runes)
 }

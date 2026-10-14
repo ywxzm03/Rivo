@@ -248,7 +248,7 @@ func (m *Model) filterMouseKey(msg tea.KeyMsg) (string, bool) {
 
 // rawMouseWheel recognizes mouse reports that escaped Bubble Tea's parser.
 func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
-	if msg.Type != tea.KeyRunes {
+	if msg.Type != tea.KeyRunes || msg.Paste {
 		return 0, false
 	}
 	value := string(msg.Runes)
@@ -281,5 +281,7 @@ func isTerminalControlKey(msg tea.KeyMsg) bool {
 			return true
 		}
 	}
-	return strings.Contains(value, "[<") || strings.Contains(value, "[M")
+	// X10 鼠标报告没有 ESC 前缀时固定为 [M 加三个编码字节；只识别完整报告，
+	// 避免把 [Markdown] 等普通文本误判为终端控制序列
+	return strings.HasPrefix(value, "[M") && len([]rune(value)) == 5
 }
