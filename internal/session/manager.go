@@ -77,7 +77,7 @@ func Open(path, cwd string) (*SessionManager, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		m := New(cwd, filepath.Dir(path))
 		m.sessionFile = path
-		// 空文件不含任何内容，移除后由 flush 独占创建，避免 O_EXCL 与残留空文件冲突
+		// 空文件不含任何内容，移除后再发布，避免残留空文件阻塞首次提交
 		_ = os.Remove(path)
 		return m, nil
 	}
@@ -323,8 +323,13 @@ func (m *SessionManager) persist(entries []Entry) error {
 		if !hasConversation(all) {
 			return os.Rename(f.Name(), draft)
 		}
-		// 独占发布完整文件，失败不留下半写 JSONL，也不覆盖同名文件
-		if err := os.Link(f.Name(), m.sessionFile); err != nil {
+		// 同目录重命名发布完整文件，不依赖文件系统支持硬链接
+		if _, err := os.Lstat(m.sessionFile); err == nil {
+			return fmt.Errorf("session: failed to publish session file: %w", os.ErrExist)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("session: failed to inspect session path: %w", err)
+		}
+		if err := os.Rename(f.Name(), m.sessionFile); err != nil {
 			return fmt.Errorf("session: failed to publish session file: %w", err)
 		}
 		_ = os.Remove(draft)

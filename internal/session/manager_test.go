@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -125,25 +126,44 @@ func TestFlushOpenFailureRetriesAfterBlockerRemoved(t *testing.T) {
 	}
 }
 
-func TestFlushMidWriteWedgeOnExistingFile(t *testing.T) {
+func TestPublishConflictKeepsPendingBatchForRetry(t *testing.T) {
 	dir := t.TempDir()
 	m := New("/project", dir)
 	// 模拟上次半写残留的文件
 	if err := os.WriteFile(m.sessionFile, []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendMessage(userMsg("hi")); err == nil {
-		t.Fatal("AppendMessage() error = nil, want exclusive-create failure")
+	if err := m.AppendMessage(userMsg("hi")); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("AppendMessage() error = %v, want existing path error", err)
 	}
-	// 同进程内持续报错，内存状态继续推进
+	if data, err := os.ReadFile(m.sessionFile); err != nil || string(data) != "junk\n" {
+		t.Fatalf("existing file changed: data=%q err=%v", data, err)
+	}
+	// 新提交被阻止，原待写批次和已提交内存都保持不变
 	if err := m.AppendMessage(assistantMsg("hello")); err == nil {
 		t.Fatal("second AppendMessage() error = nil, want wedge")
 	}
 	if m.flushed {
 		t.Error("flushed = true, want false after wedge")
 	}
-	if len(m.entries) != 0 || len(m.pending) != 1 {
+	if len(m.entries) != 0 || len(m.byID) != 0 || m.leafID != "" || len(m.pending) != 1 {
 		t.Errorf("failed writes changed committed records: entries=%d pending=%d", len(m.entries), len(m.pending))
+	}
+	pendingID := m.pending[0].base().ID
+	if err := os.Remove(m.sessionFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RetryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !m.flushed || m.HasPending() || m.leafID != pendingID || m.byID[pendingID] == nil {
+		t.Fatal("retry did not commit the original pending entry")
+	}
+	if len(readLines(t, m.sessionFile)) != 2 {
+		t.Fatal("retry did not publish one complete session batch")
+	}
+	if files, err := filepath.Glob(filepath.Join(dir, ".rivo-session-*")); err != nil || len(files) != 0 {
+		t.Fatalf("temporary files remained after publication: files=%v err=%v", files, err)
 	}
 }
 
