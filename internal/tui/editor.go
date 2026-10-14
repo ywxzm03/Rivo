@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -10,7 +11,9 @@ import (
 
 const timeDoublePress = 500 * time.Millisecond
 
-var commands = []struct{ name, description string }{
+type slashCommand struct{ name, description string }
+
+var commands = []slashCommand{
 	{"model", "<provider/model> — Select model (opens selector UI)"},
 	{"thinking", "<level> — Set thinking level"},
 	{"resume", "Resume a previous session"},
@@ -21,26 +24,46 @@ var commands = []struct{ name, description string }{
 	{"exit", "Exit Rivo"},
 }
 
-func (m *Model) completionItems() []int {
-	value := m.editor.Value()
-	if m.completionHidden || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \n\t") {
+func (m *Model) completionItems() []slashCommand {
+	value := strings.TrimLeftFunc(m.editor.Value(), unicode.IsSpace)
+	if m.completionHidden || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \n\t\r") {
 		return nil
 	}
-	var items []int
-	for i, command := range commands {
-		if strings.HasPrefix(command.name, strings.ToLower(value[1:])) {
-			items = append(items, i)
+	items := append([]slashCommand(nil), commands...)
+	for _, skill := range m.state.Skills {
+		items = append(items, slashCommand{name: "skill:" + skill.Name, description: skill.Description})
+	}
+	// 裸名匹配优先，再补充只匹配完整 skill: 名称的结果
+	matched := fuzzyCommands(items, value[1:], true)
+	seen := make(map[string]bool, len(matched))
+	for _, item := range matched {
+		seen[item.name] = true
+	}
+	var remaining []slashCommand
+	for _, item := range items {
+		if strings.HasPrefix(item.name, "skill:") && !seen[item.name] {
+			remaining = append(remaining, item)
 		}
 	}
+	return append(matched, fuzzyCommands(remaining, value[1:], false)...)
+}
+
+// completionRows 只限制显示窗口，完整候选仍可通过上下键选取
+func (m *Model) completionRows(count int) int {
 	room := max(0, m.height-2-2-m.editor.Height()-1)
-	return items[:min(len(items), min(5, room))]
+	return min(count, min(5, room))
 }
 
 func (m *Model) completionView() string {
 	items := m.completionItems()
+	rows := m.completionRows(len(items))
+	if rows == 0 {
+		return ""
+	}
+	start := max(0, min(m.completion, len(items)-1)-rows+1)
 	var lines []string
-	for i, index := range items {
-		command := commands[index]
+	for i := start; i < min(len(items), start+rows); i++ {
+		command := items[i]
 		prefix, color := "  ", textColor
 		if i == m.completion {
 			prefix, color = "→ ", accentColor
@@ -70,7 +93,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	items := m.completionItems()
-	if len(items) > 0 {
+	if m.completionRows(len(items)) > 0 {
 		switch msg.String() {
 		case "up":
 			m.completion = max(0, m.completion-1)
@@ -83,7 +106,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.layout()
 			return nil
 		case "tab", "enter":
-			m.editor.SetValue("/" + commands[items[min(m.completion, len(items)-1)]].name + " ")
+			leading := m.editor.Value()[:len(m.editor.Value())-len(strings.TrimLeftFunc(m.editor.Value(), unicode.IsSpace))]
+			m.editor.SetValue(leading + "/" + items[min(m.completion, len(items)-1)].name + " ")
 			m.editor.CursorEnd()
 			m.resetPastes()
 			m.completionHidden = true
@@ -232,8 +256,14 @@ func (m *Model) submit() tea.Cmd {
 		m.viewport.GotoBottom()
 		return m.dispatch("run", input)
 	}
-	name, arg, _ := strings.Cut(input, " ")
-	arg = strings.TrimSpace(arg)
+	name, arg := input, ""
+	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
+		name, arg = input[:index], strings.TrimSpace(input[index:])
+	}
+	if strings.HasPrefix(name, "/skill:") {
+		m.viewport.GotoBottom()
+		return m.dispatch("run", input)
+	}
 	switch name {
 	case "/exit":
 		return m.quit()

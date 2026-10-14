@@ -358,7 +358,11 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 						id = r.sourceID(entry.SourceID, "summary")
 						role = "summary"
 					}
-					projected = append(projected, tui.Message{ID: id, Role: role, Text: text})
+					converted := tui.Message{ID: id, Role: role, Text: text}
+					if role == "user" {
+						converted.Skill = skillInvocation(text)
+					}
+					projected = append(projected, converted)
 				}
 			case llm.AssistantMessage:
 				if current.StopReason == llm.StopReasonError {

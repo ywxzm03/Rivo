@@ -28,6 +28,16 @@ type SessionOption struct {
 	Path, Summary, Modified string
 }
 
+// SkillOption 是命令补全使用的技能元数据，不向 UI 暴露文件读取职责
+type SkillOption struct {
+	Name, Description string
+}
+
+// SkillInvocationView 保存已提交正文的显示投影，不重新读取磁盘
+type SkillInvocationView struct {
+	Name, Location, Content, Arguments string
+}
+
 // ToolStatus 表示工具调用在 compact transcript 中的状态
 type ToolStatus string
 
@@ -80,6 +90,7 @@ type Message struct {
 	Aborted                  bool
 	ToolGroup                *ToolGroupView
 	Divider                  *TurnDividerView
+	Skill                    *SkillInvocationView
 }
 
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
@@ -91,6 +102,7 @@ type Snapshot struct {
 	Models       []ModelOption
 	Sessions     []SessionOption
 	Messages     []Message
+	Skills       []SkillOption
 }
 
 // Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename/new/reload
@@ -352,6 +364,10 @@ func (m *Model) applySnapshot(s Snapshot) {
 	m.state.Messages = append([]Message(nil), s.Messages...)
 	for i := range m.state.Messages {
 		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
+		if skill := m.state.Messages[i].Skill; skill != nil {
+			copy := *skill
+			m.state.Messages[i].Skill = &copy
+		}
 		if divider := m.state.Messages[i].Divider; divider != nil {
 			copy := *divider
 			m.state.Messages[i].Divider = &copy
@@ -469,6 +485,8 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state.Messages = messages
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
+	m.state.Skills = append([]SkillOption(nil), s.Skills...)
+	m.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}

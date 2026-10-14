@@ -225,6 +225,9 @@ func (a *App) SessionID() string { return a.session.ID() }
 // SessionName 返回已提交的 Thread 显示名称
 func (a *App) SessionName() string { return a.session.Name() }
 
+// Skills 返回当前已发现技能的副本，显式命令由 TUI 适配器消费
+func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
+
 // CurrentModel 返回当前运行模型副本
 func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
 

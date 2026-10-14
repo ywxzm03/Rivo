@@ -22,6 +22,8 @@ func (a *App) newSession() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 继承值仅初始化本次运行，恢复其他会话仍使用原启动配置的覆盖规则
+	next.cfg = a.cfg
 	// 2.初始设置写入隐藏草稿，命名或首条对话时与会话一起发布
 	if err = next.session.AppendModelChange(model.Provider, model.ID); err == nil {
 		err = next.session.AppendThinkingLevelChange(string(cfg.ThinkingLevel))

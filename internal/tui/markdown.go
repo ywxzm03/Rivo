@@ -153,6 +153,19 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(parts, "\n")
 	}
 	if message.Role == "user" {
+		if skill := message.Skill; skill != nil {
+			label := "[skill] " + skill.Name
+			var parts []string
+			if m.showAllTools {
+				parts = append(parts, colored(accentColor, ansi.Wrap(label, width, "")), indent(m.markdown.render(skill.Content, "assistant", width)))
+			} else {
+				parts = append(parts, colored(mutedColor, ansi.Wrap(label+" (Ctrl+O to expand)", width, "")))
+			}
+			if skill.Arguments != "" {
+				parts = append(parts, m.renderMessage(Message{Role: "user", Text: skill.Arguments}))
+			}
+			return strings.Join(parts, "\n\n")
+		}
 		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
 		body := ansi.Strip(m.markdown.render(message.Text, "user", width))
 		lines := strings.Split(body, "\n")

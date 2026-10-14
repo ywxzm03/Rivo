@@ -105,20 +105,39 @@ func loadSkillFromFile(path, baseDir string) (Skill, bool) {
 // parseFrontmatter 解析 YAML frontmatter；无 frontmatter 或 frontmatter 为空时返回零值结构，
 // 有 frontmatter 但解析失败时返回错误
 func parseFrontmatter(content string) (skillFrontmatter, error) {
-	normalized := strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\r", "\n")
+	yamlText, _ := splitFrontmatter(content)
+	var frontmatter skillFrontmatter
+	if err := yaml.Unmarshal([]byte(yamlText), &frontmatter); err != nil {
+		return skillFrontmatter{}, err
+	}
+	return frontmatter, nil
+}
+
+// splitFrontmatter 统一发现与显式调用的正文边界，缺少结束标记时保留完整文本
+func splitFrontmatter(content string) (yamlText, body string) {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(stripBOM(content), "\r\n", "\n"), "\r", "\n")
 	if !strings.HasPrefix(normalized, "---") {
-		return skillFrontmatter{}, nil
+		return "", normalized
 	}
 	// 从 3 起查找结束标记，YAML 容忍前导换行；end 为 0 时区间为空，覆盖 "---\n---" 这种空 frontmatter
 	end := strings.Index(normalized[3:], "\n---")
 	if end == -1 {
-		return skillFrontmatter{}, nil
+		return "", normalized
 	}
-	var frontmatter skillFrontmatter
-	if err := yaml.Unmarshal([]byte(normalized[3:end+3]), &frontmatter); err != nil {
-		return skillFrontmatter{}, err
+	return normalized[3 : end+3], normalized[end+7:]
+}
+
+// ReadSkillBody 读取当前磁盘正文并剥离 frontmatter，元数据由 Loader 的快照管理
+func ReadSkillBody(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
 	}
-	return frontmatter, nil
+	if _, err := parseFrontmatter(string(raw)); err != nil {
+		return "", err
+	}
+	_, body := splitFrontmatter(string(raw))
+	return strings.TrimSpace(body), nil
 }
 
 // validSkillName 校验 skill 名：小写字母、数字与连字符，长度受限，首尾无连字符且无连续连字符

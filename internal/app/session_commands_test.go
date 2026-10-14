@@ -79,6 +79,9 @@ func TestNewSessionInheritsSettingsWithoutOldContext(t *testing.T) {
 	if next.CurrentModel().ID != a.CurrentModel().ID || next.CurrentThinkingLevel() != llm.ThinkingLevelHigh || filepath.Dir(next.session.Path()) != filepath.Dir(a.session.Path()) {
 		t.Fatal("new session lost its settings or storage directory")
 	}
+	if next.cfg.ThinkingLevel != a.cfg.ThinkingLevel || next.cfg.ModelID != a.cfg.ModelID {
+		t.Fatal("new session turned inherited values into startup overrides")
+	}
 	if files := next.loader.ContextFiles(); len(files) == 0 || files[0].Content != "New session instructions" {
 		t.Fatal("new session did not reload context files")
 	}
@@ -135,6 +138,31 @@ func TestNewSessionStopsWhenPendingCommitFails(t *testing.T) {
 	}
 }
 
+func TestNewSessionSetupFailureDoesNotLeaveOldPendingRequest(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendSessionInfo("Old Thread"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(a.session.Path())
+	if err := os.Rename(dir, dir+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(dir)
+		_ = os.Rename(dir+".saved", dir)
+	})
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := op.Wait(); result.Err == nil || result.Next != nil || a.pendingRequest != nil || a.session.HasPending() {
+		t.Fatalf("new setup failure leaked into old session: %+v", result)
+	}
+}
+
 func TestReloadOperationUpdatesBaselineWithoutWritingContext(t *testing.T) {
 	a := operationApp(t, nil, nil)
 	before := a.ContextView()
@@ -148,5 +176,27 @@ func TestReloadOperationUpdatesBaselineWithoutWritingContext(t *testing.T) {
 	}
 	if files := a.loader.ContextFiles(); len(files) == 0 || files[0].Content != "Reloaded instructions" {
 		t.Fatal("reload did not update loaded files")
+	}
+}
+
+func TestRunTreatsTUICommandsAsLiteralInput(t *testing.T) {
+	calls := 0
+	a := operationApp(t, countingStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}, StopReason: llm.StopReasonStop}), nil)
+	writePromptFile(t, filepath.Join(os.Getenv("RIVO_AGENT_DIR"), "skills", "docs", "SKILL.md"), "---\nname: docs\ndescription: Instructions\n---\nSkill body")
+	a.Reload()
+	inputs := []string{"/skill:docs explain this", "/rename Literal name", "/new"}
+	for _, input := range inputs {
+		if _, err := a.Run(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actual []string
+	for _, message := range a.ContextView().Messages() {
+		if user, ok := message.(llm.UserMessage); ok {
+			actual = append(actual, user.Content[0].(llm.TextContent).Text)
+		}
+	}
+	if calls != len(inputs) || !reflect.DeepEqual(actual, inputs) || a.SessionName() != "" {
+		t.Fatalf("literal input handling = %q, calls = %d", actual, calls)
 	}
 }

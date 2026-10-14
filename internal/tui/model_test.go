@@ -93,7 +93,7 @@ func press(m *Model, key tea.KeyType) tea.Cmd {
 // assertFrame 检查组件原始高度，避免最终截断掩盖布局溢出
 func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
-	dock := m.editor.Height() + 2 + len(m.completionItems())
+	dock := m.editor.Height() + 2 + m.completionRows(len(m.completionItems()))
 	if m.selector != nil {
 		dock = len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
 		if dock != m.selector.height(m.height-2) {
@@ -141,8 +141,8 @@ func TestLayout(t *testing.T) {
 			press(m, tea.KeyCtrlC)
 			typeText(m, "/")
 			assertFrame(t, m)
-			if len(m.completionItems()) != 5 {
-				t.Fatal("slash must show five supported commands")
+			if m.completionRows(len(m.completionItems())) != 5 {
+				t.Fatal("slash must show five command rows")
 			}
 			for _, kind := range []string{"model", "thinking", "resume"} {
 				m.openSelector(kind, "")

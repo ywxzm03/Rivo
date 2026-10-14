@@ -91,7 +91,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	defer func() {
 		a.agent.ReplaceMessages(a.session.BuildContext().Messages())
 		var commitErr *session.CommitError
-		if errors.As(result.Err, &commitErr) && a.pendingRequest == nil {
+		if errors.As(result.Err, &commitErr) && a.session.HasPending() && a.pendingRequest == nil {
 			copy := request
 			a.pendingRequest = &copy
 		}

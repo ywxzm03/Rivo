@@ -50,7 +50,7 @@ func (m *Model) layout() {
 		m.selector.input.Width = max(1, m.width-3)
 		dock = m.selector.height(max(1, m.height-2))
 	} else {
-		dock += len(m.completionItems())
+		dock += m.completionRows(len(m.completionItems()))
 	}
 	m.viewport.Width = m.width
 	m.viewport.Height = max(0, m.height-1-dock)
