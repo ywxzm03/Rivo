@@ -28,16 +28,6 @@ func blockingStreamServer(t *testing.T, clientGone chan<- struct{}) *httptest.Se
 	return server
 }
 
-// 收集事件直到 channel 关闭；返回收到的事件与 goroutine 退出确认
-func drainAbortEvents(t *testing.T, events <-chan llm.AssistantMessageEvent) []llm.AssistantMessageEvent {
-	t.Helper()
-	var collected []llm.AssistantMessageEvent
-	for event := range events {
-		collected = append(collected, event)
-	}
-	return collected
-}
-
 // 取消时正在阻塞读流：终止事件必须送达且标记 aborted，并携带已收到的 partial
 func TestStreamCancelDeliversAbortedErrorEvent(t *testing.T) {
 	clientGone := make(chan struct{})
@@ -54,8 +44,22 @@ func TestStreamCancelDeliversAbortedErrorEvent(t *testing.T) {
 
 	var gotDelta bool
 	done := make(chan []llm.AssistantMessageEvent, 1)
-	go func() { done <- drainAbortEvents(t, events) }()
-	time.Sleep(100 * time.Millisecond) // 等 delta 事件送达
+	deltaReceived := make(chan struct{})
+	go func() {
+		var collected []llm.AssistantMessageEvent
+		for event := range events {
+			collected = append(collected, event)
+			if _, ok := event.(llm.AssistantMessageTextDeltaEvent); ok {
+				close(deltaReceived)
+			}
+		}
+		done <- collected
+	}()
+	select {
+	case <-deltaReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not receive delta")
+	}
 	cancel()
 	got := <-done
 	clientGoneClosed := false
@@ -99,8 +103,10 @@ func TestStreamCancelDeliversAbortedErrorEvent(t *testing.T) {
 func TestStreamCancelBeforeConnectDeliversAborted(t *testing.T) {
 	var requests int
 	unblock := make(chan struct{})
+	requestStarted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		close(requestStarted)
 		<-unblock // 请求挂起，不返回
 	}))
 	// Go defer LIFO：后注册先执行，因此 close(unblock) 必须注册在 server.Close() 之后
@@ -121,11 +127,13 @@ func TestStreamCancelBeforeConnectDeliversAborted(t *testing.T) {
 		events, err := client.Stream(ctx, model, llm.Context{}, llm.Options{})
 		resultCh <- streamResult{events, err}
 	}()
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
 	var events <-chan llm.AssistantMessageEvent
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive request")
+	}
+	cancel()
 	select {
 	case result := <-resultCh:
 		if result.err != nil {
@@ -149,6 +157,35 @@ func TestStreamCancelBeforeConnectDeliversAborted(t *testing.T) {
 	}
 	if !gotError {
 		t.Fatal("cancelled stream must still deliver an error event with reason=aborted")
+	}
+}
+
+func TestStreamErrorPartialUsesErrorReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeSSE(w, `{"type":"response.created","response":{"id":"resp_error"}}`)
+		writeSSE(w, `{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"in_progress","content":[{"type":"output_text","text":""}]}}`)
+		writeSSE(w, `{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL+"/v1")
+	model := llm.Model{ID: "m", Provider: "deepseek", API: llm.APIOpenAIResponses}
+	events, err := client.Stream(context.Background(), model, llm.Context{}, llm.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal llm.AssistantMessageErrorEvent
+	for event := range events {
+		if current, ok := event.(llm.AssistantMessageErrorEvent); ok {
+			terminal = current
+		}
+	}
+	if terminal.Reason != llm.StopReasonError {
+		t.Fatalf("error reason=%q, want error", terminal.Reason)
+	}
+	if terminal.Partial == nil || terminal.Partial.StopReason != llm.StopReasonError {
+		t.Fatalf("partial=%+v, want error stop reason", terminal.Partial)
 	}
 }
 

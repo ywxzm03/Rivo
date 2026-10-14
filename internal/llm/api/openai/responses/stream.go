@@ -52,22 +52,27 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		defer stream.Close()
 		// abortPartial 返回终止时携带已收到内容的 partial；对齐 Pi 保留 abort 时的部分输出
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
-		abortPartial := func() *llm.AssistantMessage {
+		abortPartial := func(reason llm.StopReason) *llm.AssistantMessage {
 			snapshot := assistantMessageSnapshot(partial)
-			snapshot.StopReason = llm.StopReasonAborted
+			snapshot.StopReason = reason
 			return snapshot
 		}
 		// 终止事件用阻塞式发送保证必达；普通事件保留 select 以便取消时及时退出
 		abort := func(cause error) {
+			reason := classifyTerminalReason(ctx, cause)
 			sendTerminal(events, llm.AssistantMessageErrorEvent{
-				Reason:  classifyTerminalReason(ctx, cause),
+				Reason:  reason,
 				Err:     cause,
-				Partial: abortPartial(),
+				Partial: abortPartial(reason),
 			})
 		}
 		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: assistantMessageSnapshot(partial)}) {
 			// Start 事件被取消拦截时同样要送达终止事件；否则消费端只见通道关闭、无任何失败信息
-			abort(fmt.Errorf("openai: stream setup canceled: %w", context.Canceled))
+			cause := ctx.Err()
+			if cause == nil {
+				cause = context.Canceled
+			}
+			abort(fmt.Errorf("openai: stream setup canceled: %w", cause))
 			return
 		}
 		slots := map[outputSlotKey]outputSlot{}
