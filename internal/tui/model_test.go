@@ -20,6 +20,31 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestMarkdownRendererBoundsWidthAndRoleCache(t *testing.T) {
+	var renderer markdownRenderer
+	for _, width := range []int{40, 80, 120, 40, 100, 140, 160, 180} {
+		_ = renderer.render("**answer**", "assistant", width)
+		_ = renderer.render("thinking", "thinking", width)
+	}
+	if len(renderer.widths) > 4 || len(renderer.renderers) > 8 {
+		t.Fatalf("markdown renderer cache grew without bound: widths=%d renderers=%d", len(renderer.widths), len(renderer.renderers))
+	}
+}
+
+func TestAnimatedToolFramesReuseStaticMarkdownPreview(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.showAllTools = true
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "**result**", Status: ToolPending, StartedAt: time.Now()}}}
+	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
+	m.renderMessage(m.state.Messages[0])
+	first := len(m.markdownPreview)
+	m.renderMessage(m.state.Messages[0])
+	if len(m.markdownPreview) != first || first == 0 {
+		t.Fatalf("static tool markdown was reparsed: before=%d after=%d", first, len(m.markdownPreview))
+	}
+}
+
 func testState() Snapshot {
 	s := Snapshot{Cwd: "/project/Rivo", Branch: "feat(tui)/fullscreen-tui", Thinking: "high"}
 	for i := 0; i < 12; i++ {

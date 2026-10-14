@@ -105,6 +105,19 @@ func TestBackspaceDeletesMarker(t *testing.T) {
 	}
 }
 
+func TestBackspaceDeletesMarkerAfterMultibytePrefix(t *testing.T) {
+	m := testModel(80, 24)
+	pasteText(m, "中文前缀")
+	pasteText(m, strings.Repeat("line\n", 10)+"line")
+	press(m, tea.KeyBackspace)
+	if got := m.editor.Value(); got != "中文前缀" {
+		t.Fatalf("multibyte marker deletion = %q", got)
+	}
+	if len(m.pastes) != 0 {
+		t.Fatal("deleted marker remained registered")
+	}
+}
+
 func TestDeleteNoRenumber(t *testing.T) {
 	m := testModel(80, 24)
 	pasteText(m, strings.Repeat("a\n", 10)+"a")

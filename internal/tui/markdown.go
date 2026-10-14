@@ -12,7 +12,13 @@ import (
 // markdownRenderer 按当前宽度复用解析器，已完成消息的输出缓存在 Model 中
 type markdownRenderer struct {
 	width     int
-	renderers map[string]*glamour.TermRenderer
+	renderers map[markdownRendererKey]*glamour.TermRenderer
+	widths    []int
+}
+
+type markdownRendererKey struct {
+	width int
+	role  string
 }
 
 func primitive(color string) style.StylePrimitive { return style.StylePrimitive{Color: &color} }
@@ -71,17 +77,31 @@ func markdownStyle(role string) style.StyleConfig {
 
 func (r *markdownRenderer) render(text, role string, width int) string {
 	width = max(1, width)
-	if r.width != width || r.renderers == nil {
-		r.width, r.renderers = width, make(map[string]*glamour.TermRenderer)
+	if r.renderers == nil {
+		r.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
 	}
-	renderer := r.renderers[role]
+	if !containsInt(r.widths, width) {
+		r.widths = append(r.widths, width)
+		if len(r.widths) > 4 {
+			stale := r.widths[0]
+			r.widths = r.widths[1:]
+			for key := range r.renderers {
+				if key.width == stale {
+					delete(r.renderers, key)
+				}
+			}
+		}
+	}
+	r.width = width
+	key := markdownRendererKey{width: width, role: role}
+	renderer := r.renderers[key]
 	if renderer == nil {
 		var err error
 		renderer, err = glamour.NewTermRenderer(glamour.WithStyles(markdownStyle(role)), glamour.WithWordWrap(width), glamour.WithColorProfile(lipgloss.ColorProfile()))
 		if err != nil {
 			return colored(redColor, "Markdown: "+err.Error())
 		}
-		r.renderers[role] = renderer
+		r.renderers[key] = renderer
 	}
 	result, err := renderer.Render(text)
 	if err != nil {
@@ -89,6 +109,15 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	}
 	// 代码块也必须适配终端列宽，不能任由下层终端自动换行破坏高度分配
 	return ansi.Hardwrap(strings.Trim(result, "\n"), width, true)
+}
+
+func containsInt(values []int, value int) bool {
+	for _, current := range values {
+		if current == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) renderMessage(message Message) string {

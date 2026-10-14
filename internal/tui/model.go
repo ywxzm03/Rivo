@@ -143,6 +143,7 @@ type screenPoint struct{ x, y int }
 
 type cachedMessage struct {
 	message  Message
+	revision uint64
 	width    int
 	hidden   bool
 	allTools bool
@@ -172,6 +173,7 @@ type Model struct {
 	lastCtrlC        time.Time
 	flushPending     bool
 	cache            map[string]cachedMessage
+	markdownPreview  map[string]string
 	markdown         markdownRenderer
 	clock            func() time.Time
 	selectionAnchor  screenPoint
@@ -207,7 +209,7 @@ func New(state Snapshot, handlers Handlers) *Model {
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
 	m := &Model{handlers: handlers, editor: ed, viewport: viewport.New(0, 0),
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), clock: time.Now}
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), markdownPreview: make(map[string]string), clock: time.Now}
 	m.applySnapshot(state)
 	return m
 }
@@ -412,8 +414,8 @@ func (m *Model) refreshTranscript() {
 		if m.busy && message.ToolGroup != nil {
 			_, _, animate = groupState(message.ToolGroup)
 		}
-		if animate || cached.message != message || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
-			cached = cachedMessage{message: message, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
+		if animate || cached.revision != message.Revision || cached.message != message || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
+			cached = cachedMessage{message: message, revision: message.Revision, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
 			m.cache[message.ID] = cached
 		}
 		blocks = append(blocks, cached.view)
@@ -457,6 +459,8 @@ func (m *Model) replaceTail(tail MessageTail) {
 	start := 0
 	if index, ok := m.messageIndex[tail.AfterID]; ok {
 		start = index + 1
+	} else if tail.AfterID != "" {
+		return
 	}
 	for _, message := range m.state.Messages[start:] {
 		delete(m.messageIndex, message.ID)

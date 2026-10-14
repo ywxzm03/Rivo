@@ -303,5 +303,17 @@ func (m *Model) renderToolGroup(group *ToolGroupView, width int) string {
 		now = m.clock()
 	}
 	frame := strings.TrimSpace(m.spinner.View())
-	return renderToolGroupWithMarkdownFrame(group, width, m.showAllTools, now, frame, m.markdown.render)
+	render := func(value, role string, renderWidth int) string {
+		key := role + "\x00" + value + "\x00" + fmt.Sprint(renderWidth)
+		if cached, ok := m.markdownPreview[key]; ok {
+			return cached
+		}
+		result := m.markdown.render(value, role, renderWidth)
+		m.markdownPreview[key] = result
+		if len(m.markdownPreview) > 512 {
+			m.markdownPreview = make(map[string]string)
+		}
+		return result
+	}
+	return renderToolGroupWithMarkdownFrame(group, width, m.showAllTools, now, frame, render)
 }

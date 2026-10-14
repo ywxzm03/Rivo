@@ -99,7 +99,9 @@ func (m *Model) backspaceAtMarker() bool {
 	info := m.editor.LineInfo()
 	col := info.StartColumn + info.ColumnOffset
 	current := lines[lineIndex]
-	prefix := current[:min(col, len(current))]
+	runes := []rune(current)
+	col = min(col, len(runes))
+	prefix := string(runes[:col])
 	// 锚定 prefix 末尾：光标左侧必须是一个完整标记；group 1 是 id
 	loc := pasteTailMarkerRegexp.FindStringSubmatchIndex(prefix)
 	if loc == nil {

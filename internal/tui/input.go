@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bytes"
 	"io"
 	"regexp"
 	"strconv"
@@ -16,6 +15,70 @@ type terminalFile interface {
 }
 
 var sgrMouse = regexp.MustCompile(`\x1b?\[<([0-9]+);[0-9]+;[0-9]+[mM]`)
+
+// mouseReportEnd validates the numeric SGR mouse grammar and returns the byte
+// after a complete report. An incomplete numeric prefix is kept for the next
+// read; ordinary bracket text is reported as invalid and remains untouched.
+func mouseReportEnd(value string, payload int) (end int, complete, incomplete bool) {
+	start := payload
+	readNumber := func(index int) (int, bool, bool) {
+		begin := index
+		for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+			index++
+		}
+		if index == begin {
+			return index, false, index == len(value)
+		}
+		return index, true, false
+	}
+	var ok bool
+	if start >= len(value) {
+		return len(value), false, true
+	}
+	if start, ok, incomplete = readNumber(start); !ok {
+		return start, false, incomplete
+	}
+	if start >= len(value) {
+		return len(value), false, true
+	}
+	if value[start] != ';' {
+		return start, false, false
+	}
+	start++
+	if start, ok, incomplete = readNumber(start); !ok {
+		return start, false, incomplete
+	}
+	if start >= len(value) {
+		return len(value), false, true
+	}
+	if value[start] != ';' {
+		return start, false, false
+	}
+	start++
+	if start, ok, incomplete = readNumber(start); !ok {
+		return start, false, incomplete
+	}
+	if start >= len(value) {
+		return len(value), false, true
+	}
+	if value[start] != 'm' && value[start] != 'M' {
+		return start, false, false
+	}
+	return start + 1, true, false
+}
+
+func mouseCandidate(value string, index int) (payload int, prefix int, ok bool) {
+	switch {
+	case strings.HasPrefix(value[index:], "^[[<"):
+		return index + 4, 4, true
+	case strings.HasPrefix(value[index:], "M[<"):
+		return index + 3, 3, true
+	case strings.HasPrefix(value[index:], "[<") && (index == 0 || value[index-1] != '\x1b'):
+		return index + 2, 2, true
+	default:
+		return 0, 0, false
+	}
+}
 
 // NewInputReader removes malformed mouse reports before Bubble Tea turns them
 // into ordinary runes. Valid reports with the ESC prefix remain untouched.
@@ -84,24 +147,35 @@ func (r *inputReader) Close() error {
 }
 
 func stripMalformedMouse(data []byte) ([]byte, []byte) {
+	value := string(data)
 	var clean []byte
-	for i := 0; i < len(data); {
-		start := i
-		if bytes.HasPrefix(data[i:], []byte("M[<")) {
-			start += 1
-		} else if !bytes.HasPrefix(data[i:], []byte("[<")) || (i > 0 && data[i-1] == '\x1b') {
-			clean = append(clean, data[i])
+	for i := 0; i < len(value); {
+		if strings.HasPrefix(value[i:], "\x1b[200~") {
+			end := strings.Index(value[i+len("\x1b[200~"):], "\x1b[201~")
+			if end < 0 {
+				return clean, []byte(value[i:])
+			}
+			end += i + len("\x1b[200~") + len("\x1b[201~")
+			clean = append(clean, value[i:end]...)
+			i = end
+			continue
+		}
+		payload, prefix, ok := mouseCandidate(value, i)
+		if !ok {
+			clean = append(clean, value[i])
 			i++
 			continue
 		}
-		end := bytes.IndexAny(data[start:], "mM")
-		if end < 0 {
-			return clean, data[i:]
+		end, complete, incomplete := mouseReportEnd(value, payload)
+		if incomplete {
+			return clean, []byte(value[i:])
 		}
-		i = start + end + 1
-	}
-	if len(clean) > 0 && clean[len(clean)-1] == 'M' && !sgrMouse.Match(clean) {
-		return clean[:len(clean)-1], []byte{'M'}
+		if complete {
+			i = end
+			continue
+		}
+		clean = append(clean, value[i:i+prefix]...)
+		i += prefix
 	}
 	return clean, nil
 }
@@ -117,38 +191,45 @@ func filterMouseRunes(value string, pending *string) (string, bool) {
 	var clean strings.Builder
 	handled := hadPending
 	for i := 0; i < len(value); {
-		start := i
-		switch {
-		case strings.HasPrefix(value[i:], "^[[<"):
-			start += len("^[")
-		case strings.HasPrefix(value[i:], "M[<"):
-			start++
-		case strings.HasPrefix(value[i:], "[<"):
-		default:
+		payload, prefix, ok := mouseCandidate(value, i)
+		if !ok {
 			clean.WriteByte(value[i])
 			i++
 			continue
 		}
-		end := strings.IndexAny(value[start:], "mM")
-		if end < 0 {
+		// A real ESC-prefixed report is Bubble Tea's normal input. Leave it
+		// intact; the raw reader only removes reports lacking the escape byte.
+		if i > 0 && value[i-1] == '\x1b' {
+			clean.WriteString(value[i : i+prefix])
+			i += prefix
+			continue
+		}
+		end, complete, incomplete := mouseReportEnd(value, payload)
+		if incomplete {
 			if pending != nil {
 				*pending = value[i:]
 			}
 			return clean.String(), true
 		}
-		handled = true
-		i = start + end + 1
-	}
-	for _, prefix := range []string{"^[[", "M[", "["} {
-		if strings.HasSuffix(clean.String(), prefix) {
-			text := clean.String()
-			clean.Reset()
-			clean.WriteString(strings.TrimSuffix(text, prefix))
-			if pending != nil {
-				*pending = prefix
-			}
-			return clean.String(), true
+		if complete {
+			handled = true
+			i = end
+			continue
 		}
+		clean.WriteString(value[i : i+prefix])
+		i += prefix
+	}
+	for _, prefix := range []string{"^[", "^[[", "M[", "["} {
+		text := clean.String()
+		if !strings.HasSuffix(text, prefix) {
+			continue
+		}
+		clean.Reset()
+		clean.WriteString(strings.TrimSuffix(text, prefix))
+		if pending != nil {
+			*pending = prefix
+		}
+		return clean.String(), true
 	}
 	return clean.String(), handled
 }

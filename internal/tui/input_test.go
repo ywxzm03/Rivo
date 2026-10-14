@@ -66,3 +66,23 @@ func TestFilterMouseRunesPreservesOrdinaryBracketText(t *testing.T) {
 		t.Fatalf("ordinary bracket text = %q handled=%v pending=%q", clean, handled, pending)
 	}
 }
+
+func TestFilterMouseRunesPreservesMalformedNumericText(t *testing.T) {
+	var pending string
+	value := "[<tag>more] [<64;bad;23M"
+	clean, handled := filterMouseRunes(value, &pending)
+	if handled || clean != value || pending != "" {
+		t.Fatalf("malformed bracket text = %q handled=%v pending=%q", clean, handled, pending)
+	}
+}
+
+func TestInputReaderPreservesBracketedPaste(t *testing.T) {
+	value := "\x1b[200~[<64;94;23M\ntext\x1b[201~"
+	data, err := io.ReadAll(NewInputReader(strings.NewReader(value)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != value {
+		t.Fatalf("bracketed paste changed: %q", data)
+	}
+}
