@@ -25,9 +25,10 @@ type OperationRequest struct {
 }
 
 type OperationResult struct {
-	Reply *llm.AssistantMessage
-	Next  *App
-	Err   error
+	Replayed bool
+	Reply    *llm.AssistantMessage
+	Next     *App
+	Err      error
 }
 
 // Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
@@ -102,6 +103,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
+		result.Replayed = true
 		a.pendingRequest = nil
 		if previous != nil && *previous == request {
 			if request.Kind != OperationRun {

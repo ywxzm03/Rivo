@@ -74,6 +74,7 @@ type TurnDividerView struct {
 
 // Message 是显示投影；ID 在流式更新中保持稳定，压缩提示不冒充用户消息
 type Message struct {
+	Revision                 uint64
 	ID, Role, Text, Thinking string
 	Elapsed                  time.Duration
 	Aborted                  bool
@@ -92,7 +93,11 @@ type Snapshot struct {
 }
 
 // Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact
-type Request struct{ Kind, Value string }
+type Request struct {
+	Kind, Value string
+	AfterID     string
+	ID          uint64
+}
 
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
 type Handlers struct {
@@ -104,10 +109,24 @@ type Handlers struct {
 
 // MessageMsg 更新具有同一 ID 的消息；OperationDoneMsg 才结束整个用户操作
 type MessageMsg Message
+type MessageCommittedMsg struct {
+	PreviousID string
+	Message    Message
+}
+
 type StatusMsg string
+type MessageTail struct {
+	AfterID  string
+	Messages []Message
+}
+
 type OperationDoneMsg struct {
-	Snapshot *Snapshot
-	Err      error
+	Tail           *MessageTail
+	ID             uint64
+	RetainMessages bool
+	Changes        []Message
+	Snapshot       *Snapshot
+	Err            error
 }
 type flushMsg struct{}
 
@@ -132,6 +151,8 @@ type cachedMessage struct {
 
 // Model 独占全部显示状态，生命周期与消息定稿分离
 type Model struct {
+	messageIndex     map[string]int
+	operationID      uint64
 	state            Snapshot
 	handlers         Handlers
 	width, height    int
@@ -218,16 +239,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m, m.handleMouse(msg)
 	case MessageMsg:
-		// 1.同一消息原地更新，避免 MessageEnd 与操作结束各追加一次
-		found := false
-		for i := range m.state.Messages {
-			if m.state.Messages[i].ID == msg.ID {
-				m.state.Messages[i], found = Message(msg), true
-				break
-			}
+		m.upsertMessage(Message(msg))
+		if !m.flushPending {
+			m.flushPending = true
+			return m, tea.Tick(time.Second/60, func(time.Time) tea.Msg { return flushMsg{} })
 		}
-		if !found {
-			m.state.Messages = append(m.state.Messages, Message(msg))
+	case MessageCommittedMsg:
+		if index, ok := m.messageIndex[msg.PreviousID]; ok {
+			delete(m.messageIndex, msg.PreviousID)
+			m.messageIndex[msg.Message.ID] = index
+			m.state.Messages[index] = msg.Message
+			delete(m.cache, msg.PreviousID)
+		} else {
+			m.upsertMessage(msg.Message)
 		}
 		if !m.flushPending {
 			m.flushPending = true
@@ -239,9 +263,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StatusMsg:
 		m.status = string(msg)
 	case OperationDoneMsg:
+		if msg.ID != 0 && msg.ID != m.operationID {
+			return m, nil
+		}
 		m.busy, m.flushPending, m.status = false, false, ""
 		if msg.Snapshot != nil {
-			m.applySnapshot(*msg.Snapshot)
+			if msg.RetainMessages {
+				m.applyMetadata(*msg.Snapshot)
+			} else {
+				m.applySnapshot(*msg.Snapshot)
+			}
+		}
+		if msg.Tail != nil {
+			m.replaceTail(*msg.Tail)
+		}
+		for _, change := range msg.Changes {
+			m.upsertMessage(change)
 		}
 		if msg.Err != nil {
 			m.notice("Error: " + msg.Err.Error())
@@ -297,7 +334,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // applySnapshot 复制切片边界，预览/运行侧之后的赋值不会改动 UI
 func (m *Model) applySnapshot(s Snapshot) {
-	m.state = s
+	m.applyMetadata(s)
+	m.messageIndex = make(map[string]int, len(s.Messages))
+	for i, message := range s.Messages {
+		m.messageIndex[message.ID] = i
+	}
 	m.state.Messages = append([]Message(nil), s.Messages...)
 	for i := range m.state.Messages {
 		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
@@ -349,11 +390,12 @@ func (m *Model) dispatch(kind, value string) tea.Cmd {
 	if kind == "compact" {
 		m.status = "Compacting context…"
 	}
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{Kind: kind, Value: value}))
+	m.operationID++
+	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value}))
 }
 
 func (m *Model) notice(value string) {
-	m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprintf("notice-%d", len(m.state.Messages)), Role: "notice", Text: value})
+	m.upsertMessage(Message{ID: fmt.Sprintf("notice-%d", len(m.state.Messages)), Role: "notice", Text: value})
 	m.refreshTranscript()
 }
 
@@ -379,5 +421,48 @@ func (m *Model) refreshTranscript() {
 	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
 	if follow {
 		m.viewport.GotoBottom()
+	}
+}
+
+func (m *Model) upsertMessage(message Message) {
+	if index, ok := m.messageIndex[message.ID]; ok {
+		m.state.Messages[index] = message
+		return
+	}
+	m.messageIndex[message.ID] = len(m.state.Messages)
+	m.state.Messages = append(m.state.Messages, message)
+}
+
+// applyMetadata 更新操作结果的设置与目录，不复制未变化的 transcript
+func (m *Model) applyMetadata(s Snapshot) {
+	messages := m.state.Messages
+	m.state = s
+	m.state.Messages = messages
+	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
+	m.state.Models = append([]ModelOption(nil), s.Models...)
+	for i := range m.state.Models {
+		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
+	}
+}
+
+func (m *Model) lastMessageID() string {
+	if len(m.state.Messages) > 0 {
+		return m.state.Messages[len(m.state.Messages)-1].ID
+	}
+	return ""
+}
+
+// replaceTail 只替换当前操作产生的尾部，旧历史的身份与缓存保持不变
+func (m *Model) replaceTail(tail MessageTail) {
+	start := 0
+	if index, ok := m.messageIndex[tail.AfterID]; ok {
+		start = index + 1
+	}
+	for _, message := range m.state.Messages[start:] {
+		delete(m.messageIndex, message.ID)
+	}
+	m.state.Messages = m.state.Messages[:start]
+	for _, message := range tail.Messages {
+		m.upsertMessage(message)
 	}
 }

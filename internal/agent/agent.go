@@ -681,6 +681,15 @@ func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) er
 		var err error
 		ids, err = a.CommitMessages(messages)
 		if err != nil {
+			if notify {
+				for i, message := range messages {
+					if i < len(ids) && ids[i] != "" {
+						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
+							return errors.Join(err, eventErr)
+						}
+					}
+				}
+			}
 			return err
 		}
 	}

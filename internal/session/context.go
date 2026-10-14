@@ -5,40 +5,6 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// SessionContext 是供 TUI 快照投影使用的扁平会话上下文；压缩与 Agent 运行使用 BuildContext 返回的带来源视图
-type SessionContext struct {
-	Messages         []llm.Message
-	EntryIDs         []string
-	Provider         string
-	Model            string
-	ThinkingLevel    string
-	LastSummary      string
-	HasThinkingLevel bool
-	UsageStale       bool
-}
-
-// BuildSessionContext 将带来源上下文视图展开为旧版快照投影所需的一一对应消息与 entry ID
-func (m *SessionManager) BuildSessionContext() SessionContext {
-	view := m.BuildContext()
-	ctx := SessionContext{
-		Provider:         view.Provider,
-		Model:            view.Model,
-		ThinkingLevel:    view.ThinkingLevel,
-		HasThinkingLevel: view.HasThinkingLevel,
-		UsageStale:       view.UsageStale,
-	}
-	for _, entry := range view.Entries {
-		ctx.Messages = append(ctx.Messages, entry.Messages...)
-		for range entry.Messages {
-			ctx.EntryIDs = append(ctx.EntryIDs, entry.SourceID)
-		}
-		if entry.Kind == compact.ContextCompaction {
-			ctx.LastSummary = entry.Summary
-		}
-	}
-	return ctx
-}
-
 // BuildContext 从当前叶子沿父链回溯构建模型上下文视图：
 // 1.取活跃路径；2.应用最近的 compaction 替换历史；3.应用 context_edit 投影；4.生成带来源的上下文条目
 func (m *SessionManager) BuildContext() compact.ContextView {

@@ -104,7 +104,7 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 	if a.AutoCompactionEnabled() {
 		t.Error("auto compaction enabled for a model with unknown context window")
 	}
-	if ctx := a.SessionContext(); ctx.Provider != customModel.Provider || ctx.Model != customModel.ID {
+	if ctx := a.ContextView(); ctx.Provider != customModel.Provider || ctx.Model != customModel.ID {
 		t.Errorf("session model = %s/%s, want %s/%s", ctx.Provider, ctx.Model, customModel.Provider, customModel.ID)
 	}
 

@@ -195,6 +195,8 @@ type MessageEndEvent struct {
 	Message Message
 	// SourceID 由宿主提交边界提供，模型消息本身不携带显示身份
 	SourceID string
+	// Pending 区分尚未落盘的显示输出与成功提交的结束通知
+	Pending bool
 }
 
 func (MessageEndEvent) Type() string { return AgentEventMessageEnd }

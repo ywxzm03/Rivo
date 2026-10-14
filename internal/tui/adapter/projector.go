@@ -1,4 +1,4 @@
-package cli
+package adapter
 
 import (
 	"encoding/json"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -63,21 +64,19 @@ func toolCallView(call llm.ToolCall) tui.ToolCallView {
 	return tui.ToolCallView{ID: call.ID, Name: call.Name, Arguments: encodeToolArguments(call.Arguments), Status: tui.ToolPending}
 }
 
-func (r *tuiRuntime) groupAnchorLocked() (int, *tui.ToolGroupView) {
+func (r *Runtime) groupAnchorLocked() (int, *tui.ToolGroupView) {
 	if r.activeToolAnchorID == "" {
 		return -1, nil
 	}
-	for i := range r.messages {
-		if r.messages[i].ID == r.activeToolAnchorID {
-			return i, r.messages[i].ToolGroup
-		}
+	if index := r.messageIndexLocked(r.activeToolAnchorID); index >= 0 {
+		return index, r.messages[index].ToolGroup
 	}
+
 	return -1, nil
 }
 
-func (r *tuiRuntime) newToolGroupLocked() *tui.ToolGroupView {
-	r.toolGroupSequence++
-	return &tui.ToolGroupView{ID: fmt.Sprintf("tools-%d-%d", r.sequence, r.toolGroupSequence), Active: true}
+func (r *Runtime) newToolGroupLocked(anchorID string) *tui.ToolGroupView {
+	return &tui.ToolGroupView{ID: anchorID + "/tools", Active: true}
 }
 
 func cloneToolGroup(group *tui.ToolGroupView) *tui.ToolGroupView {
@@ -90,25 +89,26 @@ func cloneToolGroup(group *tui.ToolGroupView) *tui.ToolGroupView {
 	return &copy
 }
 
-func (r *tuiRuntime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
+func (r *Runtime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
 		return cloneToolGroup(current)
 	}
-	group := r.newToolGroupLocked()
+	group := r.newToolGroupLocked(anchorID)
 	r.activeToolAnchorID = anchorID
 	for _, message := range r.messages {
 		if message.ID == anchorID {
 			return group
 		}
 	}
-	r.messages = append(r.messages, tui.Message{ID: anchorID, Role: "assistant", ToolGroup: cloneToolGroup(group)})
+	r.upsertLocked(tui.Message{ID: anchorID, Role: "assistant", ToolGroup: cloneToolGroup(group)})
 	return group
 }
 
-func (r *tuiRuntime) setToolGroupLocked(group *tui.ToolGroupView) {
+func (r *Runtime) setToolGroupLocked(group *tui.ToolGroupView) {
 	index, _ := r.groupAnchorLocked()
 	if index >= 0 {
 		r.messages[index].ToolGroup = cloneToolGroup(group)
+		r.messages[index].Revision++
 	}
 }
 
@@ -121,14 +121,14 @@ func findToolCall(group *tui.ToolGroupView, id string) int {
 	return -1
 }
 
-func (r *tuiRuntime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.ThinkingBlockView, active bool) {
-	group.Thinking = append([]tui.ThinkingBlockView(nil), blocks...)
+func (r *Runtime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.ThinkingBlockView, active bool) {
+	group.Thinking = mergeThinking(group.Thinking, blocks, liveThinking)
 	for i := range group.Thinking {
 		group.Thinking[i].Active = active
 	}
 }
 
-func (r *tuiRuntime) sealToolGroupLocked() {
+func (r *Runtime) sealToolGroupLocked() {
 	index, current := r.groupAnchorLocked()
 	if index < 0 || current == nil {
 		return
@@ -144,10 +144,11 @@ func (r *tuiRuntime) sealToolGroupLocked() {
 	}
 	group.Active, group.Sealed = false, true
 	r.messages[index].ToolGroup = group
+	r.messages[index].Revision++
 	r.activeToolAnchorID = ""
 }
 
-func (r *tuiRuntime) toolStartLocked(event llm.ToolExecutionStartEvent) tui.Message {
+func (r *Runtime) toolStartLocked(event llm.ToolExecutionStartEvent) tui.Message {
 	if r.toolStarted == nil {
 		r.toolStarted = make(map[string]time.Time)
 	}
@@ -166,7 +167,7 @@ func (r *tuiRuntime) toolStartLocked(event llm.ToolExecutionStartEvent) tui.Mess
 	return r.messages[r.groupAnchorIndexLocked()]
 }
 
-func (r *tuiRuntime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Message {
+func (r *Runtime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Message {
 	group := r.ensureToolGroupLocked(r.currentAssistantID)
 	index := findToolCall(group, event.ToolCallID)
 	if index < 0 {
@@ -184,7 +185,7 @@ func (r *tuiRuntime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Me
 	return r.messages[r.groupAnchorIndexLocked()]
 }
 
-func (r *tuiRuntime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message {
+func (r *Runtime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message {
 	group := r.ensureToolGroupLocked(r.currentAssistantID)
 	index := findToolCall(group, event.ToolCallID)
 	if index < 0 {
@@ -207,7 +208,7 @@ func (r *tuiRuntime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message 
 	return r.messages[r.groupAnchorIndexLocked()]
 }
 
-func (r *tuiRuntime) groupAnchorIndexLocked() int {
+func (r *Runtime) groupAnchorIndexLocked() int {
 	index, _ := r.groupAnchorLocked()
 	if index >= 0 {
 		return index
@@ -215,7 +216,7 @@ func (r *tuiRuntime) groupAnchorIndexLocked() int {
 	return len(r.messages) - 1
 }
 
-func (r *tuiRuntime) addAssistantCallsLocked(group *tui.ToolGroupView, calls []llm.ToolCall) {
+func (r *Runtime) addAssistantCallsLocked(group *tui.ToolGroupView, calls []llm.ToolCall) {
 	for _, call := range calls {
 		if findToolCall(group, call.ID) >= 0 {
 			continue
@@ -224,7 +225,7 @@ func (r *tuiRuntime) addAssistantCallsLocked(group *tui.ToolGroupView, calls []l
 	}
 }
 
-func (r *tuiRuntime) liveAssistantLocked(message llm.AssistantMessage, id string, stream llm.AssistantMessageEvent) (tui.Message, bool) {
+func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, stream llm.AssistantMessageEvent) (tui.Message, bool) {
 	text, blocks, calls := assistantContent(message)
 	group := (*tui.ToolGroupView)(nil)
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
@@ -288,45 +289,46 @@ func (r *tuiRuntime) liveAssistantLocked(message llm.AssistantMessage, id string
 	return converted, converted.Text != "" || converted.ToolGroup != nil || converted.Thinking != ""
 }
 
-func (r *tuiRuntime) messageIndexLocked(id string) int {
-	for i := range r.messages {
-		if r.messages[i].ID == id {
-			return i
+func (r *Runtime) messageIndexLocked(id string) int {
+	if r.messageIndex == nil {
+		r.messageIndex = make(map[string]int, len(r.messages))
+		r.lastAssistantIndex = -1
+		r.hasToolGroup = false
+		for i, message := range r.messages {
+			r.messageIndex[message.ID] = i
+			if message.Role == "assistant" && message.Text != "" {
+				r.lastAssistantIndex = i
+			}
+			if message.ToolGroup != nil {
+				r.hasToolGroup = true
+			}
 		}
+	}
+	if index, ok := r.messageIndex[id]; ok {
+		return index
 	}
 	return -1
 }
 
-func (r *tuiRuntime) addDividerLocked() {
-	if r.turnStarted.IsZero() {
-		return
+func (r *Runtime) addDividerLocked() int {
+	r.messageIndexLocked("")
+	if r.turnStarted.IsZero() || !r.hasToolGroup || r.lastAssistantIndex < 0 {
+		return -1
 	}
 	elapsed := time.Since(r.turnStarted)
 	if elapsed < time.Second {
-		return
+		return -1
 	}
-	for i := len(r.messages) - 1; i >= 0; i-- {
-		if r.messages[i].Role != "assistant" || r.messages[i].Text == "" {
-			continue
-		}
-		if r.messages[i].ToolGroup == nil && i == 0 {
-			return
-		}
-		for j := 0; j < i; j++ {
-			if r.messages[j].ToolGroup != nil {
-				r.messages[i].Divider = &tui.TurnDividerView{Elapsed: elapsed}
-				return
-			}
-		}
-		return
-	}
+	index := r.lastAssistantIndex
+	r.messages[index].Divider = &tui.TurnDividerView{Elapsed: elapsed}
+	r.messages[index].Revision++
+	return index
 }
 
-func (r *tuiRuntime) projectSessionMessages(messages []llm.Message) []tui.Message {
-	projected := make([]tui.Message, 0, len(messages))
+func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
+	projected := make([]tui.Message, 0, len(view.Entries))
 	var group *tui.ToolGroupView
 	groupIndex := -1
-	groupSequence := 0
 	seal := func() {
 		if groupIndex >= 0 && group != nil {
 			copy := cloneToolGroup(group)
@@ -343,73 +345,90 @@ func (r *tuiRuntime) projectSessionMessages(messages []llm.Message) []tui.Messag
 		}
 		group, groupIndex = nil, -1
 	}
-	for index, message := range messages {
-		switch current := message.(type) {
-		case llm.UserMessage:
-			seal()
-			if text := textContent(current.Content); text != "" {
-				role := "user"
-				if strings.HasPrefix(text, "The conversation history before this point was compacted") {
-					role = "summary"
-				}
-				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: role, Text: text})
-			}
-		case llm.AssistantMessage:
-			if current.StopReason == llm.StopReasonError {
-				continue
-			}
-			aborted := current.StopReason == llm.StopReasonAborted
-			text, thinking, calls := assistantContent(current)
-			if len(calls) == 0 {
+	for _, entry := range view.Entries {
+		for _, message := range entry.Messages {
+			id := r.sourceID(entry.SourceID, "message")
+			switch current := message.(type) {
+			case llm.UserMessage:
 				seal()
-				if text != "" || len(thinking) > 0 || aborted {
-					converted := tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text, Aborted: aborted}
-					if len(thinking) > 0 {
-						converted.ToolGroup = &tui.ToolGroupView{ID: fmt.Sprintf("history-thinking-%d", index), Thinking: thinking, Sealed: true}
+				if text := textContent(current.Content); text != "" {
+					role := "user"
+					if entry.Kind == compaction.ContextCompaction {
+						id = r.sourceID(entry.SourceID, "summary")
+						role = "summary"
 					}
-					projected = append(projected, converted)
+					projected = append(projected, tui.Message{ID: id, Role: role, Text: text})
 				}
-				continue
-			}
-			if group == nil {
-				groupSequence++
-				group = &tui.ToolGroupView{ID: fmt.Sprintf("history-tools-%d", groupSequence)}
-				groupIndex = len(projected)
-				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-%d", index), Role: "assistant", Text: text, Aborted: aborted, ToolGroup: cloneToolGroup(group)})
-			} else {
-				projected[groupIndex].Text += text
-				if aborted {
-					projected[groupIndex].Aborted = true
+			case llm.AssistantMessage:
+				if current.StopReason == llm.StopReasonError {
+					continue
 				}
-			}
-			group.Thinking = append(group.Thinking, thinking...)
-			for _, call := range calls {
-				if findToolCall(group, call.ID) < 0 {
-					group.Calls = append(group.Calls, toolCallView(call))
+				aborted := current.StopReason == llm.StopReasonAborted
+				text, thinking, calls := assistantContent(current)
+				if len(calls) == 0 {
+					seal()
+					if text != "" || len(thinking) > 0 || aborted {
+						converted := tui.Message{ID: id, Role: "assistant", Text: text, Aborted: aborted}
+						if len(thinking) > 0 {
+							converted.ToolGroup = &tui.ToolGroupView{ID: id + "/tools", Thinking: thinking, Sealed: true}
+						}
+						projected = append(projected, converted)
+					}
+					continue
 				}
+				if group == nil {
+					group = &tui.ToolGroupView{ID: id + "/tools"}
+					groupIndex = len(projected)
+					projected = append(projected, tui.Message{ID: id, Role: "assistant", Text: text, Aborted: aborted, ToolGroup: cloneToolGroup(group)})
+				} else {
+					projected[groupIndex].Text += text
+					if aborted {
+						projected[groupIndex].Aborted = true
+					}
+				}
+				group.Thinking = mergeThinking(group.Thinking, thinking, replayThinking)
+				for _, call := range calls {
+					if findToolCall(group, call.ID) < 0 {
+						group.Calls = append(group.Calls, toolCallView(call))
+					}
+				}
+				projected[groupIndex].ToolGroup = cloneToolGroup(group)
+			case llm.ToolResultMessage:
+				if group == nil {
+					group = &tui.ToolGroupView{ID: id + "/tools"}
+					groupIndex = len(projected)
+					projected = append(projected, tui.Message{ID: id, Role: "assistant", ToolGroup: cloneToolGroup(group)})
+				}
+				toolIndex := findToolCall(group, current.ToolCallID)
+				if toolIndex < 0 {
+					group.Calls = append(group.Calls, tui.ToolCallView{ID: current.ToolCallID, Name: current.ToolName, Status: tui.ToolPending})
+					toolIndex = len(group.Calls) - 1
+				}
+				group.Calls[toolIndex].Name = current.ToolName
+				group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, Details: current.Details, IsError: current.IsError})
+				group.Calls[toolIndex].Status = tui.ToolSuccess
+				if current.IsError {
+					group.Calls[toolIndex].Status = tui.ToolError
+				}
+				projected[groupIndex].ToolGroup = cloneToolGroup(group)
 			}
-			projected[groupIndex].ToolGroup = cloneToolGroup(group)
-		case llm.ToolResultMessage:
-			if group == nil {
-				groupSequence++
-				group = &tui.ToolGroupView{ID: fmt.Sprintf("history-tools-%d", groupSequence)}
-				groupIndex = len(projected)
-				projected = append(projected, tui.Message{ID: fmt.Sprintf("history-tool-%d", index), Role: "assistant", ToolGroup: cloneToolGroup(group)})
-			}
-			toolIndex := findToolCall(group, current.ToolCallID)
-			if toolIndex < 0 {
-				group.Calls = append(group.Calls, tui.ToolCallView{ID: current.ToolCallID, Name: current.ToolName, Status: tui.ToolPending})
-				toolIndex = len(group.Calls) - 1
-			}
-			group.Calls[toolIndex].Name = current.ToolName
-			group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, Details: current.Details, IsError: current.IsError})
-			group.Calls[toolIndex].Status = tui.ToolSuccess
-			if current.IsError {
-				group.Calls[toolIndex].Status = tui.ToolError
-			}
-			projected[groupIndex].ToolGroup = cloneToolGroup(group)
 		}
 	}
 	seal()
 	return projected
+}
+
+// thinkingPolicy 显式保留实时更新与历史重放的显示差异
+type thinkingPolicy bool
+
+const (
+	liveThinking   thinkingPolicy = false
+	replayThinking thinkingPolicy = true
+)
+
+func mergeThinking(previous, next []tui.ThinkingBlockView, policy thinkingPolicy) []tui.ThinkingBlockView {
+	if policy == replayThinking {
+		return append(previous, next...)
+	}
+	return append([]tui.ThinkingBlockView(nil), next...)
 }

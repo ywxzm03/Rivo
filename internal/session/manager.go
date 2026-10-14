@@ -222,14 +222,12 @@ func (m *SessionManager) AppendMessages(messages []llm.Message) ([]string, error
 	for i, message := range messages {
 		entries[i] = &MessageEntry{Message: message}
 	}
-	if err := m.appendEntries(entries); err != nil {
-		return nil, err
-	}
+	err := m.appendEntries(entries)
 	ids := make([]string, len(entries))
 	for i, entry := range entries {
 		ids[i] = entry.base().ID
 	}
-	return ids, nil
+	return ids, err
 }
 
 // appendEntry 准备候选记录，写入失败时保留它供显式重试

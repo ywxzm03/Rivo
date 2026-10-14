@@ -1,17 +1,16 @@
-package cli
+package adapter
 
 import (
 	"testing"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 // 空 partial 的 aborted 消息必须无条件进入投影（对齐 Pi：abort 必有可见反馈）
 func TestAbortedEmptyPartialEntersProjection(t *testing.T) {
-	runtime := &tuiRuntime{
+	runtime := &Runtime{
 		sequence:           1,
 		currentAssistantID: "assistant-1",
 		toolStarted:        map[string]time.Time{},
@@ -25,9 +24,9 @@ func TestAbortedEmptyPartialEntersProjection(t *testing.T) {
 	// dispatch 收尾
 	var partial *tui.Message
 	partial = runtime.partialAssistantLocked()
-	runtime.replaceMessagesLocked(session.SessionContext{Messages: []llm.Message{
+	runtime.replaceMessagesLocked(testContext([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
-	}})
+	}))
 	if partial != nil && !runtime.hasMessageLocked(*partial) {
 		runtime.upsertLocked(*partial)
 	}
@@ -44,7 +43,7 @@ func TestAbortedEmptyPartialEntersProjection(t *testing.T) {
 
 // 带 ToolGroup 的 aborted 消息：工具组保留且带 Aborted 标记
 func TestAbortedWithToolGroupKeepsGroup(t *testing.T) {
-	runtime := &tuiRuntime{
+	runtime := &Runtime{
 		sequence:           1,
 		currentAssistantID: "assistant-1",
 		toolStarted:        map[string]time.Time{},
@@ -70,7 +69,7 @@ func TestAbortedWithToolGroupKeepsGroup(t *testing.T) {
 
 // partialAssistantLocked 必须能取回空内容的 aborted 消息
 func TestPartialAssistantReturnsAbortedEmpty(t *testing.T) {
-	runtime := &tuiRuntime{
+	runtime := &Runtime{
 		sequence:           1,
 		currentAssistantID: "assistant-1",
 		toolStarted:        map[string]time.Time{},
@@ -82,6 +81,6 @@ func TestPartialAssistantReturnsAbortedEmpty(t *testing.T) {
 }
 
 // handleEventForTest 直接调用私有 handleEvent（同包测试辅助）
-func (r *tuiRuntime) handleEventForTest(event llm.AgentEvent) {
+func (r *Runtime) handleEventForTest(event llm.AgentEvent) {
 	r.handleEvent(event)
 }

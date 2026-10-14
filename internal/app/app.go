@@ -215,13 +215,11 @@ func (a *App) Compact(ctx context.Context, instructions string) error {
 	return op.Wait().Err
 }
 
-// SessionContext 返回当前会话的显示/模型投影副本
-func (a *App) SessionContext() session.SessionContext {
-	proj := a.session.BuildSessionContext()
-	proj.Messages = append([]llm.Message(nil), proj.Messages...)
-	proj.EntryIDs = append([]string(nil), proj.EntryIDs...)
-	return proj
-}
+// ContextView 返回带来源的已提交会话投影
+func (a *App) ContextView() compaction.ContextView { return a.session.BuildContext() }
+
+// SessionID 返回显示身份使用的会话命名空间
+func (a *App) SessionID() string { return a.session.ID() }
 
 // CurrentModel 返回当前运行模型副本
 func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }

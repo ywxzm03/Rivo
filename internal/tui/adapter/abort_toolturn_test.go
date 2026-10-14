@@ -1,18 +1,17 @@
-package cli
+package adapter
 
 import (
 	"testing"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 // 复刻截图场景：turn1 toolUse（工具组）→ 工具批次中取消 → turn2 aborted（空）
 // 最终投影必须保留带 Aborted 标记的消息
 func TestAbortDuringToolTurnKeepsAbortedMarker(t *testing.T) {
-	runtime := &tuiRuntime{
+	runtime := &Runtime{
 		sequence:           1,
 		currentAssistantID: "assistant-1",
 		toolStarted:        map[string]time.Time{},
@@ -47,7 +46,7 @@ func TestAbortDuringToolTurnKeepsAbortedMarker(t *testing.T) {
 	// dispatch 收尾：会话投影包含全部已落盘消息（含 aborted assistant，E2E 已证实落盘）
 	var partial *tui.Message
 	partial = runtime.partialAssistantLocked()
-	runtime.replaceMessagesLocked(session.SessionContext{Messages: []llm.Message{
+	runtime.replaceMessagesLocked(testContext([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "分析一下当前项目"}}},
 		llm.AssistantMessage{
 			Content: []llm.Content{
@@ -60,7 +59,7 @@ func TestAbortDuringToolTurnKeepsAbortedMarker(t *testing.T) {
 			StopReason:   llm.StopReasonAborted,
 			ErrorMessage: "Operation aborted",
 		},
-	}})
+	}))
 	if partial != nil && !runtime.hasMessageLocked(*partial) {
 		runtime.upsertLocked(*partial)
 	}

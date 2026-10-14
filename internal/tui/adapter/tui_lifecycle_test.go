@@ -1,7 +1,8 @@
-package cli
+package adapter
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,13 +12,13 @@ import (
 )
 
 func TestTUISendDoesNotBlockCancellation(t *testing.T) {
-	useTestEnv(t)
+	setupAdapterEnv(t)
 	cfg, err := app.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sending, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	r := &tuiRuntime{send: func(tea.Msg) { close(sending); <-release }}
+	r := &Runtime{send: func(tea.Msg) { close(sending); <-release }}
 	a, err := app.NewWithSessionDir(cfg, t.TempDir(), r.handleEvent)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +45,7 @@ func TestTUISendDoesNotBlockCancellation(t *testing.T) {
 }
 
 func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
-	useTestEnv(t)
+	setupAdapterEnv(t)
 	cfg, err := app.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &tuiRuntime{app: a, cfg: cfg}
+	r := &Runtime{app: a, cfg: cfg}
 	cmd := r.request(tui.Request{Kind: "model", Value: "unknown/unknown"})
 	settled := make(chan struct{})
 	go func() { r.waitCurrent(); close(settled) }()
@@ -69,4 +70,13 @@ func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
 		t.Fatal("completion retained operation ownership", err)
 	}
 	a.Wait()
+}
+
+func setupAdapterEnv(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	t.Setenv("RIVO_AGENT_DIR", filepath.Join(root, "agent"))
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 }
