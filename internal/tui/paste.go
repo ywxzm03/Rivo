@@ -133,18 +133,17 @@ func (m *Model) backspaceAtMarker() bool {
 
 // runeOffsetAtWidth 把软换行片段的显示列换算成 rune 偏移
 func runeOffsetAtWidth(runes []rune, width int) int {
-	if width <= 0 {
+	if width < 0 {
 		return 0
 	}
-	used := 0
-	for i, r := range runes {
-		runeWidth := ansi.StringWidth(string(r))
-		if runeWidth > 0 && used+runeWidth > width {
+	for i := range runes {
+		used := ansi.StringWidth(string(runes[:i+1]))
+		if used > width {
 			return i
 		}
-		used += runeWidth
-		if used >= width {
-			return i + 1
+		// 继续吸收组合字符与连接符，避免在同一视觉字符内部停下
+		if used == width {
+			continue
 		}
 	}
 	return len(runes)
