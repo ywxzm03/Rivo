@@ -139,7 +139,7 @@ func (s *selector) height(budget int) int {
 	return min(budget, base+min(10, rows))
 }
 
-// view 小窗口省略空白与详情，始终为搜索、选择行和边框留出空间
+// view 小窗口省略空白与详情，优先保留标题、搜索框和边框
 func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
