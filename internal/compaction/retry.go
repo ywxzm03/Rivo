@@ -161,7 +161,7 @@ func validateSummary(message *llm.AssistantMessage) error {
 	case llm.StopReasonError:
 		return fmt.Errorf("compaction: summary generation failed")
 	case llm.StopReasonAborted:
-		return fmt.Errorf("compaction: summary request was aborted")
+		return fmt.Errorf("compaction: summary request was aborted: %w", context.Canceled)
 	case llm.StopReasonLength:
 		return fmt.Errorf("compaction: summary truncated by output length")
 	}
