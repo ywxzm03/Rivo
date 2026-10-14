@@ -54,6 +54,16 @@ func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordin
 	return &Coordinator{m: m, next: next}
 }
 
+// setModel 同步当前运行模型，恢复路径也能使用最新的输出上限
+func (c *Coordinator) setModel(model llm.Model) {
+	c.model = model
+}
+
+// resetRecovery 开始重放已提交操作时重新建立本轮恢复状态
+func (c *Coordinator) resetRecovery() {
+	c.resetRecovery()
+}
+
 // SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
 // 加锁与 preparePrompt 的读取互斥，避免并发路径（如 TUI 事件回调）下数据竞争
 func (c *Coordinator) SetPromptSections(sections prompt.Sections) {
@@ -114,7 +124,7 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 
 // PrepareRequest 返回会话投影快照，压缩失败不改写核心字段
 func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
-	c.model = current.Config.Model
+	c.setModel(current.Config.Model)
 	compacted, err := c.CompactIfNeeded(ctx)
 	if err != nil {
 		var commitErr *session.CommitError

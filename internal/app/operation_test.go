@@ -151,6 +151,27 @@ func TestThinkingCommitFailureKeepsRuntimeSetting(t *testing.T) {
 	}
 }
 
+func TestRetryPendingClearsRequestBeforeSettingsRestore(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("seed")); err != nil {
+		t.Fatal(err)
+	}
+	restore := blockSessionWrites(t, a)
+	if err := a.session.AppendModelChange(deepseek.ProviderID, "missing-model"); err == nil {
+		t.Fatal("want pending model change")
+	}
+	restore()
+	a.pendingRequest = &OperationRequest{Kind: OperationModel, Value: deepseek.ProviderID + "/missing-model"}
+
+	result := a.executeOperation(context.Background(), OperationRequest{Kind: OperationModel, Value: deepseek.ProviderID + "/missing-model"})
+	if result.Err == nil {
+		t.Fatal("want settings restore failure")
+	}
+	if a.pendingRequest != nil {
+		t.Fatalf("pendingRequest = %+v, want nil after successful pending retry", a.pendingRequest)
+	}
+}
+
 type trackedTool struct {
 	started chan struct{}
 	release chan struct{}

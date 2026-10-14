@@ -149,6 +149,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 
 	coord := NewCoordinator(sm, onEvent)
+	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
@@ -293,6 +294,7 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 		}
 	}
 	a.agent.AgentConfig.Model = model
+	a.coordinator.setModel(model)
 	a.agent.StreamFn = streamFn
 	for _, candidate := range a.agent.AgentContext.Tools {
 		if read, ok := candidate.(*tool.Read); ok {

@@ -100,11 +100,12 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		if result.Err = a.session.RetryPending(); result.Err != nil {
 			return result
 		}
+		a.pendingRequest = nil
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
 		result.Replayed = true
-		a.pendingRequest = nil
+		a.coordinator.resetRecovery()
 		if previous != nil && *previous == request {
 			if request.Kind != OperationRun {
 				return result
