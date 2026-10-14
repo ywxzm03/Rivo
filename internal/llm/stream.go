@@ -253,4 +253,5 @@ func (CompactionEndEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 
+// StreamFn 返回由生产者关闭的事件通道；关闭前释放底层连接，消费者取消后仍需排空通道
 type StreamFn func(ctx context.Context, model Model, c Context, opts Options) (<-chan AssistantMessageEvent, error)

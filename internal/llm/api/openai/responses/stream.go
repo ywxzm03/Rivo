@@ -59,7 +59,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		}
 		// 终止事件用阻塞式发送保证必达；普通事件保留 select 以便取消时及时退出
 		abort := func(cause error) {
-			sendTerminal(ctx, events, llm.AssistantMessageErrorEvent{
+			sendTerminal(events, llm.AssistantMessageErrorEvent{
 				Reason:  classifyTerminalReason(ctx, cause),
 				Err:     cause,
 				Partial: abortPartial(),
@@ -188,9 +188,8 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	return events, nil
 }
 
-// sendTerminal 向通道投递终止事件；消费端始终在 range 通道，阻塞发送保证必达，
-// 消除取消竞态（对齐 Pi 的 EventStream.push 无条件入队语义）
-func sendTerminal(ctx context.Context, events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) {
+// sendTerminal 保留终止 partial；消费端即使失败也排空通道，接收后生产者才能释放资源
+func sendTerminal(events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) {
 	events <- event
 }
 

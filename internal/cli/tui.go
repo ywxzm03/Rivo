@@ -25,11 +25,11 @@ import (
 type tuiRuntime struct {
 	mu sync.Mutex
 
-	app     *app.App
-	cfg     app.Config
-	program *tea.Program
-	cwd     string
-	branch  string
+	app    *app.App
+	cfg    app.Config
+	send   func(tea.Msg)
+	cwd    string
+	branch string
 
 	messages           []tui.Message
 	sequence           int
@@ -42,93 +42,92 @@ type tuiRuntime struct {
 	turnStarted        time.Time
 	turnRetrying       bool
 	cancel             context.CancelFunc
+	done               <-chan struct{}
 }
 
 func (r *tuiRuntime) setProgram(program *tea.Program) {
 	r.mu.Lock()
-	r.program = program
+	r.send = program.Send
 	r.mu.Unlock()
 }
 
-// request 在 tea.Cmd 中串行执行一次 app 操作；取消只取消当前 context，不等待 Agent 收尾
+// request 接受操作后立即启动后台工作，tea.Cmd 只等待完成结果
 func (r *tuiRuntime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
 	if r.cancel != nil {
 		r.mu.Unlock()
-		return nil
+		return func() tea.Msg { return tui.OperationDoneMsg{Err: errors.New("an operation is running")} }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
+	done := make(chan struct{})
+	r.done = done
 	activeApp := r.app
 	r.mu.Unlock()
-	return func() tea.Msg {
-		defer func() {
-			r.mu.Lock()
-			r.cancel = nil
-			r.mu.Unlock()
-		}()
-		var err error
-		var abortedReply *llm.AssistantMessage
-		switch req.Kind {
-		case "run":
-			r.mu.Lock()
-			r.sequence++
-			r.userID = fmt.Sprintf("user-%d", r.sequence)
-			r.currentAssistantID = ""
-			r.activeToolAnchorID = ""
-			r.assistantTurn, r.toolGroupSequence = 0, 0
-			r.toolStarted = make(map[string]time.Time)
-			r.turnStarted = time.Time{}
-			r.turnRetrying = false
-			r.mu.Unlock()
-			var reply *llm.AssistantMessage
-			reply, err = activeApp.Run(ctx, req.Value)
-			r.mu.Lock()
-			abortedReply = reply
-			r.mu.Unlock()
-		case "compact":
-			err = activeApp.Compact(ctx, req.Value)
-		case "model":
-			provider, model, _ := strings.Cut(req.Value, "/")
-			err = activeApp.SetModel(provider, model)
-		case "thinking":
-			err = activeApp.SetThinkingLevel(llm.ThinkingLevel(req.Value))
-		case "resume":
-			var next *app.App
-			next, err = app.Open(req.Value, r.cfg, r.handleEvent)
-			if err == nil {
-				r.mu.Lock()
-				r.app = next
-				r.messages = nil
-				r.replaceMessagesLocked(next.SessionContext())
-				r.mu.Unlock()
-			}
-		}
+	results := make(chan tea.Msg, 1)
+	go func() {
+		result := r.execute(ctx, activeApp, req)
+		cancel()
 		r.mu.Lock()
-		if r.app != nil {
-			var partial *tui.Message
-			if req.Kind == "run" {
-				partial = r.partialAssistantLocked()
-			}
-			r.replaceMessagesLocked(r.app.SessionContext())
-			if partial != nil && !r.hasMessageLocked(*partial) {
-				r.upsertLocked(*partial)
-			}
-		}
-		snapshot := r.snapshotLocked()
-		program := r.program
+		r.cancel, r.done = nil, nil
+		close(done)
 		r.mu.Unlock()
-		if program != nil {
-			// 取消判定以消息 stopReason 为准（agent 以事件收场，err 为 nil）；
-			// errors.Is 兜底覆盖未携带消息的取消路径
-			aborted := (abortedReply != nil && abortedReply.StopReason == llm.StopReasonAborted) || errors.Is(err, context.Canceled)
-			if aborted {
-				err = nil
-			}
-			program.Send(tui.OperationDoneMsg{Snapshot: &snapshot, Err: err})
+		results <- result
+	}()
+	return func() tea.Msg { return <-results }
+}
+
+// execute 运行操作并生成快照；完成通知由 tea.Cmd 返回，晚于活动句柄的清理
+func (r *tuiRuntime) execute(ctx context.Context, activeApp *app.App, req tui.Request) tea.Msg {
+	var err error
+	switch req.Kind {
+	case "run":
+		r.mu.Lock()
+		r.sequence++
+		r.userID = fmt.Sprintf("user-%d", r.sequence)
+		r.currentAssistantID = ""
+		r.activeToolAnchorID = ""
+		r.assistantTurn, r.toolGroupSequence = 0, 0
+		r.toolStarted = make(map[string]time.Time)
+		r.turnStarted = time.Time{}
+		r.turnRetrying = false
+		r.mu.Unlock()
+		_, err = activeApp.Run(ctx, req.Value)
+	case "compact":
+		err = activeApp.Compact(ctx, req.Value)
+	case "model":
+		provider, model, _ := strings.Cut(req.Value, "/")
+		err = activeApp.SetModel(provider, model)
+	case "thinking":
+		err = activeApp.SetThinkingLevel(llm.ThinkingLevel(req.Value))
+	case "resume":
+		var next *app.App
+		next, err = app.Open(req.Value, r.cfg, r.handleEvent)
+		if err == nil {
+			r.mu.Lock()
+			r.app = next
+			r.messages = nil
+			r.replaceMessagesLocked(next.SessionContext())
+			r.mu.Unlock()
 		}
-		return nil
 	}
+	r.mu.Lock()
+	if r.app != nil {
+		var partial *tui.Message
+		if req.Kind == "run" {
+			partial = r.partialAssistantLocked()
+		}
+		r.replaceMessagesLocked(r.app.SessionContext())
+		if partial != nil && !r.hasMessageLocked(*partial) {
+			r.upsertLocked(*partial)
+		}
+	}
+	snapshot := r.snapshotLocked()
+	r.mu.Unlock()
+	if errors.Is(err, context.Canceled) {
+		err = nil
+	}
+	return tui.OperationDoneMsg{Snapshot: &snapshot, Err: err}
 }
 
 func (r *tuiRuntime) cancelCurrent() {
@@ -140,15 +139,20 @@ func (r *tuiRuntime) cancelCurrent() {
 	}
 }
 
+// waitCurrent 等待已接受的操作收尾；在 Bubble Tea 恢复终端后调用
+func (r *tuiRuntime) waitCurrent() {
+	r.mu.Lock()
+	done := r.done
+	r.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 // handleEvent 只发送消息/状态事件；OperationDoneMsg 由请求命令在 app 返回后发送
 func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	// program 未挂载时只跳过发送；投影状态照常更新，保证启动早期事件不丢失
-	if r.program == nil {
-		r.projectEventLocked(event)
-		return nil
-	}
+	var notifications []tea.Msg
 	var message *tui.Message
 	var status string
 	previousToolAnchor := r.activeToolAnchorID
@@ -234,67 +238,32 @@ func (r *tuiRuntime) handleEvent(event llm.AgentEvent) error {
 	}
 	if message != nil {
 		r.upsertLocked(*message)
-		r.program.Send(tui.MessageMsg(*message))
+		notifications = append(notifications, tui.MessageMsg(*message))
 	}
 	if previousToolAnchor != "" && r.activeToolAnchorID == "" {
 		if index := r.messageIndexLocked(previousToolAnchor); index >= 0 {
-			r.program.Send(tui.MessageMsg(r.messages[index]))
+			notifications = append(notifications, tui.MessageMsg(r.messages[index]))
 		}
 	}
 	if _, ok := event.(llm.AgentEndEvent); ok {
 		for _, current := range r.messages {
 			if current.ToolGroup != nil || current.Divider != nil {
-				r.program.Send(tui.MessageMsg(current))
+				notifications = append(notifications, tui.MessageMsg(current))
 			}
 		}
 	}
 	if status != "" {
-		r.program.Send(tui.StatusMsg(status))
+		notifications = append(notifications, tui.StatusMsg(status))
+	}
+	send := r.send
+	r.mu.Unlock()
+	// 通知可以阻塞，发送时不持有投影或取消所需的锁
+	if send != nil {
+		for _, message := range notifications {
+			send(message)
+		}
 	}
 	return nil
-}
-
-// projectEventLocked program 未挂载时的最小投影：与 handleEvent 主体同步消息状态，不发送
-func (r *tuiRuntime) projectEventLocked(event llm.AgentEvent) {
-	switch event := event.(type) {
-	case llm.MessageStartEvent:
-		if _, ok := event.Message.(llm.AssistantMessage); ok {
-			r.assistantTurn++
-			r.currentAssistantID = fmt.Sprintf("assistant-%d-%d", r.sequence, r.assistantTurn)
-		}
-	case llm.MessageUpdateEvent:
-		if assistant, ok := event.Message.(llm.AssistantMessage); ok {
-			if converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, event.AssistantMessageEvent); ok {
-				r.upsertLocked(converted)
-			}
-		}
-	case llm.MessageEndEvent:
-		if assistant, ok := event.Message.(llm.AssistantMessage); ok && assistant.StopReason != llm.StopReasonError {
-			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
-			if !ok && assistant.StopReason == llm.StopReasonAborted {
-				converted = tui.Message{ID: r.currentAssistantID, Role: "assistant"}
-			}
-			if ok || assistant.StopReason == llm.StopReasonAborted {
-				converted.Aborted = assistant.StopReason == llm.StopReasonAborted
-				r.upsertLocked(converted)
-			}
-		}
-	case llm.AgentEndEvent:
-		r.sealToolGroupLocked()
-		if !event.WillRetry {
-			r.addDividerLocked()
-			r.turnStarted = time.Time{}
-		}
-	case llm.ToolExecutionStartEvent:
-		converted := r.toolStartLocked(event)
-		r.upsertLocked(converted)
-	case llm.ToolExecutionUpdateEvent:
-		converted := r.toolUpdateLocked(event)
-		r.upsertLocked(converted)
-	case llm.ToolExecutionEndEvent:
-		converted := r.toolEndLocked(event)
-		r.upsertLocked(converted)
-	}
 }
 
 func (r *tuiRuntime) upsertLocked(message tui.Message) {
@@ -472,6 +441,7 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	runtime.setProgram(program)
 	_, err = program.Run()
 	runtime.cancelCurrent()
+	runtime.waitCurrent()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 1

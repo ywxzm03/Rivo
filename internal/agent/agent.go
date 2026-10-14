@@ -151,9 +151,14 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 
 		var final *llm.AssistantMessage
 		var streamReason llm.StopReason
+		var eventErr error
 		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
 			for event := range events {
+				// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接并关闭
+				if eventErr != nil || streamErr != nil {
+					continue
+				}
 				switch ev := event.(type) {
 				case llm.AssistantMessageStartEvent:
 					if ev.Partial != nil {
@@ -171,8 +176,8 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 						Message:               cloneAssistantMessage(partial),
 						AssistantMessageEvent: ev,
 					}); err != nil {
+						eventErr = err
 						streamCancel()
-						return nil, err
 					}
 				case llm.AssistantMessageDoneEvent:
 					final = ev.Message
@@ -192,16 +197,17 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
 				}
-				if streamErr != nil {
-					break
-				}
 			}
 		}
+		streamCause := streamCtx.Err()
 		// 本轮流已结束（正常关闭或已中止），统一收尾
 		streamCancel()
+		if eventErr != nil {
+			return nil, eventErr
+		}
 		if streamErr == nil && final == nil {
 			// 流层静默关闭（防御路径）：取消时以 aborted 收场，其余按真实缺陷报告
-			if errors.Is(streamCtx.Err(), context.Canceled) || errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
+			if errors.Is(streamCause, context.Canceled) || errors.Is(streamCause, context.DeadlineExceeded) {
 				streamReason = llm.StopReasonAborted
 			} else {
 				streamErr = errors.New("agent: stream ended without a final message")
