@@ -172,6 +172,16 @@ func TestRetryPendingClearsRequestBeforeSettingsRestore(t *testing.T) {
 	}
 }
 
+func TestApplyModelSynchronizesCoordinatorModel(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.applyModel(deepseek.ProviderID, "deepseek-v4-pro", false); err != nil {
+		t.Fatal(err)
+	}
+	if a.coordinator.model.ID != "deepseek-v4-pro" {
+		t.Fatalf("coordinator model = %q, want deepseek-v4-pro", a.coordinator.model.ID)
+	}
+}
+
 type trackedTool struct {
 	started chan struct{}
 	release chan struct{}

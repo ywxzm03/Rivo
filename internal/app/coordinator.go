@@ -61,7 +61,7 @@ func (c *Coordinator) setModel(model llm.Model) {
 
 // resetRecovery 开始重放已提交操作时重新建立本轮恢复状态
 func (c *Coordinator) resetRecovery() {
-	c.resetRecovery()
+	c.pendingRecovery, c.recovered = false, false
 }
 
 // SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
@@ -142,7 +142,7 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
-	c.pendingRecovery, c.recovered = false, false
+	c.resetRecovery()
 	// 0.请求前对齐 system prompt，变更以补丁条目追加
 	if err := c.preparePrompt(); err != nil {
 		return nil, err
