@@ -15,6 +15,8 @@ var commands = []struct{ name, description string }{
 	{"thinking", "<level> — Set thinking level"},
 	{"resume", "Resume a previous session"},
 	{"rename", "<new Name> — Rename the current session"},
+	{"new", "Start a new session"},
+	{"reload", "Reload context files and skills"},
 	{"compact", "[instructions] — Compact the conversation"},
 	{"exit", "Exit Rivo"},
 }
@@ -268,6 +270,12 @@ func (m *Model) submit() tea.Cmd {
 			return nil
 		}
 		return m.dispatch("rename", arg)
+	case "/new", "/reload":
+		if arg != "" {
+			m.notice("Usage: " + name)
+			return nil
+		}
+		return m.dispatch(strings.TrimPrefix(name, "/"), "")
 	default:
 		m.notice("Unknown command: " + name)
 	}

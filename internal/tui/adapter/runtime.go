@@ -83,6 +83,13 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.app = result.Next
 			r.namespace = result.Next.SessionID()
 			r.messages = nil
+			if req.Kind == "new" {
+				r.operationEntries = nil
+				r.sequence, r.assistantTurn = 0, 0
+				r.userID = ""
+				r.toolStarted = nil
+				r.turnStarted, r.turnRetrying = time.Time{}, false
+			}
 		}
 		if reset {
 			r.replaceMessagesLocked(r.app.ContextView())
@@ -130,10 +137,17 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			result.Err = nil
 		}
 		var notice string
-		if req.Kind == "rename" && result.Err == nil {
-			notice = "Session renamed: " + snapshot.SessionName
+		if result.Err == nil {
+			switch req.Kind {
+			case "rename":
+				notice = "Session renamed: " + snapshot.SessionName
+			case "new":
+				notice = "New session started"
+			case "reload":
+				notice = "Reloaded context files and skills"
+			}
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, ResetSessionUI: req.Kind == "new" && result.Next != nil}
 	}
 }
 

@@ -93,7 +93,7 @@ type Snapshot struct {
 	Messages     []Message
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename
+// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename/new/reload
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -129,6 +129,7 @@ type OperationDoneMsg struct {
 	Snapshot       *Snapshot
 	Err            error
 	Notice         string
+	ResetSessionUI bool
 }
 type flushMsg struct{}
 
@@ -271,6 +272,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy, m.flushPending, m.status = false, false, ""
+		if msg.ResetSessionUI {
+			m.resetSessionUI()
+		}
 		if msg.Snapshot != nil {
 			if msg.RetainMessages {
 				m.applyMetadata(*msg.Snapshot)
@@ -403,6 +407,25 @@ func (m *Model) dispatch(kind, value string) tea.Cmd {
 func (m *Model) notice(value string) {
 	m.upsertMessage(Message{ID: fmt.Sprintf("notice-%d", len(m.state.Messages)), Role: "notice", Text: value})
 	m.refreshTranscript()
+}
+
+// resetSessionUI 仅在新会话切换成功后恢复编辑器与显示偏好的初始状态
+func (m *Model) resetSessionUI() {
+	m.editor.Reset()
+	m.resetPastes()
+	m.history, m.draft = nil, ""
+	m.historyPos, m.completion = 0, 0
+	m.completionHidden = true
+	m.selector = nil
+	m.editor.Focus()
+	m.hideThinking, m.showAllTools = false, false
+	m.clearSelection()
+	m.cache = make(map[string]cachedMessage)
+	m.markdownPreview = make(map[string]string)
+	m.copyNoticeSeq++
+	m.copyNotice = false
+	m.lastCtrlC = time.Time{}
+	m.viewport.GotoTop()
 }
 
 // refreshTranscript 仅重渲染内容/宽度/思考可见性发生变化的消息
