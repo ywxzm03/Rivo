@@ -118,6 +118,8 @@ func (AssistantMessageDoneEvent) Type() string           { return EventDone }
 func (AssistantMessageDoneEvent) assistantMessageEvent() {}
 
 type AssistantMessageErrorEvent struct {
+	// Reason 区分 aborted（用户取消）与 error（真实失败），对齐 Pi 的 error 事件 reason
+	Reason  StopReason
 	Err     error
 	Partial *AssistantMessage
 }
@@ -153,6 +155,7 @@ func (AgentStartEvent) agentEvent()  {}
 
 type AgentEndEvent struct {
 	Messages []Message
+	Err      error
 	// WillRetry 由编排层在转发时标注：本轮以可恢复的上下文溢出收场且即将续接重试
 	WillRetry bool
 }
@@ -190,6 +193,10 @@ func (MessageUpdateEvent) agentEvent()  {}
 
 type MessageEndEvent struct {
 	Message Message
+	// SourceID 由宿主提交边界提供，模型消息本身不携带显示身份
+	SourceID string
+	// Pending 区分尚未落盘的显示输出与成功提交的结束通知
+	Pending bool
 }
 
 func (MessageEndEvent) Type() string { return AgentEventMessageEnd }
@@ -251,4 +258,5 @@ func (CompactionEndEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 
+// StreamFn 返回由生产者关闭的事件通道；关闭前释放底层连接，消费者取消后仍需排空通道
 type StreamFn func(ctx context.Context, model Model, c Context, opts Options) (<-chan AssistantMessageEvent, error)

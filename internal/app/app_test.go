@@ -1,12 +1,15 @@
 package app
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 func TestNewAcceptsDefaultModel(t *testing.T) {
@@ -67,6 +70,55 @@ func TestNewRejectsUnknownProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no-such-provider") {
 		t.Errorf("New() error = %q, want it to name the provider id", err)
+	}
+}
+
+func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
+	customModel := llm.Model{ID: "custom-no-vision", Name: "Custom", Provider: "custom", API: llm.APIOpenAIResponses}
+	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
+	cfg.registry[customModel.Provider] = providerSpec{
+		id:     customModel.Provider,
+		apiKey: "test-key",
+		models: []llm.Model{customModel},
+		new: func(string, string) ([]llm.Model, llm.StreamFn) {
+			return []llm.Model{customModel}, func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+				return nil, nil
+			}
+		},
+	}
+	a, err := NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.SetModel(customModel.Provider, customModel.ID); err != nil {
+		t.Fatalf("SetModel(custom) error = %v", err)
+	}
+	if got := a.CurrentModel(); got.Provider != customModel.Provider || got.ID != customModel.ID {
+		t.Errorf("current model = %s/%s, want %s/%s", got.Provider, got.ID, customModel.Provider, customModel.ID)
+	}
+	read := a.agent.AgentContext.Tools[0].(*tool.Read)
+	if read.SupportsImages {
+		t.Error("read tool supports images after switching to a non-vision model")
+	}
+	if a.AutoCompactionEnabled() {
+		t.Error("auto compaction enabled for a model with unknown context window")
+	}
+	if ctx := a.ContextView(); ctx.Provider != customModel.Provider || ctx.Model != customModel.ID {
+		t.Errorf("session model = %s/%s, want %s/%s", ctx.Provider, ctx.Model, customModel.Provider, customModel.ID)
+	}
+
+	if err := a.SetModel(deepseek.ProviderID, "deepseek-v4.1-flash"); err != nil {
+		t.Fatalf("SetModel(deepseek) error = %v", err)
+	}
+	if !a.AutoCompactionEnabled() || !a.agent.AgentContext.Tools[0].(*tool.Read).SupportsImages {
+		t.Error("switching back to deepseek did not restore compaction/image capabilities")
+	}
+	if err := a.SetModel(customModel.Provider, "missing"); err == nil {
+		t.Fatal("SetModel(missing) error = nil, want validation error")
+	}
+	if got := a.CurrentModel(); got.Provider != deepseek.ProviderID || got.ID != "deepseek-v4.1-flash" {
+		t.Errorf("failed model switch changed current model to %s/%s", got.Provider, got.ID)
 	}
 }
 

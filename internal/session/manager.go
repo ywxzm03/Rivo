@@ -3,7 +3,9 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,7 @@ import (
 )
 
 // SessionManager 管理一个树形 JSONL 会话：entry 按文件序追加，leaf 指向当前分支位置，
-// 首条 user 或 assistant 消息触发落盘，之后逐行追加
+// 设置先写入隐藏草稿，首条对话消息发布 JSONL；持久化成功后才推进内存
 type SessionManager struct {
 	header      Header
 	entries     []Entry
@@ -21,7 +23,9 @@ type SessionManager struct {
 	flushed     bool
 	dir         string
 	sessionFile string
-	unwritten   Entry
+	pending     []Entry
+	// repairOffset 在追加回退失败时保留原长度，下次提交先修复再补写
+	repairOffset *int64
 	// needsNewline 表示会话文件末尾缺少换行（加载残行文件后为 true），追加前先补写
 	needsNewline bool
 }
@@ -73,7 +77,7 @@ func Open(path, cwd string) (*SessionManager, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		m := New(cwd, filepath.Dir(path))
 		m.sessionFile = path
-		// 空文件不含任何内容，移除后由 flush 独占创建，避免 O_EXCL 与残留空文件冲突
+		// 空文件不含任何内容，移除后再发布，避免残留空文件阻塞首次提交
 		_ = os.Remove(path)
 		return m, nil
 	}
@@ -176,6 +180,9 @@ func (m *SessionManager) AppendContextEdit(targetID string, replacement *Replace
 
 // Branch 只移动内存 leaf 到指定 entry，下一次追加形成新分支，不改写文件
 func (m *SessionManager) Branch(entryID string) error {
+	if m.HasPending() {
+		return &CommitError{Err: errors.New("session: retry pending submission before branching")}
+	}
 	if _, ok := m.byID[entryID]; !ok {
 		return fmt.Errorf("session: entry %s not found", entryID)
 	}
@@ -183,111 +190,192 @@ func (m *SessionManager) Branch(entryID string) error {
 	return nil
 }
 
-// appendEntry 填充 entry 的树结构字段，推进内存状态后按 flush 状态落盘
-func (m *SessionManager) appendEntry(e Entry) error {
-	base := e.base()
-	if base.Type == "" {
-		base.Type = entryTypeName(e)
+// CommitError 表示待提交记录未落盘，调用者必须停止模型与工具的后续推进
+type CommitError struct{ Err error }
+
+func (e *CommitError) Error() string { return e.Err.Error() }
+func (e *CommitError) Unwrap() error { return e.Err }
+
+// Path 返回发布后的会话路径；无对话时该路径尚不存在
+func (m *SessionManager) Path() string { return m.sessionFile }
+
+// ID 返回会话命名空间
+func (m *SessionManager) ID() string { return m.header.ID }
+
+// HasPending 表示存在尚未成功落盘的候选记录
+func (m *SessionManager) HasPending() bool { return len(m.pending) > 0 }
+
+// PendingMessages 返回待写批次的消息副本，宿主据此续接提交之后的工作
+func (m *SessionManager) PendingMessages() []llm.Message {
+	var messages []llm.Message
+	for _, e := range m.pending {
+		if message, ok := e.(*MessageEntry); ok {
+			messages = append(messages, message.Message)
+		}
 	}
-	if base.ID == "" {
-		base.ID = m.newEntryID()
-	}
-	if m.leafID != "" {
-		parent := m.leafID
-		base.ParentID = &parent
-	}
-	base.Timestamp = nowRFC3339()
-	// 1.内存先于落盘变更，失败不回滚
-	m.entries = append(m.entries, e)
-	m.byID[base.ID] = e
-	m.leafID = base.ID
-	// 2.未 flush 时检查是否已有对话消息，有则整体落盘
-	return m.persist(e)
+	return messages
 }
 
-// persist 按 flush 状态分流：未 flush 时检查触发条件，已 flush 时逐行追加
-func (m *SessionManager) persist(e Entry) error {
-	if !m.flushed {
-		if !hasConversation(m.entries) {
-			return nil
+// PendingContextEdit 返回待写批次中的上下文编辑；没有则返回 nil
+func (m *SessionManager) PendingContextEdit() *ContextEditEntry {
+	for _, e := range m.pending {
+		if edit, ok := e.(*ContextEditEntry); ok {
+			return edit
 		}
-		return m.flush()
 	}
-	// 3.上次追加失败的 entry 先原样重试
-	if m.unwritten != nil {
-		if err := m.appendLine(m.unwritten); err != nil {
+	return nil
+}
+
+// AppendMessages 整体提交一个消息批次，返回与消息顺序对应的稳定 entry ID
+func (m *SessionManager) AppendMessages(messages []llm.Message) ([]string, error) {
+	entries := make([]Entry, len(messages))
+	for i, message := range messages {
+		entries[i] = &MessageEntry{Message: message}
+	}
+	err := m.appendEntries(entries)
+	ids := make([]string, len(entries))
+	for i, entry := range entries {
+		ids[i] = entry.base().ID
+	}
+	return ids, err
+}
+
+// appendEntry 准备候选记录，写入失败时保留它供显式重试
+func (m *SessionManager) appendEntry(e Entry) error { return m.appendEntries([]Entry{e}) }
+
+func (m *SessionManager) appendEntries(entries []Entry) error {
+	if m.HasPending() {
+		return &CommitError{Err: errors.New("session: retry pending submission before appending")}
+	}
+	parent := m.leafID
+	for _, e := range entries {
+		base := e.base()
+		if base.Type == "" {
+			base.Type = entryTypeName(e)
+		}
+		if base.ID == "" {
+			base.ID = m.newEntryID()
+		}
+		if parent != "" {
+			id := parent
+			base.ParentID = &id
+		}
+		base.Timestamp = nowRFC3339()
+		parent = base.ID
+	}
+	m.pending = entries
+	return m.RetryPending()
+}
+
+// RetryPending 原样补写候选记录；成功前 entries、索引与 leaf 都保持原值
+func (m *SessionManager) RetryPending() error {
+	if !m.HasPending() {
+		return nil
+	}
+	if m.repairOffset != nil {
+		if err := os.Truncate(m.sessionFile, *m.repairOffset); err != nil {
+			return &CommitError{Err: err}
+		}
+		m.repairOffset = nil
+	}
+	if err := m.persist(m.pending); err != nil {
+		return &CommitError{Err: err}
+	}
+	for _, e := range m.pending {
+		m.entries = append(m.entries, e)
+		m.byID[e.base().ID] = e
+		m.leafID = e.base().ID
+	}
+	m.pending = nil
+	return nil
+}
+
+// persist 先编码整个批次，首次发布用完整临时文件，后续追加在失败时回退长度
+func (m *SessionManager) persist(entries []Entry) error {
+	if !m.flushed {
+		all := append(append([]Entry(nil), m.entries...), entries...)
+		var data bytes.Buffer
+		enc := json.NewEncoder(&data)
+		if err := enc.Encode(m.header); err != nil {
 			return err
 		}
-		m.unwritten = nil
-	}
-	if err := m.appendLine(e); err != nil {
-		m.unwritten = e
-		return err
-	}
-	return nil
-}
-
-// flush 独占创建会话文件并写入 header 与全部 entry；中途失败不清理不重写
-func (m *SessionManager) flush() error {
-	if err := os.MkdirAll(m.dir, 0o755); err != nil {
-		return fmt.Errorf("session: failed to create session directory: %w", err)
-	}
-	f, err := os.OpenFile(m.sessionFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("session: failed to create session file: %w", err)
-	}
-	defer f.Close()
-	// 1.写 header
-	headerLine, err := json.Marshal(m.header)
-	if err != nil {
-		return fmt.Errorf("session: failed to encode session header: %w", err)
-	}
-	if _, err := f.Write(append(headerLine, '\n')); err != nil {
-		return fmt.Errorf("session: failed to write session file: %w", err)
-	}
-	// 2.按文件序写 entry，每行一个 JSON 对象
-	for _, e := range m.entries {
-		line, err := json.Marshal(e)
+		for _, e := range all {
+			if err := enc.Encode(e); err != nil {
+				return fmt.Errorf("session: failed to encode entry: %w", err)
+			}
+		}
+		if err := os.MkdirAll(m.dir, 0o755); err != nil {
+			return fmt.Errorf("session: failed to create session directory: %w", err)
+		}
+		f, err := os.CreateTemp(m.dir, ".rivo-session-*")
 		if err != nil {
+			return err
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(data.Bytes()); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		draft := m.sessionFile + ".draft"
+		if !hasConversation(all) {
+			return os.Rename(f.Name(), draft)
+		}
+		// 同目录重命名发布完整文件，不依赖文件系统支持硬链接
+		if _, err := os.Lstat(m.sessionFile); err == nil {
+			return fmt.Errorf("session: failed to publish session file: %w", os.ErrExist)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("session: failed to inspect session path: %w", err)
+		}
+		if err := os.Rename(f.Name(), m.sessionFile); err != nil {
+			return fmt.Errorf("session: failed to publish session file: %w", err)
+		}
+		_ = os.Remove(draft)
+		m.flushed = true
+		return nil
+	}
+	var data bytes.Buffer
+	if m.needsNewline {
+		data.WriteByte('\n')
+	}
+	enc := json.NewEncoder(&data)
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
 			return fmt.Errorf("session: failed to encode entry: %w", err)
 		}
-		if _, err := f.Write(append(line, '\n')); err != nil {
-			return fmt.Errorf("session: failed to write session file: %w", err)
-		}
-	}
-	m.flushed = true
-	return nil
-}
-
-// appendLine 向已存在的会话文件追加一行；末尾缺换行时先补写，部分写失败回滚到追加前长度
-func (m *SessionManager) appendLine(e Entry) error {
-	line, err := json.Marshal(e)
-	if err != nil {
-		return fmt.Errorf("session: failed to encode entry: %w", err)
 	}
 	f, err := os.OpenFile(m.sessionFile, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("session: failed to open session file: %w", err)
 	}
-	defer f.Close()
-	// 1.记录追加前长度，用于部分写失败时回滚
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("session: failed to stat session file: %w", err)
+		_ = f.Close()
+		return err
 	}
-	// 2.末尾缺换行先补一个，防止新行与残行粘连成一行
-	buf := make([]byte, 0, len(line)+2)
-	if m.needsNewline {
-		buf = append(buf, '\n')
+	n, writeErr := f.Write(data.Bytes())
+	if writeErr == nil && n != data.Len() {
+		writeErr = io.ErrShortWrite
 	}
-	buf = append(buf, line...)
-	buf = append(buf, '\n')
-	if _, err := f.Write(buf); err != nil {
-		// 3.部分写失败回滚到追加前状态，缺换行标志保持不变，重试时整行重写
-		if rollbackErr := f.Truncate(info.Size()); rollbackErr != nil {
-			return fmt.Errorf("session: failed to write session file: %w; rollback failed: %v", err, rollbackErr)
+	if writeErr != nil {
+		rollbackErr := f.Truncate(info.Size())
+		if rollbackErr != nil {
+			offset := info.Size()
+			m.repairOffset = &offset
 		}
-		return fmt.Errorf("session: failed to write session file: %w", err)
+		_ = f.Close()
+		return fmt.Errorf("session: failed to append batch: %w", errors.Join(writeErr, rollbackErr))
+	}
+	if err := f.Close(); err != nil {
+		// Close 失败也不能发布内存，回退文件长度后允许同 ID 重试
+		rollbackErr := os.Truncate(m.sessionFile, info.Size())
+		if rollbackErr != nil {
+			offset := info.Size()
+			m.repairOffset = &offset
+		}
+		return errors.Join(err, rollbackErr)
 	}
 	m.needsNewline = false
 	return nil

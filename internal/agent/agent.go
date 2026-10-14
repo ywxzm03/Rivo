@@ -15,21 +15,21 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
-	// Coordinator 为压缩编排层回调：循环顶的阈值压缩与溢出通知经它交给编排层处理，
-	// Agent 自身不做压缩决策与持久化；nil 时禁用压缩
-	Coordinator CompactionCoordinator
+	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
+	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
+	// CommitMessages 在推进核心上下文前整体提交消息，返回稳定来源 ID
+	CommitMessages func([]llm.Message) ([]string, error)
 
 	runGuardOnce sync.Once
 	runGuard     chan struct{}
 }
 
-// CompactionCoordinator 由编排层实现（session 包），Agent 在轮次边界回调；
-// 持久化与投影重建都在编排层完成，Agent 用替换后的消息序列继续运行
-type CompactionCoordinator interface {
-	// CompactIfNeeded 评估会话投影的阈值与静默溢出，需要时压缩、重建并替换内存，返回是否发生了压缩
-	CompactIfNeeded(ctx context.Context) (compacted bool, err error)
-	// NotifyOverflow 通知编排层本轮以可恢复的上下文溢出收场（显式溢出错误或可恢复的长度截断）
-	NotifyOverflow()
+// PreparedRequest 是一次模型请求的配置与上下文快照
+// Compacted 表示来源结构已重建，运行汇总从新快照的末尾开始
+type PreparedRequest struct {
+	Context   llm.Context
+	Config    llm.AgentConfig
+	Compacted bool
 }
 
 func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
@@ -84,8 +84,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
 		return nil, err
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, userMessage)
-	if err := a.emit(llm.MessageEndEvent{Message: userMessage}); err != nil {
+	if err := a.commitMessages([]llm.Message{userMessage}); err != nil {
 		return nil, err
 	}
 
@@ -94,6 +93,11 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 
 // Continue 在不追加用户消息的情况下重入运行循环，供编排层在溢出恢复后重试该轮
 func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
+	return a.Resume(ctx, nil)
+}
+
+// Resume 续接已经提交的 assistant 或工具批次，已执行的工具不会再次运行
+func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	release, err := a.acquireRunGuard(ctx)
 	if err != nil {
 		return nil, err
@@ -108,6 +112,28 @@ func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
 	}
 	if err := a.emit(llm.TurnStartEvent{}); err != nil {
 		return nil, err
+	}
+	if committed != nil {
+		calls := assistantToolCalls(*committed)
+		if committed.StopReason == llm.StopReasonAborted || len(calls) == 0 || isRecoverableLength(*committed, a.AgentConfig.Model) {
+			if err := a.emit(llm.TurnEndEvent{Message: *committed}); err != nil {
+				return nil, err
+			}
+			if err := a.emitAgentEndWithMessages(firstMessageIndex, []llm.Message{*committed}); err != nil {
+				return nil, err
+			}
+			return committed, nil
+		}
+		results, err := a.executeToolBatch(ctx, calls)
+		if err != nil {
+			return nil, err
+		}
+		if err := a.emit(llm.TurnEndEvent{Message: *committed, ToolResults: results}); err != nil {
+			return nil, err
+		}
+		if err := a.emit(llm.TurnStartEvent{}); err != nil {
+			return nil, err
+		}
 	}
 	return a.runLoop(ctx, cancel, firstMessageIndex)
 }
@@ -125,17 +151,17 @@ func (a *Agent) AppendMessage(msg llm.Message) {
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
 func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int) (*llm.AssistantMessage, error) {
 	for {
-		// 1.压缩检查：由编排层在会话投影上评估并执行（静默溢出优先于阈值），压缩后内存已被替换；
-		// 压缩失败降级为失败事件，以原上下文继续运行，真实溢出由后续请求自然暴露
-		if a.Coordinator != nil {
-			compacted, err := a.Coordinator.CompactIfNeeded(ctx)
+		// 1.请求准备只返回快照；摘要失败的降级与存储失败的停止由宿主判断
+		if a.PrepareRequest != nil {
+			request, err := a.PrepareRequest(ctx, PreparedRequest{Context: a.AgentContext, Config: a.AgentConfig})
 			if err != nil {
-				// 中止（取消或超时）直接结束运行，带着失效的 ctx 继续没有意义
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil, err
+					return a.finishModelFailure(firstMessageIndex, llm.StopReasonAborted, err, nil)
 				}
-			} else if compacted {
-				// 压缩重排了消息，运行起点改记压缩后的上下文长度，保证 agent_end 汇总不越界
+				return nil, err
+			}
+			a.AgentContext, a.AgentConfig = request.Context, request.Config
+			if request.Compacted {
 				firstMessageIndex = len(a.AgentContext.Messages)
 			}
 		}
@@ -146,12 +172,19 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
 		streamCtx, streamCancel := context.WithCancel(ctx)
-		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, a.AgentContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
+		requestContext := contextForModel(a.AgentContext)
+		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
 
 		var final *llm.AssistantMessage
+		var streamReason llm.StopReason
+		var eventErr error
 		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
 			for event := range events {
+				// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接并关闭
+				if eventErr != nil || streamErr != nil {
+					continue
+				}
 				switch ev := event.(type) {
 				case llm.AssistantMessageStartEvent:
 					if ev.Partial != nil {
@@ -169,8 +202,8 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 						Message:               cloneAssistantMessage(partial),
 						AssistantMessageEvent: ev,
 					}); err != nil {
+						eventErr = err
 						streamCancel()
-						return nil, err
 					}
 				case llm.AssistantMessageDoneEvent:
 					final = ev.Message
@@ -179,49 +212,55 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					if streamErr == nil {
 						streamErr = errors.New("agent: model stream returned empty error")
 					}
+					// 流层区分取消与真实失败：aborted 走事件收场，error 保留错误上抛
+					streamReason = ev.Reason
+					if streamReason != llm.StopReasonAborted && streamReason != llm.StopReasonError {
+						streamReason = llm.StopReasonError
+					}
+					if ev.Partial != nil {
+						partial = cloneAssistantMessage(*ev.Partial)
+					}
 					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
 				}
-				if streamErr != nil {
-					break
-				}
 			}
 		}
+		streamCause := streamCtx.Err()
 		// 本轮流已结束（正常关闭或已中止），统一收尾
 		streamCancel()
-		if streamErr == nil && final == nil {
-			streamErr = errors.New("agent: stream ended without a final message")
+		if streamErr != nil && ctx.Err() != nil {
+			streamReason = llm.StopReasonAborted
 		}
-		if streamErr != nil {
-			// 可恢复的溢出：通知编排层驱动轮外恢复（它会标注 willRetry 并省略失败尝试），本轮按错误收场
-			if a.Coordinator != nil && llm.IsContextOverflow(streamErr) {
-				a.Coordinator.NotifyOverflow()
+		if eventErr != nil {
+			return nil, eventErr
+		}
+		if streamErr == nil && final == nil {
+			// 流层静默关闭（防御路径）：取消时以 aborted 收场，其余按真实缺陷报告
+			if errors.Is(streamCause, context.Canceled) || errors.Is(streamCause, context.DeadlineExceeded) {
+				streamReason = llm.StopReasonAborted
+			} else {
+				streamErr = errors.New("agent: stream ended without a final message")
 			}
-			return a.finishModelError(firstMessageIndex, streamErr)
+		}
+		if streamErr != nil || streamReason == llm.StopReasonAborted {
+			reason := streamReason
+			if reason != llm.StopReasonAborted {
+				reason = llm.StopReasonError
+			}
+			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
 		// 3.提交最终 assistant 消息，并检查是否需要执行工具
 		setAssistantMetadata(final, a.AgentConfig.Model)
-		a.AgentContext.Messages = append(a.AgentContext.Messages, *final)
-		if err := a.emit(llm.MessageEndEvent{Message: *final}); err != nil {
+		if err := a.commitMessages([]llm.Message{*final}); err != nil {
 			cancel()
 			return nil, err
 		}
 
-		var toolCalls []llm.ToolCall
-		for _, c := range final.Content {
-			tc, ok := c.(llm.ToolCall)
-			if !ok {
-				continue
-			}
-			toolCalls = append(toolCalls, tc)
-		}
+		toolCalls := assistantToolCalls(*final)
 		// 3.5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
 		// 正常提交本轮后通知编排层驱动溢出恢复；未启用编排层时按旧语义继续执行工具；
 		// 达到上限的截断是正常输出限制
-		if a.Coordinator != nil && isRecoverableLength(*final, a.AgentConfig.Model) {
-			if a.Coordinator != nil {
-				a.Coordinator.NotifyOverflow()
-			}
+		if a.PrepareRequest != nil && isRecoverableLength(*final, a.AgentConfig.Model) {
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
 				return nil, err
@@ -262,6 +301,19 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return nil, err
 		}
 	}
+}
+
+// contextForModel 过滤已经错误收尾的 assistant，避免取消/失败文本污染下一次请求
+func contextForModel(agentContext llm.Context) llm.Context {
+	messages := make([]llm.Message, 0, len(agentContext.Messages))
+	for _, message := range agentContext.Messages {
+		if assistant, ok := message.(llm.AssistantMessage); ok && (assistant.StopReason == llm.StopReasonError || assistant.StopReason == llm.StopReasonAborted) {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	agentContext.Messages = messages
+	return agentContext
 }
 
 // isRecoverableLength 输出在达到模型输出上限之前被截断，说明截断来自上下文耗尽而非输出上限；
@@ -385,25 +437,55 @@ func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
 	return true
 }
 
-// finishModelError 将模型流错误记录为 assistant 消息并结束本次运行
-func (a *Agent) finishModelError(firstMessageIndex int, err error) (*llm.AssistantMessage, error) {
+// finishModelFailure 将模型流终止记录为 assistant 消息并结束本次运行；
+// aborted 保留已收到的 partial 内容，error 记录错误文本（对齐 Pi 的 stopReason 语义）
+func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason, err error, partial *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	message := a.newAssistantMessage()
-	message.StopReason = llm.StopReasonError
-	message.Content = []llm.Content{llm.TextContent{Text: err.Error()}}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, message)
-	if emitErr := a.emit(llm.MessageEndEvent{Message: message}); emitErr != nil {
+	message.StopReason = reason
+	if reason == llm.StopReasonAborted {
+		// 取消属于用户操作而非故障：固定文案，保留已收到的 partial 内容
+		message.ErrorMessage = "Operation aborted"
+		if partial != nil && len(partial.Content) > 0 {
+			message.Content = append([]llm.Content(nil), partial.Content...)
+		} else {
+			message.Content = []llm.Content{llm.TextContent{Text: ""}}
+		}
+	} else {
+		message.ErrorMessage = err.Error()
+		message.Content = []llm.Content{llm.TextContent{Text: err.Error()}}
+	}
+	if emitErr := a.commitMessages([]llm.Message{message}); emitErr != nil {
 		return nil, emitErr
 	}
-	if emitErr := a.emitAgentEnd(firstMessageIndex); emitErr != nil {
+	if emitErr := a.emitAgentEnd(firstMessageIndex, err); emitErr != nil {
 		return nil, emitErr
+	}
+	if reason == llm.StopReasonAborted {
+		// 取消不是运行错误：事件收场后向调用方返回 nil 错误
+		return &message, nil
 	}
 	return &message, err
 }
 
 // emitAgentEnd 汇总本次运行新增的消息并发出 agent_end
-func (a *Agent) emitAgentEnd(firstMessageIndex int) error {
+func (a *Agent) emitAgentEnd(firstMessageIndex int, cause ...error) error {
 	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
-	return a.emit(llm.AgentEndEvent{Messages: messages})
+	return a.emitAgentEndMessages(messages, cause...)
+}
+
+// emitAgentEndWithMessages 在恢复路径补充已提交但不属于当前内存切片的消息
+func (a *Agent) emitAgentEndWithMessages(firstMessageIndex int, extra []llm.Message, cause ...error) error {
+	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
+	messages = append(messages, extra...)
+	return a.emitAgentEndMessages(messages, cause...)
+}
+
+func (a *Agent) emitAgentEndMessages(messages []llm.Message, cause ...error) error {
+	var err error
+	if len(cause) > 0 {
+		err = cause[0]
+	}
+	return a.emit(llm.AgentEndEvent{Messages: messages, Err: err})
 }
 
 // emit 同步调用事件消费者并包装其返回错误
@@ -450,21 +532,39 @@ func (a *Agent) executeToolBatch(ctx context.Context, calls []llm.ToolCall) ([]l
 
 func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall) ([]llm.ToolResultMessage, error) {
 	results := make([]llm.ToolResultMessage, 0, len(calls))
-	for _, call := range calls {
-		if err := a.emitToolStart(call); err != nil {
-			return nil, err
+	var eventErr error
+	completed := 0
+	for completed < len(calls) {
+		call := calls[completed]
+		if eventErr = a.emitToolStart(call); eventErr != nil {
+			break
 		}
-		result, isError := executeToolCall(ctx, a, call)
-		if err := a.emitToolEnd(call, result, isError); err != nil {
-			return nil, err
+		var result llm.ToolResult
+		var isError bool
+		if ctx.Err() != nil {
+			result, isError = abortedToolResult(), true
+		} else {
+			result, isError = executeToolCall(ctx, a, call)
 		}
-		message, err := a.appendToolResult(call, result, isError)
-		if err != nil {
-			return nil, err
+		results = append(results, toolResultMessage(call, result, isError))
+		completed++
+		if eventErr = a.emitToolEnd(call, result, isError); eventErr != nil {
+			break
 		}
-		results = append(results, message)
+		if isError && ctx.Err() != nil {
+			break
+		}
 	}
-	return results, nil
+	if completed < len(calls) {
+		// 中断后未启动的调用也要写入结果，保持 assistant tool call 与 result 一一对应
+		for _, call := range calls[completed:] {
+			results = append(results, toolResultMessage(call, abortedToolResult(), true))
+		}
+	}
+	if err := a.commitToolResults(results, eventErr == nil); err != nil {
+		return results, err
+	}
+	return results, eventErr
 }
 
 type toolCompletion struct {
@@ -489,7 +589,14 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 		wg.Add(1)
 		go func(index int, toolCall llm.ToolCall) {
 			defer wg.Done()
-			result, isError := executeToolCall(batchCtx, a, toolCall)
+			var result llm.ToolResult
+			var isError bool
+			if batchCtx.Err() != nil {
+				// 已取消：工具不再启动，以 aborted 结果收场（对齐 Pi 的启动前检查）
+				result, isError = abortedToolResult(), true
+			} else {
+				result, isError = executeToolCall(batchCtx, a, toolCall)
+			}
 			completed <- toolCompletion{index: index, result: result, isError: isError}
 		}(i, call)
 	}
@@ -508,29 +615,36 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 	}
 
 	wg.Wait()
-	if eventErr != nil {
-		return nil, eventErr
-	}
-
-	messages := make([]llm.ToolResultMessage, 0, len(calls))
+	messages := make([]llm.ToolResultMessage, len(calls))
 	for i, call := range calls {
-		message, err := a.appendToolResult(call, results[i].result, results[i].isError)
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		messages = append(messages, message)
+		messages[i] = toolResultMessage(call, results[i].result, results[i].isError)
 	}
-	return messages, nil
+	if err := a.commitToolResults(messages, eventErr == nil); err != nil {
+		return messages, err
+	}
+	return messages, eventErr
 }
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
-		result.Content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
+		if ctx.Err() != nil {
+			// 取消是用户操作：统一为固定文案，与 Pi 的 createErrorToolResult("Operation aborted") 一致
+			result.Content = []llm.Content{llm.TextContent{Text: "Operation aborted"}}
+		} else {
+			result.Content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
+		}
 		result.IsError = true
 	}
 	return result, result.IsError
+}
+
+// abortedToolResult 生成取消后未执行工具的结构化错误结果
+func abortedToolResult() llm.ToolResult {
+	return llm.ToolResult{
+		Content: []llm.Content{llm.TextContent{Text: "Operation aborted"}},
+		IsError: true,
+	}
 }
 
 func (a *Agent) emitToolStart(call llm.ToolCall) error {
@@ -550,21 +664,78 @@ func (a *Agent) emitToolEnd(call llm.ToolCall, result llm.ToolResult, isError bo
 	})
 }
 
-// appendToolResult 发出工具结果消息事件并追加到 Agent 上下文
-func (a *Agent) appendToolResult(call llm.ToolCall, result llm.ToolResult, isError bool) (llm.ToolResultMessage, error) {
-	message := llm.ToolResultMessage{
-		ToolCallID: call.ID,
-		ToolName:   call.Name,
-		Content:    result.Content,
-		Details:    result.Details,
-		IsError:    isError,
+// toolResultMessage 保留已执行工具的完整结果，提交失败也不重新执行工具
+func toolResultMessage(call llm.ToolCall, result llm.ToolResult, isError bool) llm.ToolResultMessage {
+	return llm.ToolResultMessage{ToolCallID: call.ID, ToolName: call.Name, Content: result.Content, Details: result.Details, IsError: isError}
+}
+
+func (a *Agent) commitToolResults(results []llm.ToolResultMessage, notify bool) error {
+	messages := make([]llm.Message, len(results))
+	for i, result := range results {
+		messages[i] = result
 	}
-	if err := a.emit(llm.MessageStartEvent{Message: message}); err != nil {
-		return llm.ToolResultMessage{}, err
+	var eventErr error
+	if notify {
+		for _, message := range messages {
+			if err := a.emit(llm.MessageStartEvent{Message: message}); err != nil {
+				eventErr = err
+				notify = false
+				break
+			}
+		}
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, message)
-	if err := a.emit(llm.MessageEndEvent{Message: message}); err != nil {
-		return message, err
+	return errors.Join(a.commitMessagesWithNotify(messages, notify), eventErr)
+}
+
+// commitMessages 先提交宿主记录，再发布核心上下文和带来源的结束通知
+func (a *Agent) commitMessages(messages []llm.Message) error {
+	return a.commitMessagesWithNotify(messages, true)
+}
+
+func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) error {
+	if len(messages) == 0 {
+		return nil
 	}
-	return message, nil
+	var ids []string
+	if a.CommitMessages != nil {
+		var err error
+		ids, err = a.CommitMessages(messages)
+		if err != nil {
+			if notify {
+				for i, message := range messages {
+					if i < len(ids) && ids[i] != "" {
+						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
+							return errors.Join(err, eventErr)
+						}
+					}
+				}
+			}
+			return err
+		}
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
+	if !notify {
+		return nil
+	}
+	for i, message := range messages {
+		var id string
+		if len(ids) > i {
+			id = ids[i]
+		}
+		if err := a.emit(llm.MessageEndEvent{Message: message, SourceID: id}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// assistantToolCalls 保留模型返回的工具调用顺序
+func assistantToolCalls(message llm.AssistantMessage) []llm.ToolCall {
+	var calls []llm.ToolCall
+	for _, content := range message.Content {
+		if call, ok := content.(llm.ToolCall); ok {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }

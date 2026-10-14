@@ -1,13 +1,15 @@
-package session
+package app
 
 import (
 	"context"
 	"errors"
 	"sync"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
+	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // Runner 是编排层驱动 Agent 所需的能力，由 *agent.Agent 实现
@@ -15,10 +17,6 @@ type Runner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
 	// Continue 在不追加用户消息的情况下重入运行循环
 	Continue(ctx context.Context) (*llm.AssistantMessage, error)
-	// ReplaceMessages 用投影消息替换 Agent 内存消息序列（Tools 不变）
-	ReplaceMessages(messages []llm.Message)
-	// AppendMessage 把服务端事件之外的消息压入 Agent 内存消息序列
-	AppendMessage(msg llm.Message)
 }
 
 // 压缩原因，随 compaction 事件暴露给消费者
@@ -31,7 +29,7 @@ const (
 // Coordinator 会话编排层：负责事件落盘、压缩编排与溢出恢复驱动。
 // 持久化与投影重建是直调，转发的事件退化为通知（对应 pi 的 AgentSession 角色）
 type Coordinator struct {
-	m    *SessionManager
+	m    *session.SessionManager
 	next llm.AgentEventSink
 
 	// Agent 为被编排的运行器，由装配层在创建后设置
@@ -40,18 +38,30 @@ type Coordinator struct {
 	Compactor *compaction.Compactor
 
 	// pendingRecovery 记录正在收场的运行是否以可恢复的溢出结束，用于标注 agent_end 的 WillRetry
+	model           llm.Model
 	pendingRecovery bool
 	// recovered 限制每次 Run 最多做一次溢出恢复
 	recovered bool
 	// promptSections 是当前基线分节，由装配层设置、Reload 时替换；请求前与重放结果 diff
 	promptSections prompt.Sections
-	// mu 串行化 Run 与手动 Compact，避免压缩与进行中的运行并发读写会话与内存
-	mu sync.Mutex
+	// mu 只保护基线分节；runMu 串行化编排，生命周期所有权由 App 管理
+	mu    sync.Mutex
+	runMu sync.Mutex
 }
 
 // NewCoordinator 创建编排层：next 为事件转发链（CLI 显示等）
-func NewCoordinator(m *SessionManager, next llm.AgentEventSink) *Coordinator {
+func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordinator {
 	return &Coordinator{m: m, next: next}
+}
+
+// setModel 同步当前运行模型，恢复路径也能使用最新的输出上限
+func (c *Coordinator) setModel(model llm.Model) {
+	c.model = model
+}
+
+// resetRecovery 开始重放已提交操作时重新建立本轮恢复状态
+func (c *Coordinator) resetRecovery() {
+	c.pendingRecovery, c.recovered = false, false
 }
 
 // SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
@@ -72,14 +82,15 @@ func (c *Coordinator) PromptSections() prompt.Sections {
 // preparePrompt 在进入 Agent 之前对齐 system prompt：把重放得到的当前分节与基线 diff，
 // 有差异时先落盘再压入内存；transcript 只增不改，无差异不产生任何条目
 func (c *Coordinator) preparePrompt() error {
-	if len(c.promptSections) == 0 {
+	sections := c.PromptSections()
+	if len(sections) == 0 {
 		return nil
 	}
 	var current prompt.Sections
 	if existing := llm.CurrentSystemMessage(c.m.BuildContext().Messages()); existing != nil {
 		current = existing.Sections
 	}
-	patch := prompt.DiffSections(current, c.promptSections)
+	patch := prompt.DiffSections(current, sections)
 	if patch == nil {
 		return nil
 	}
@@ -87,38 +98,61 @@ func (c *Coordinator) preparePrompt() error {
 	if err := c.m.AppendMessage(message); err != nil {
 		return err
 	}
-	c.Agent.AppendMessage(message)
 	return nil
 }
 
-// Handle 处理 agent 事件：转发在前（显示不依赖落盘成功，对齐 pi 的 _emit 顺序），
-// message_end 落盘在后，落盘失败返回错误以终止当前 Agent 调用
+// CommitMessages 是核心推进上下文前的持久化边界
+func (c *Coordinator) CommitMessages(messages []llm.Message) ([]string, error) {
+	return c.m.AppendMessages(messages)
+}
+
+// Handle 只转发运行通知；带 SourceID 的 message_end 已经成功落盘
 func (c *Coordinator) Handle(event llm.AgentEvent) error {
 	if end, ok := event.(llm.AgentEndEvent); ok {
-		end.WillRetry = c.pendingRecovery && !c.recovered && c.Compactor != nil
+		overflow := llm.IsContextOverflow(end.Err)
+		if len(end.Messages) > 0 {
+			if message, ok := end.Messages[len(end.Messages)-1].(llm.AssistantMessage); ok {
+				overflow = overflow || (message.StopReason == llm.StopReasonLength && c.model.MaxTokens > 0 && message.Usage.OutputTokens < c.model.MaxTokens)
+			}
+		}
+		c.pendingRecovery = overflow
+		end.WillRetry = overflow && !c.recovered && c.Compactor != nil
 		event = end
 	}
-	if err := c.emit(event); err != nil {
-		return err
-	}
-	if e, ok := event.(llm.MessageEndEvent); ok {
-		if err := c.m.AppendMessage(e.Message); err != nil {
-			return err
+	return c.emit(event)
+}
+
+// PrepareRequest 返回会话投影快照，压缩失败不改写核心字段
+func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
+	c.setModel(current.Config.Model)
+	compacted, err := c.CompactIfNeeded(ctx)
+	if err != nil {
+		var commitErr *session.CommitError
+		if errors.As(err, &commitErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return current, err
 		}
+		// 摘要生成失败保留原上下文；存储失败必须停止运行
 	}
-	return nil
+	current.Context.Messages = c.m.BuildContext().Messages()
+	current.Compacted = compacted
+	return current, nil
 }
 
 // Run 驱动一次运行；本轮以可恢复的溢出收场时，省略失败尝试、压缩后重试一次
 func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pendingRecovery, c.recovered = false, false
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	c.resetRecovery()
 	// 0.请求前对齐 system prompt，变更以补丁条目追加
 	if err := c.preparePrompt(); err != nil {
 		return nil, err
 	}
 	reply, runErr := c.Agent.Run(ctx, input)
+	return c.finishRun(ctx, reply, runErr)
+}
+
+// finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
+func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage, runErr error) (*llm.AssistantMessage, error) {
 	// 无压缩器时无法恢复（窗口未知等场景）：按原始错误收场，失败尝试保留在会话中
 	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
 		return reply, runErr
@@ -126,16 +160,12 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 	c.recovered = true
 	// 1.省略失败尝试：它必然是最后落盘的 entry，磁盘上保留、投影上排除；失败原因不吞掉
 	if oerr := c.omitLastAttempt(); oerr != nil {
-		if runErr == nil {
-			runErr = oerr
-		}
-		return reply, runErr
+		return reply, errors.Join(runErr, oerr)
 	}
-	// 2.省略后立即重建内存，保持内存与投影一致（失败尝试从内存消失）
-	c.Agent.ReplaceMessages(c.m.BuildContext().Messages())
 	// 3.压缩成功才重试该轮；失败按原始错误收场
 	if cerr := c.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
-		if runErr == nil {
+		var commitErr *session.CommitError
+		if runErr == nil || errors.As(cerr, &commitErr) {
 			runErr = cerr
 		}
 		return reply, runErr
@@ -144,15 +174,29 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 	return c.Agent.Continue(ctx)
 }
 
+// retryOverflowRecovery 在省略标记补写成功后继续完成同一轮溢出恢复
+func (c *Coordinator) retryOverflowRecovery(ctx context.Context, resume bool) (*llm.AssistantMessage, error) {
+	if !c.pendingRecovery || c.Compactor == nil {
+		return nil, nil
+	}
+	if err := c.compact(ctx, CompactionReasonOverflow, ""); err != nil {
+		return nil, err
+	}
+	c.pendingRecovery = false
+	if resume {
+		return c.Agent.Continue(ctx)
+	}
+	return nil, nil
+}
+
 // Compact 手动触发一次压缩，instructions 为聚焦指令；与 Run 互斥避免并发读写
 func (c *Coordinator) Compact(ctx context.Context, instructions string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
 	return c.compact(ctx, CompactionReasonManual, instructions)
 }
 
-// CompactIfNeeded 实现 agent.CompactionCoordinator：在会话投影上评估静默溢出与阈值，
-// 需要时压缩并替换内存；失败返回错误，Agent 对取消/超时中止、其余降级继续
+// CompactIfNeeded 在会话投影上评估静默溢出与阈值，提交成功才发布压缩点
 func (c *Coordinator) CompactIfNeeded(ctx context.Context) (bool, error) {
 	if c.Compactor == nil {
 		return false, nil
@@ -181,12 +225,7 @@ func (c *Coordinator) CompactIfNeeded(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// NotifyOverflow 实现 agent.CompactionCoordinator：记录正在收场的运行以可恢复溢出结束
-func (c *Coordinator) NotifyOverflow() {
-	c.pendingRecovery = true
-}
-
-// compact 执行一次压缩：1.投影上找切点并摘要；2.直调落盘压缩点；3.重建投影并替换内存。
+// compact 先计算候选摘要，成功落盘后才发布新投影
 // 落盘成功前内存不替换，失败时会话与内存保持一致
 func (c *Coordinator) compact(ctx context.Context, reason, instructions string) error {
 	if c.Compactor == nil {
@@ -208,11 +247,11 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 		usage = &result.Usage
 	}
 	if err := c.m.AppendCompaction(result.Summary, result.FirstKeptSourceID, tokensBefore, llm.CurrentSystemMessage(proj.Messages()), usage); err != nil {
+		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态
 	rebuilt := c.m.BuildContext()
-	c.Agent.ReplaceMessages(rebuilt.Messages())
 	_ = c.emit(llm.CompactionEndEvent{
 		Reason:           reason,
 		Summary:          result.Summary,

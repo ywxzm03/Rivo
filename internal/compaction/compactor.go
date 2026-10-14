@@ -155,25 +155,39 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 	}
 	opts := llm.Options{MaxTokens: c.summaryMaxTokens()}
 	produce := func() (string, llm.Usage, error) {
-		events, err := c.StreamFn(ctx, c.Model, modelCtx, opts)
+		streamCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		events, err := c.StreamFn(streamCtx, c.Model, modelCtx, opts)
 		if err != nil {
 			return "", llm.Usage{}, fmt.Errorf("compaction: summary call failed: %w", err)
 		}
 		var final *llm.AssistantMessage
 		var usage llm.Usage
+		var streamErr error
 		for event := range events {
+			if streamErr != nil {
+				continue
+			}
 			switch ev := event.(type) {
 			case llm.AssistantMessageDoneEvent:
 				if ev.Message != nil {
 					final, usage = ev.Message, ev.Message.Usage
 				}
 			case llm.AssistantMessageErrorEvent:
-				if ev.Err != nil {
+				if ev.Reason == llm.StopReasonAborted {
+					// 中止是终态：即使底层错误文本未包装 context.Canceled，也不得进入重试
+					streamErr = fmt.Errorf("compaction: summary call aborted: %w", context.Canceled)
+				} else if ev.Err != nil {
 					// 上游中断必须显式报错，避免流关闭后被误报成「摘要为空」
-					return "", usage, fmt.Errorf("compaction: summary call failed: %w", ev.Err)
+					streamErr = fmt.Errorf("compaction: summary call failed: %w", ev.Err)
+				} else {
+					streamErr = fmt.Errorf("compaction: summary call failed: model stream returned empty error")
 				}
-				return "", usage, fmt.Errorf("compaction: summary call failed: model stream returned empty error")
+				cancel()
 			}
+		}
+		if streamErr != nil {
+			return "", usage, streamErr
 		}
 		if final == nil {
 			return "", usage, fmt.Errorf("compaction: summary call failed: stream ended without a final message")

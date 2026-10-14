@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -270,8 +271,21 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return printMode(cfg, prompt, continueRecent, stdout, stderr)
 	}
-	// 已应用覆盖的 cfg 直接传给 repl，避免重复加载导致覆盖丢失、警告重复输出
+	// 终端交互使用全屏 TUI；管道/测试流保留逐行入口，避免把 ANSI 控制序列写入非终端输出
+	if terminalStreams(stdin, stdout) {
+		return runTUI(cfg, continueRecent, stdin.(*os.File), stdout.(*os.File), stderr)
+	}
+	// 非终端流继续使用逐行入口，保留脚本与既有测试的可组合性
 	return repl(cfg, continueRecent, stdin, stdout, stderr)
+}
+
+func terminalStreams(stdin io.Reader, stdout io.Writer) bool {
+	in, inOK := stdin.(*os.File)
+	out, outOK := stdout.(*os.File)
+	if !inOK || !outOK {
+		return false
+	}
+	return term.IsTerminal(in.Fd()) && term.IsTerminal(out.Fd())
 }
 
 // buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），
@@ -331,6 +345,15 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 		fmt.Fprintf(stderr, "Rivo: request %s\n", msg.StopReason)
 		return 1
 	}
+	if msg.StopReason == llm.StopReasonAborted {
+		// 取消不是故障：输出已收到的部分内容，退出码 130 对齐 Ctrl+C 惯例
+		for _, content := range msg.Content {
+			if text, ok := content.(llm.TextContent); ok && text.Text != "" {
+				fmt.Fprintln(stdout, text.Text)
+			}
+		}
+		return 130
+	}
 	for _, content := range msg.Content {
 		if text, ok := content.(llm.TextContent); ok {
 			fmt.Fprintln(stdout, text.Text)
@@ -372,21 +395,4 @@ func handleResume(reader *bufio.Reader, stdout, stderr io.Writer, listSessions f
 	return true
 }
 
-// relativeTime 把修改时间格式化为中文相对时间；未来时间与时钟回拨场景退回日期，超过一个月也退回日期
-func relativeTime(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < 0:
-		return t.Format("2006-01-02")
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	default:
-		return t.Format("2006-01-02")
-	}
-}
+func relativeTime(t time.Time) string { return session.RelativeTime(t) }

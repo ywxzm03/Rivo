@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -202,6 +203,49 @@ func TestCompactPropagatesStreamError(t *testing.T) {
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
 	if _, err := c.Compact(context.Background(), contextView(compactFixture()), ""); !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want boom", err)
+	}
+}
+
+func TestCompactDoesNotRetryAbortedSummary(t *testing.T) {
+	tests := []struct {
+		name  string
+		event llm.AssistantMessageEvent
+	}{
+		{name: "error", event: llm.AssistantMessageErrorEvent{
+			Reason: llm.StopReasonAborted,
+			Err:    errors.New("openai: stream ended before a terminal event"),
+		}},
+		{name: "done", event: llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+			Content:    []llm.Content{llm.TextContent{Text: "partial summary"}},
+			StopReason: llm.StopReasonAborted,
+		}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+				calls++
+				ch := make(chan llm.AssistantMessageEvent, 1)
+				ch <- tt.event
+				close(ch)
+				return ch, nil
+			}
+			c := &Compactor{
+				StreamFn: streamFn,
+				Config:   singleCallConfig(),
+				Retry:    RetryPolicy{Enabled: true, MaxRetries: 2, BaseDelay: time.Nanosecond, MaxDelay: time.Nanosecond},
+			}
+			result, err := c.Compact(context.Background(), contextView(compactFixture()), "")
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			if calls != 1 {
+				t.Fatalf("summary calls = %d, want 1", calls)
+			}
+			if result.Summary != "" {
+				t.Fatalf("aborted summary = %q, want empty", result.Summary)
+			}
+		})
 	}
 }
 

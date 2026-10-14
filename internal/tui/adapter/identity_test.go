@@ -1,0 +1,96 @@
+package adapter
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tui"
+)
+
+func TestRepeatedTextKeepsSourceMetadataAfterProjectionChanges(t *testing.T) {
+	r := &Runtime{namespace: "session"}
+	view := testContext([]llm.Message{
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "same"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "same"}}},
+	})
+	r.replaceMessagesLocked(view)
+	r.messages[0].Divider = &tui.TurnDividerView{Elapsed: 2 * time.Second}
+	r.messages[1].Divider = &tui.TurnDividerView{Elapsed: 5 * time.Second}
+	id := r.messages[1].ID
+	view.Entries = view.Entries[1:]
+	r.replaceMessagesLocked(view)
+	if len(r.messages) != 1 || r.messages[0].ID != id || r.messages[0].Divider.Elapsed != 5*time.Second {
+		t.Fatalf("source metadata drifted: %+v", r.messages)
+	}
+}
+
+func TestMessageEndBindsLiveIdentityToCommittedSource(t *testing.T) {
+	var sent []tea.Msg
+	r := &Runtime{namespace: "session", userID: "session/live/1/user", send: func(msg tea.Msg) { sent = append(sent, msg) }}
+	message := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "same"}}}
+	_ = r.handleEvent(llm.MessageStartEvent{Message: message})
+	_ = r.handleEvent(llm.MessageEndEvent{Message: message, SourceID: "entry-a"})
+	if len(r.messages) != 1 || r.messages[0].ID != "session/entry/entry-a/message" {
+		t.Fatalf("live source binding = %+v", r.messages)
+	}
+	if msg, ok := sent[len(sent)-1].(tui.MessageCommittedMsg); !ok || msg.PreviousID != "session/live/1/user" {
+		t.Fatalf("identity notification = %+v", sent)
+	}
+}
+
+func TestSummaryRoleUsesContextKindAndSessionNamespace(t *testing.T) {
+	text := "The conversation history before this point was compacted into a summary."
+	view := testContext([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}})
+	one, two := &Runtime{namespace: "one"}, &Runtime{namespace: "two"}
+	if one.projectContext(view)[0].Role != "user" {
+		t.Fatal("ordinary text was mistaken for a summary")
+	}
+	view.Entries[0].Kind = compaction.ContextCompaction
+	if one.projectContext(view)[0].Role != "summary" || one.projectContext(view)[0].ID == two.projectContext(view)[0].ID {
+		t.Fatal("summary kind or session namespace was lost")
+	}
+}
+
+func TestAgentEndSendsOnlyChangedBlocksWithLongHistory(t *testing.T) {
+	var sent []tea.Msg
+	r := &Runtime{turnStarted: time.Now().Add(-2 * time.Second), send: func(msg tea.Msg) { sent = append(sent, msg) }}
+	for i := 0; i < 10000; i++ {
+		r.upsertLocked(tui.Message{ID: fmt.Sprint(i), Role: "assistant", ToolGroup: &tui.ToolGroupView{Sealed: true}})
+	}
+	r.upsertLocked(tui.Message{ID: "final", Role: "assistant", Text: "answer"})
+	_ = r.handleEvent(llm.AgentEndEvent{})
+	if len(sent) != 1 {
+		t.Fatalf("completion sent %d history blocks, want one changed divider", len(sent))
+	}
+}
+
+func TestSnapshotIncludesAllConfiguredModels(t *testing.T) {
+	setupAdapterEnv(t)
+	cfg, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runtime{app: a, cfg: cfg, cwd: t.TempDir()}
+	snapshot := r.snapshotLocked(false)
+	if len(snapshot.Models) != len(cfg.AvailableModels()) {
+		t.Fatalf("snapshot models = %d, want %d", len(snapshot.Models), len(cfg.AvailableModels()))
+	}
+	got := make(map[string]bool, len(snapshot.Models))
+	for _, model := range snapshot.Models {
+		got[model.Key()] = true
+	}
+	for _, model := range cfg.AvailableModels() {
+		if !got[model.Provider+"/"+model.ID] {
+			t.Fatalf("snapshot omitted configured model %s/%s", model.Provider, model.ID)
+		}
+	}
+}

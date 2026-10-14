@@ -1,4 +1,4 @@
-package session
+package app
 
 import (
 	"context"
@@ -7,12 +7,13 @@ import (
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
+	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // TestPreparePromptDeclaresOnFirstRequest 首轮请求前重放为空，追加一条含全部分节的声明
 func TestPreparePromptDeclaresOnFirstRequest(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -35,15 +36,12 @@ func TestPreparePromptDeclaresOnFirstRequest(t *testing.T) {
 	if msg.Sections["preamble"] != "base" || msg.Sections["cwd"] != "/work" {
 		t.Errorf("sections = %v, want full baseline", msg.Sections)
 	}
-	if len(runner.appended) != 1 {
-		t.Fatalf("appended = %d, want 1", len(runner.appended))
-	}
 }
 
 // TestPreparePromptNoChangeNoMessage 无差异时不产生任何条目
 func TestPreparePromptNoChangeNoMessage(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -61,15 +59,12 @@ func TestPreparePromptNoChangeNoMessage(t *testing.T) {
 	if len(ctx.Messages()) != 1 {
 		t.Fatalf("messages = %d, want still 1 after no-op", len(ctx.Messages()))
 	}
-	if len(runner.appended) != 1 {
-		t.Fatalf("appended = %d, want 1", len(runner.appended))
-	}
 }
 
 // TestPreparePromptEmitsPatchForChangedSection 分节变化时只追加发生变化的那一节
 func TestPreparePromptEmitsPatchForChangedSection(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -106,7 +101,7 @@ func TestPreparePromptEmitsPatchForChangedSection(t *testing.T) {
 // TestPreparePromptEmitsRemovalWhenSectionDisappears instructions 消失时追加空串表示删除
 func TestPreparePromptEmitsRemovalWhenSectionDisappears(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -137,7 +132,7 @@ func TestPreparePromptEmitsRemovalWhenSectionDisappears(t *testing.T) {
 // TestPreparePromptRunsBeforeAgentRun Run 进入 Agent 之前先对齐 prompt
 func TestPreparePromptRunsBeforeAgentRun(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -146,15 +141,12 @@ func TestPreparePromptRunsBeforeAgentRun(t *testing.T) {
 	if _, err := coord.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.appended) != 1 {
-		t.Fatalf("appended = %d, want declaration before Run", len(runner.appended))
-	}
 }
 
 // TestPreparePromptDisabledWithoutBaseline 未设置基线分节时不产生条目
 func TestPreparePromptDisabledWithoutBaseline(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner
@@ -174,7 +166,7 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 	summaryStreamFn := countingStreamFn(&summaryCalls,
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
 	)
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	coord.Compactor = &compaction.Compactor{
 		StreamFn: summaryStreamFn,
@@ -194,7 +186,7 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "a1"}}},
 		textMsg("u2"),
 	} {
-		if err := coord.Handle(llm.MessageEndEvent{Message: msg}); err != nil {
+		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -217,7 +209,7 @@ func TestCompactionSnapshotTakenFromProjection(t *testing.T) {
 // preparePrompt 由 Run 持锁调用，因此经 Run 走真实路径
 func TestSetPromptSectionsConcurrentWithRun(t *testing.T) {
 	dir := t.TempDir()
-	sm := New("/project", dir)
+	sm := session.New("/project", dir)
 	coord := NewCoordinator(sm, nil)
 	runner := &fakeRunner{}
 	coord.Agent = runner

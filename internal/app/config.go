@@ -22,6 +22,21 @@ type Config struct {
 	registry map[string]providerSpec
 }
 
+// AvailableModels 返回已配置 provider 的模型目录快照，顺序稳定且不暴露凭据
+func (c Config) AvailableModels() []llm.Model {
+	var models []llm.Model
+	for _, spec := range c.registry {
+		models = append(models, spec.models...)
+	}
+	slices.SortFunc(models, func(a, b llm.Model) int {
+		if a.Provider != b.Provider {
+			return strings.Compare(a.Provider, b.Provider)
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return models
+}
+
 // Load 从 agent dir 的 settings.json 与 models.json 解析运行配置：
 // 1.构建注册表（内置 openai/deepseek + models.json 自定义，同名时自定义覆盖内置）
 // 2.按三级链解析默认模型：settings 成对指定 → 内置默认 deepseek → 首个有凭据的 provider

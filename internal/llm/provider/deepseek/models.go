@@ -8,6 +8,7 @@ const DefaultModel = "deepseek-flash"
 func builtinModels() []llm.Model {
 	return []llm.Model{
 		{ID: DefaultModel, Name: DefaultModel, Provider: ProviderID, API: llm.APIOpenAIResponses, SupportsImages: true, Reasoning: true, ReasoningEffort: llm.ReasoningEffortMedium, ContextWindow: 128000, MaxTokens: 16384},
+		{ID: "deepseek-v4.1-flash", Name: "deepseek-v4.1-flash", Provider: ProviderID, API: llm.APIOpenAIResponses, SupportsImages: true, Reasoning: true, ReasoningEffort: llm.ReasoningEffortMedium, ContextWindow: 1000000, MaxTokens: 16384},
 		{ID: "deepseek-v4-pro", Name: "deepseek-v4-pro", Provider: ProviderID, API: llm.APIOpenAIResponses, SupportsImages: true, Reasoning: true, ReasoningEffort: llm.ReasoningEffortMedium, ContextWindow: 128000, MaxTokens: 16384},
 	}
 }

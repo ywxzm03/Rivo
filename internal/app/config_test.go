@@ -223,6 +223,18 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	}
 }
 
+func TestAvailableModelsUsesRegistryContents(t *testing.T) {
+	wanted := llm.Model{ID: "configured", Provider: "custom"}
+	cfg := Config{registry: map[string]providerSpec{
+		"custom": {models: []llm.Model{wanted}},
+	}}
+
+	models := cfg.AvailableModels()
+	if len(models) != 1 || models[0].ID != wanted.ID || models[0].Provider != wanted.Provider {
+		t.Fatalf("AvailableModels() = %+v, want only configured model", models)
+	}
+}
+
 func TestLoadSettingsPairedDefaultWithBuiltinProvider(t *testing.T) {
 	dir := useConfigHome(t)
 	t.Setenv("OPENAI_API_KEY", "env-key")

@@ -325,15 +325,16 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 		}{"user", content})
 	case llm.AssistantMessage:
 		return json.Marshal(struct {
-			Role       string          `json:"role"`
-			Content    json.RawMessage `json:"content"`
-			API        string          `json:"api"`
-			Provider   string          `json:"provider"`
-			Model      string          `json:"model"`
-			ResponseID string          `json:"responseID,omitempty"`
-			StopReason string          `json:"stopReason"`
-			Usage      Usage           `json:"usage"`
-		}{"assistant", content, string(m.API), m.Provider, m.Model, m.ResponseID, string(m.StopReason), usageWire(m.Usage)})
+			Role         string          `json:"role"`
+			Content      json.RawMessage `json:"content"`
+			API          string          `json:"api"`
+			Provider     string          `json:"provider"`
+			Model        string          `json:"model"`
+			ResponseID   string          `json:"responseID,omitempty"`
+			StopReason   string          `json:"stopReason"`
+			ErrorMessage string          `json:"errorMessage,omitempty"`
+			Usage        Usage           `json:"usage"`
+		}{"assistant", content, string(m.API), m.Provider, m.Model, m.ResponseID, string(m.StopReason), m.ErrorMessage, usageWire(m.Usage)})
 	case llm.ToolResultMessage:
 		wire := struct {
 			Role       string          `json:"role"`
@@ -379,13 +380,14 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 		return llm.UserMessage{Content: content}, nil
 	case "assistant":
 		var wire struct {
-			Content    json.RawMessage `json:"content"`
-			API        string          `json:"api"`
-			Provider   string          `json:"provider"`
-			Model      string          `json:"model"`
-			ResponseID string          `json:"responseID"`
-			StopReason string          `json:"stopReason"`
-			Usage      Usage           `json:"usage"`
+			Content      json.RawMessage `json:"content"`
+			API          string          `json:"api"`
+			Provider     string          `json:"provider"`
+			Model        string          `json:"model"`
+			ResponseID   string          `json:"responseID"`
+			StopReason   string          `json:"stopReason"`
+			ErrorMessage string          `json:"errorMessage,omitempty"`
+			Usage        Usage           `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			return nil, err
@@ -395,13 +397,14 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			return nil, err
 		}
 		return llm.AssistantMessage{
-			Content:    content,
-			API:        llm.API(wire.API),
-			Provider:   wire.Provider,
-			Model:      wire.Model,
-			ResponseID: wire.ResponseID,
-			StopReason: llm.StopReason(wire.StopReason),
-			Usage:      llm.Usage{InputTokens: wire.Usage.InputTokens, OutputTokens: wire.Usage.OutputTokens},
+			Content:      content,
+			API:          llm.API(wire.API),
+			Provider:     wire.Provider,
+			Model:        wire.Model,
+			ResponseID:   wire.ResponseID,
+			StopReason:   llm.StopReason(wire.StopReason),
+			ErrorMessage: wire.ErrorMessage,
+			Usage:        llm.Usage{InputTokens: wire.Usage.InputTokens, OutputTokens: wire.Usage.OutputTokens},
 		}, nil
 	case "toolResult":
 		var wire struct {

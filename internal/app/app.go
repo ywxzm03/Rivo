@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -16,9 +17,15 @@ import (
 )
 
 type App struct {
-	agent       *agent.Agent
-	session     *session.SessionManager
-	coordinator *session.Coordinator
+	agent          *agent.Agent
+	session        *session.SessionManager
+	coordinator    *Coordinator
+	operationMu    sync.Mutex
+	active         *Operation
+	operationID    uint64
+	pendingRequest *OperationRequest
+	cfg            Config
+	onEvent        llm.AgentEventSink
 	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
 	loader *prompt.Loader
 	// cwd 与 tools 在 Reload 重建基线分节时复用
@@ -141,7 +148,8 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		tools = append(tools, &tool.PowerShell{})
 	}
 
-	coord := session.NewCoordinator(sm, onEvent)
+	coord := NewCoordinator(sm, onEvent)
+	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
@@ -174,19 +182,146 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		streamFn,
 		coord.Handle,
 	)
-	ag.Coordinator = coord
+	ag.PrepareRequest = coord.PrepareRequest
+	ag.CommitMessages = coord.CommitMessages
 	coord.Agent = ag
-	return &App{agent: ag, session: sm, coordinator: coord, loader: loader, cwd: cwd, tools: tools}, nil
+	return &App{
+		agent:       ag,
+		session:     sm,
+		coordinator: coord,
+		cfg:         cfg,
+		onEvent:     onEvent,
+		loader:      loader,
+		cwd:         cwd,
+		tools:       tools,
+	}, nil
 }
 
 // Run 经编排层驱动一次运行，溢出恢复由编排层负责
 func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
-	return a.coordinator.Run(ctx, input)
+	op, err := a.Start(ctx, OperationRequest{Kind: OperationRun, Value: input})
+	if err != nil {
+		return nil, err
+	}
+	result := op.Wait()
+	return result.Reply, result.Err
 }
 
 // Compact 手动触发一次上下文压缩，instructions 为聚焦指令
 func (a *App) Compact(ctx context.Context, instructions string) error {
-	return a.coordinator.Compact(ctx, instructions)
+	op, err := a.Start(ctx, OperationRequest{Kind: OperationCompact, Value: instructions})
+	if err != nil {
+		return err
+	}
+	return op.Wait().Err
+}
+
+// ContextView 返回带来源的已提交会话投影
+func (a *App) ContextView() compaction.ContextView { return a.session.BuildContext() }
+
+// SessionID 返回显示身份使用的会话命名空间
+func (a *App) SessionID() string { return a.session.ID() }
+
+// CurrentModel 返回当前运行模型副本
+func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
+
+// CurrentThinkingLevel 返回当前思考等级
+func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
+
+// AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
+func (a *App) AutoCompactionEnabled() bool {
+	return a.coordinator != nil && a.coordinator.Compactor != nil
+}
+
+// AvailableModels 返回当前配置中的模型目录
+func (a *App) AvailableModels() []llm.Model { return a.cfg.AvailableModels() }
+
+// SetThinkingLevel 更新当前模型的思考等级并记录会话设置
+func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationThinking, Value: string(level)})
+	if err != nil {
+		return err
+	}
+	return op.Wait().Err
+}
+
+func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
+	if !validThinkingLevel(level) {
+		return fmt.Errorf("unknown thinking level %q", level)
+	}
+	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
+		return err
+	}
+	a.agent.AgentConfig.ThinkingLevel = level
+	return nil
+}
+
+// SetModel 切换模型、流适配器和压缩器；校验完成后才应用运行模型
+func (a *App) SetModel(providerID, modelID string) error {
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationModel, Value: providerID + "/" + modelID})
+	if err != nil {
+		return err
+	}
+	return op.Wait().Err
+}
+
+func (a *App) setModel(providerID, modelID string) error {
+	return a.applyModel(providerID, modelID, true)
+}
+
+func (a *App) applyModel(providerID, modelID string, persist bool) error {
+	spec, err := a.cfg.lookupProvider(providerID)
+	if err != nil {
+		return err
+	}
+	providerID = spec.id
+	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
+	model, err := findModel(spec.id, models, modelID)
+	if err != nil {
+		for _, candidate := range a.AvailableModels() {
+			if candidate.Provider == providerID && candidate.ID == modelID {
+				model, err = candidate, nil
+				break
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if persist {
+		if err := a.session.AppendModelChange(providerID, modelID); err != nil {
+			return err
+		}
+	}
+	a.agent.AgentConfig.Model = model
+	a.coordinator.setModel(model)
+	a.agent.StreamFn = streamFn
+	for _, candidate := range a.agent.AgentContext.Tools {
+		if read, ok := candidate.(*tool.Read); ok {
+			read.SupportsImages = model.SupportsImages
+		}
+	}
+	if model.ContextWindow > 0 {
+		if a.coordinator.Compactor == nil {
+			a.coordinator.Compactor = &compaction.Compactor{Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
+		}
+		a.coordinator.Compactor.Model = model
+		a.coordinator.Compactor.StreamFn = streamFn
+		a.coordinator.Compactor.Config = compaction.DefaultConfig(model.ContextWindow)
+	} else {
+		a.coordinator.Compactor = nil
+	}
+	return nil
+}
+
+func validThinkingLevel(level llm.ThinkingLevel) bool {
+	switch level {
+	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
+		return true
+	default:
+		return false
+	}
 }
 
 // Reload 重读 AGENTS.md 与 skills 并重建基线分节；不写 system 消息，

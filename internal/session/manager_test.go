@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,6 +115,9 @@ func TestFlushOpenFailureRetriesAfterBlockerRemoved(t *testing.T) {
 	if err := os.Remove(blocker); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.RetryPending(); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.AppendMessage(assistantMsg("hello")); err != nil {
 		t.Fatalf("AppendMessage() after blocker removed error = %v", err)
 	}
@@ -122,25 +126,44 @@ func TestFlushOpenFailureRetriesAfterBlockerRemoved(t *testing.T) {
 	}
 }
 
-func TestFlushMidWriteWedgeOnExistingFile(t *testing.T) {
+func TestPublishConflictKeepsPendingBatchForRetry(t *testing.T) {
 	dir := t.TempDir()
 	m := New("/project", dir)
 	// 模拟上次半写残留的文件
 	if err := os.WriteFile(m.sessionFile, []byte("junk\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AppendMessage(userMsg("hi")); err == nil {
-		t.Fatal("AppendMessage() error = nil, want exclusive-create failure")
+	if err := m.AppendMessage(userMsg("hi")); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("AppendMessage() error = %v, want existing path error", err)
 	}
-	// 同进程内持续报错，内存状态继续推进
+	if data, err := os.ReadFile(m.sessionFile); err != nil || string(data) != "junk\n" {
+		t.Fatalf("existing file changed: data=%q err=%v", data, err)
+	}
+	// 新提交被阻止，原待写批次和已提交内存都保持不变
 	if err := m.AppendMessage(assistantMsg("hello")); err == nil {
 		t.Fatal("second AppendMessage() error = nil, want wedge")
 	}
 	if m.flushed {
 		t.Error("flushed = true, want false after wedge")
 	}
-	if len(m.entries) != 2 {
-		t.Errorf("in-memory entries = %d, want 2 (not rolled back)", len(m.entries))
+	if len(m.entries) != 0 || len(m.byID) != 0 || m.leafID != "" || len(m.pending) != 1 {
+		t.Errorf("failed writes changed committed records: entries=%d pending=%d", len(m.entries), len(m.pending))
+	}
+	pendingID := m.pending[0].base().ID
+	if err := os.Remove(m.sessionFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RetryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !m.flushed || m.HasPending() || m.leafID != pendingID || m.byID[pendingID] == nil {
+		t.Fatal("retry did not commit the original pending entry")
+	}
+	if len(readLines(t, m.sessionFile)) != 2 {
+		t.Fatal("retry did not publish one complete session batch")
+	}
+	if files, err := filepath.Glob(filepath.Join(dir, ".rivo-session-*")); err != nil || len(files) != 0 {
+		t.Fatalf("temporary files remained after publication: files=%v err=%v", files, err)
 	}
 }
 
@@ -162,7 +185,10 @@ func TestAppendLineFailureRetriesSameEntry(t *testing.T) {
 	if err := os.Chmod(m.sessionFile, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// 下一条追加先原样重试失败的 assistant，再写 toolResult
+	// 显式补写失败的 assistant，成功后才能追加 toolResult
+	if err := m.RetryPending(); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.AppendMessage(llm.ToolResultMessage{ToolCallID: "c1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "r"}}}); err != nil {
 		t.Fatalf("AppendMessage() after chmod back error = %v", err)
 	}
@@ -404,28 +430,16 @@ func TestBranchMovesLeafOnly(t *testing.T) {
 	}
 }
 
-func TestFlushMidWriteLeavesPartialFile(t *testing.T) {
-	dir := t.TempDir()
-	m := New("/project", dir)
-	// 1.不可序列化的 details 只进内存，不触发 flush（尚无对话消息）
-	if err := m.AppendMessage(llm.ToolResultMessage{Details: make(chan int)}); err != nil {
-		t.Fatalf("AppendMessage() error = %v", err)
+func TestEncodingFailureDoesNotLeavePartialFileOrPublishEntries(t *testing.T) {
+	m := New("/project", t.TempDir())
+	if err := m.AppendMessage(llm.ToolResultMessage{Details: make(chan int)}); err == nil {
+		t.Fatal("want encoding failure")
 	}
-	// 2.user 消息触发 flush，写完 header 后编码 toolResult 失败，错误返回
-	if err := m.AppendMessage(userMsg("hi")); err == nil {
-		t.Fatal("AppendMessage() error = nil, want mid-flush encode failure")
+	if len(m.entries) != 0 || m.leafID != "" {
+		t.Fatal("failed encoding published state")
 	}
-	// 3.已写入部分不清理、不回滚，flushed 保持 false
-	lines := readLines(t, m.sessionFile)
-	if len(lines) != 1 {
-		t.Fatalf("lines after mid-write failure = %d, want 1 (header only)", len(lines))
-	}
-	if m.flushed {
-		t.Error("flushed = true, want false after mid-write failure")
-	}
-	// 4.同进程内后续 flush 因文件已存在持续报错
-	if err := m.AppendMessage(assistantMsg("hello")); err == nil {
-		t.Fatal("AppendMessage() error = nil, want wedge after partial flush")
+	if _, err := os.Stat(m.sessionFile); !os.IsNotExist(err) {
+		t.Fatal("failed encoding created session file")
 	}
 }
 

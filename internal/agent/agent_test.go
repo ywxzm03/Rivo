@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -821,31 +820,29 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 	}
 }
 
-// recordingCoordinator 记录回调调用的假编排层
-type recordingCoordinator struct {
-	compactions int
-	notifies    int
-	// replace 内部执行内存替换，模拟编排层压缩后的投影提交
-	replace    func()
-	compactErr error
-}
-
-func (c *recordingCoordinator) CompactIfNeeded(_ context.Context) (bool, error) {
-	c.compactions++
-	if c.compactErr != nil {
-		return false, c.compactErr
+func TestAgentFiltersErrorAssistantFromNextRequest(t *testing.T) {
+	var received []llm.Message
+	streamFn := func(_ context.Context, _ llm.Model, c llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		received = append([]llm.Message(nil), c.Messages...)
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}}}
+		close(ch)
+		return ch, nil
 	}
-	if c.replace != nil {
-		// 触发的测试用例通过闭包替换 Agent 内存
-		replace := c.replace
-		c.replace = nil
-		replace()
-		return true, nil
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{Messages: []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "old"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "cancelled"}}, StopReason: llm.StopReasonError},
+	}}, streamFn, nil)
+	if _, err := a.Run(context.Background(), "new"); err != nil {
+		t.Fatal(err)
 	}
-	return false, nil
+	if len(received) != 2 {
+		t.Fatalf("request messages = %d, want 2", len(received))
+	}
+	if _, ok := received[1].(llm.UserMessage); !ok {
+		t.Fatalf("request message 1 = %T, want user message", received[1])
+	}
 }
-
-func (c *recordingCoordinator) NotifyOverflow() { c.notifies++ }
 
 // TestAgentContinueContinuesWithoutUserMessage 验证续接不追加用户消息，事件序列与运行同构
 func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
@@ -895,137 +892,76 @@ func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 	}
 }
 
-// TestAgentCompactIfNeededReplacesMemory 验证循环顶压缩回调替换内存后，agent_end 汇总不越界
-func TestAgentCompactIfNeededReplacesMemory(t *testing.T) {
+// 请求准备返回替换后的快照，核心汇总只包含新快照之后产生的消息
+func TestAgentPreparedSnapshotResetsRunBoundary(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonToolUse},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
-	)
-	var events []llm.AgentEvent
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, func(event llm.AgentEvent) error {
-		events = append(events, event)
+	var end llm.AgentEndEvent
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}), func(event llm.AgentEvent) error {
+		if e, ok := event.(llm.AgentEndEvent); ok {
+			end = e
+		}
 		return nil
 	})
-	coord.replace = func() {
-		// 模拟编排层压缩：内存替换为摘要 + 保留尾部，只在首轮压缩一次
-		summary := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "wrapped summary"}}}
-		a.AgentContext.Messages = append([]llm.Message{summary}, a.AgentContext.Messages...)
-		coord.replace = nil
+	a.PrepareRequest = func(ctx context.Context, request PreparedRequest) (PreparedRequest, error) {
+		request.Context.Messages = []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "summary"}}}}
+		request.Compacted = true
+		return request, nil
 	}
-	a.Coordinator = coord
-
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if coord.compactions < 1 {
-		t.Fatalf("compactions = %d, want >= 1", coord.compactions)
-	}
-	// 压缩后 agent_end 只汇总压缩后的新增消息，不越界
-	var agentEnd *llm.AgentEndEvent
-	for i := range events {
-		if e, ok := events[i].(llm.AgentEndEvent); ok {
-			agentEnd = &e
-		}
-	}
-	if agentEnd == nil {
-		t.Fatal("agent_end event missing")
-	}
-	// agent_end 汇总压缩后的新增消息：工具调用 assistant、工具结果、最终回复
-	if len(agentEnd.Messages) != 3 {
-		t.Errorf("agent_end messages = %d, want 3", len(agentEnd.Messages))
+	if len(end.Messages) != 1 {
+		t.Fatalf("run messages = %d, want final reply only", len(end.Messages))
 	}
 }
 
-// TestAgentNotifiesOverflowOnError 验证显式溢出错误经 finishModelError 收场前通知编排层
-func TestAgentNotifiesOverflowOnError(t *testing.T) {
-	calls := 0
-	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-		calls++
+func TestAgentEndCarriesOverflowCause(t *testing.T) {
+	var end llm.AgentEndEvent
+	stream := func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		ch := make(chan llm.AssistantMessageEvent, 1)
-		ch <- llm.AssistantMessageErrorEvent{Err: fmt.Errorf("openai: 400: %w", llm.ErrContextOverflow)}
+		ch <- llm.AssistantMessageErrorEvent{Err: llm.ErrContextOverflow}
 		close(ch)
 		return ch, nil
 	}
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	a.Coordinator = coord
-
-	message, err := a.Run(context.Background(), "hi")
-	if err == nil {
-		t.Fatal("overflow error should end the run")
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, stream, func(event llm.AgentEvent) error {
+		if e, ok := event.(llm.AgentEndEvent); ok {
+			end = e
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "hi"); !llm.IsContextOverflow(err) {
+		t.Fatalf("err = %v", err)
 	}
-	if message == nil || message.StopReason != llm.StopReasonError {
-		t.Fatalf("message = %+v, want error assistant", message)
-	}
-	if coord.notifies != 1 {
-		t.Errorf("notifies = %d, want 1", coord.notifies)
-	}
-	// 失败尝试照常提交进上下文
-	if got := len(a.AgentContext.Messages); got != 2 {
-		t.Errorf("messages = %d, want 2", got)
+	if !llm.IsContextOverflow(end.Err) {
+		t.Fatalf("end cause = %v", end.Err)
 	}
 }
 
-// TestAgentNotifiesOverflowOnRecoverableLength 验证可恢复的长度截断提交消息后通知编排层，且不执行工具
-func TestAgentNotifiesOverflowOnRecoverableLength(t *testing.T) {
+func TestPreparedRecoverableLengthStopsBeforeTools(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}},
-	)
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{&fakeTool{name: "ping"}}}, streamFn, nil)
-	a.Coordinator = coord
-
+	ping := &fakeTool{name: "ping"}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, doneStreamFn(&calls, llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}), nil)
+	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, nil }
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if coord.notifies != 1 {
-		t.Errorf("notifies = %d, want 1", coord.notifies)
-	}
-	// 截断消息正常提交进上下文
-	if got := len(a.AgentContext.Messages); got != 2 {
-		t.Errorf("messages = %d, want 2", got)
+	if len(ping.arguments) != 0 {
+		t.Fatal("truncated tool calls were executed")
 	}
 }
 
-// TestAgentLengthAtMaxTokensNotRecovered 验证达到输出上限的截断不通知编排层
-func TestAgentLengthAtMaxTokensNotRecovered(t *testing.T) {
+func TestAgentPreparationDeadlineSettlesWithAborted(t *testing.T) {
 	calls := 0
-	streamFn := doneStreamFn(&calls,
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "capped"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 100}},
-	)
-	coord := &recordingCoordinator{}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{}, streamFn, nil)
-	a.Coordinator = coord
-
-	reply, err := a.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
+	events, sink := collectEvents()
+	a := NewAgent(llm.AgentConfig{}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{}), sink)
+	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) {
+		return r, context.DeadlineExceeded
 	}
-	if coord.notifies != 0 {
-		t.Errorf("notifies = %d, want 0", coord.notifies)
+	message, err := a.Run(context.Background(), "hi")
+	if err != nil || message.StopReason != llm.StopReasonAborted || calls != 0 {
+		t.Fatalf("reply=%+v err=%v calls=%d", message, err, calls)
 	}
-	if reply.StopReason != llm.StopReasonLength {
-		t.Errorf("reply stop reason = %q, want length", reply.StopReason)
-	}
-}
-
-// TestAgentCompactionDeadlineEndsRun 验证压缩回调超时中止直接结束运行
-func TestAgentCompactionDeadlineEndsRun(t *testing.T) {
-	calls := 0
-	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
-	coord := &recordingCoordinator{compactErr: context.DeadlineExceeded}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	a.Coordinator = coord
-
-	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
-	}
-	if calls != 0 {
-		t.Errorf("stream calls = %d, want 0 (expired ctx must not reach the model)", calls)
-	}
+	assertAbortedEventSequence(t, *events)
 }
 
 // TestAgentRecoverableLengthWithoutCoordinatorRunsTools 验证未启用编排层时，
@@ -1050,5 +986,145 @@ func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
 	}
 	if got := len(a.AgentContext.Messages); got != 4 {
 		t.Errorf("messages = %d, want 4", got)
+	}
+}
+
+func TestAgentResumeAbortedAssistantDoesNotRunTools(t *testing.T) {
+	ping := &fakeTool{name: "ping"}
+	calls := 0
+	a := NewAgent(
+		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		llm.Context{Tools: []llm.Tool{ping}},
+		doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "unexpected"}}}),
+		nil,
+	)
+	committed := &llm.AssistantMessage{
+		Content:    toolCalls("ping"),
+		StopReason: llm.StopReasonAborted,
+	}
+
+	reply, err := a.Resume(context.Background(), committed)
+	if err != nil || reply != committed {
+		t.Fatalf("reply=%+v err=%v", reply, err)
+	}
+	if len(ping.arguments) != 0 || calls != 0 {
+		t.Fatalf("aborted resume executed work: tool calls=%d streams=%d", len(ping.arguments), calls)
+	}
+}
+
+func TestAgentResumeReportsCommittedLengthAssistant(t *testing.T) {
+	var end llm.AgentEndEvent
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1", MaxTokens: 100}}, llm.Context{}, nil, func(event llm.AgentEvent) error {
+		if current, ok := event.(llm.AgentEndEvent); ok {
+			end = current
+		}
+		return nil
+	})
+	committed := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.TextContent{Text: "truncated"}},
+		StopReason: llm.StopReasonLength,
+		Usage:      llm.Usage{OutputTokens: 50},
+	}
+
+	if _, err := a.Resume(context.Background(), committed); err != nil {
+		t.Fatal(err)
+	}
+	if len(end.Messages) != 1 {
+		t.Fatalf("agent_end messages=%d, want 1", len(end.Messages))
+	}
+	message, ok := end.Messages[0].(llm.AssistantMessage)
+	if !ok || message.StopReason != llm.StopReasonLength {
+		t.Fatalf("agent_end message=%T %+v, want committed length assistant", end.Messages[0], end.Messages[0])
+	}
+}
+
+func TestAgentSequentialCancellationCompletesToolResults(t *testing.T) {
+	started := make(chan struct{})
+	tool := &controlledTool{
+		name: "sequential",
+		mode: llm.ToolExecutionSequential,
+		run: func(ctx context.Context) (llm.ToolResult, error) {
+			close(started)
+			<-ctx.Done()
+			return llm.ToolResult{}, ctx.Err()
+		},
+	}
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{tool}}, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := []llm.ToolCall{
+		{ID: "one", Name: "sequential"},
+		{ID: "two", Name: "sequential"},
+		{ID: "three", Name: "sequential"},
+	}
+	resultCh := make(chan []llm.ToolResultMessage, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		results, err := a.executeToolBatch(ctx, calls)
+		resultCh <- results
+		errCh <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sequential tool")
+	}
+	cancel()
+	results := <-resultCh
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(calls) {
+		t.Fatalf("tool results=%d, want %d", len(results), len(calls))
+	}
+	for i, result := range results {
+		if result.ToolCallID != calls[i].ID || !result.IsError {
+			t.Fatalf("result[%d]=%+v, want aborted result for %q", i, result, calls[i].ID)
+		}
+	}
+}
+
+func TestAgentSequentialEventFailureCompletesToolResults(t *testing.T) {
+	first := &controlledTool{
+		name: "first",
+		mode: llm.ToolExecutionSequential,
+		run: func(context.Context) (llm.ToolResult, error) {
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "first"}}}, nil
+		},
+	}
+	second := &controlledTool{
+		name: "second",
+		mode: llm.ToolExecutionSequential,
+		run: func(context.Context) (llm.ToolResult, error) {
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "second"}}}, nil
+		},
+	}
+	eventErr := errors.New("event sink failed")
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{first, second}}, nil, func(event llm.AgentEvent) error {
+		if end, ok := event.(llm.ToolExecutionEndEvent); ok && end.ToolCallID == "first" {
+			return eventErr
+		}
+		return nil
+	})
+
+	calls := []llm.ToolCall{
+		{ID: "first", Name: "first"},
+		{ID: "second", Name: "second"},
+	}
+	results, err := a.executeToolBatch(context.Background(), calls)
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("executeToolBatch() error = %v, want event sink failure", err)
+	}
+	if len(results) != len(calls) {
+		t.Fatalf("tool results = %d, want %d", len(results), len(calls))
+	}
+	if results[0].ToolCallID != "first" || results[0].IsError {
+		t.Fatalf("first result = %+v, want successful first result", results[0])
+	}
+	if results[1].ToolCallID != "second" || !results[1].IsError {
+		t.Fatalf("second result = %+v, want aborted result", results[1])
+	}
+	if len(a.AgentContext.Messages) != len(calls) {
+		t.Fatalf("committed tool results = %d, want %d", len(a.AgentContext.Messages), len(calls))
 	}
 }
