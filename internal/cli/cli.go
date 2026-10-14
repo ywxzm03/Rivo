@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -284,9 +285,7 @@ func terminalStreams(stdin io.Reader, stdout io.Writer) bool {
 	if !inOK || !outOK {
 		return false
 	}
-	inInfo, inErr := in.Stat()
-	outInfo, outErr := out.Stat()
-	return inErr == nil && outErr == nil && inInfo.Mode()&os.ModeCharDevice != 0 && outInfo.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(in.Fd()) && term.IsTerminal(out.Fd())
 }
 
 // buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），
