@@ -1083,3 +1083,48 @@ func TestAgentSequentialCancellationCompletesToolResults(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentSequentialEventFailureCompletesToolResults(t *testing.T) {
+	first := &controlledTool{
+		name: "first",
+		mode: llm.ToolExecutionSequential,
+		run: func(context.Context) (llm.ToolResult, error) {
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "first"}}}, nil
+		},
+	}
+	second := &controlledTool{
+		name: "second",
+		mode: llm.ToolExecutionSequential,
+		run: func(context.Context) (llm.ToolResult, error) {
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "second"}}}, nil
+		},
+	}
+	eventErr := errors.New("event sink failed")
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{first, second}}, nil, func(event llm.AgentEvent) error {
+		if end, ok := event.(llm.ToolExecutionEndEvent); ok && end.ToolCallID == "first" {
+			return eventErr
+		}
+		return nil
+	})
+
+	calls := []llm.ToolCall{
+		{ID: "first", Name: "first"},
+		{ID: "second", Name: "second"},
+	}
+	results, err := a.executeToolBatch(context.Background(), calls)
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("executeToolBatch() error = %v, want event sink failure", err)
+	}
+	if len(results) != len(calls) {
+		t.Fatalf("tool results = %d, want %d", len(results), len(calls))
+	}
+	if results[0].ToolCallID != "first" || results[0].IsError {
+		t.Fatalf("first result = %+v, want successful first result", results[0])
+	}
+	if results[1].ToolCallID != "second" || !results[1].IsError {
+		t.Fatalf("second result = %+v, want aborted result", results[1])
+	}
+	if len(a.AgentContext.Messages) != len(calls) {
+		t.Fatalf("committed tool results = %d, want %d", len(a.AgentContext.Messages), len(calls))
+	}
+}

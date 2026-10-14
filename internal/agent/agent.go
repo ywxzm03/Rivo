@@ -555,8 +555,8 @@ func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall
 			break
 		}
 	}
-	if ctx.Err() != nil && completed < len(calls) {
-		// 取消后未启动的调用也要写入结果，保持 assistant tool call 与 result 一一对应
+	if completed < len(calls) {
+		// 中断后未启动的调用也要写入结果，保持 assistant tool call 与 result 一一对应
 		for _, call := range calls[completed:] {
 			results = append(results, toolResultMessage(call, abortedToolResult(), true))
 		}
