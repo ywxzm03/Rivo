@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -77,7 +76,7 @@ func (c *Coordinator) preparePrompt() error {
 		return nil
 	}
 	var current prompt.Sections
-	if existing := llm.CurrentSystemMessage(c.m.BuildContext().Messages); existing != nil {
+	if existing := llm.CurrentSystemMessage(c.m.BuildContext().Messages()); existing != nil {
 		current = existing.Sections
 	}
 	patch := prompt.DiffSections(current, c.promptSections)
@@ -133,7 +132,7 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 		return reply, runErr
 	}
 	// 2.省略后立即重建内存，保持内存与投影一致（失败尝试从内存消失）
-	c.Agent.ReplaceMessages(c.m.BuildContext().Messages)
+	c.Agent.ReplaceMessages(c.m.BuildContext().Messages())
 	// 3.压缩成功才重试该轮；失败按原始错误收场
 	if cerr := c.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
 		if runErr == nil {
@@ -159,13 +158,14 @@ func (c *Coordinator) CompactIfNeeded(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	proj := c.m.BuildContext()
+	messages := proj.Messages()
 	window := c.Compactor.Config.ContextWindow
 	if window <= 0 {
 		return false, nil
 	}
 	// 静默溢出优先：响应成功但最后一条 assistant 的 usage 已超窗
 	if !proj.UsageStale {
-		if msg := lastAssistant(proj.Messages); msg != nil && msg.Usage.InputTokens > window {
+		if msg := lastAssistant(messages); msg != nil && msg.Usage.InputTokens > window {
 			if err := c.compact(ctx, CompactionReasonOverflow, ""); err != nil {
 				return false, err
 			}
@@ -197,33 +197,28 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	if err := c.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
 		return err
 	}
-	result, err := c.Compactor.Compact(ctx, proj.Messages, proj.LastSummary, instructions)
+	result, err := c.Compactor.Compact(ctx, proj, instructions)
 	if err != nil {
 		// 失败通知，转发失败不影响状态
 		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}
-	// 切点定位在投影消息上，经同序 EntryIDs 换算成会话条目；不一致时显式报错，避免静默清空历史
-	if result.CutIndex >= len(proj.EntryIDs) {
-		return fmt.Errorf("session: cut index %d exceeds projected entry count %d; messages and entries are inconsistent", result.CutIndex, len(proj.EntryIDs))
-	}
-	firstKept := proj.EntryIDs[result.CutIndex]
 	var usage *llm.Usage
 	if result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 {
 		usage = &result.Usage
 	}
-	if err := c.m.AppendCompaction(result.Summary, firstKept, tokensBefore, llm.CurrentSystemMessage(proj.Messages), usage); err != nil {
+	if err := c.m.AppendCompaction(result.Summary, result.FirstKeptSourceID, tokensBefore, llm.CurrentSystemMessage(proj.Messages()), usage); err != nil {
 		return err
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态
 	rebuilt := c.m.BuildContext()
-	c.Agent.ReplaceMessages(rebuilt.Messages)
+	c.Agent.ReplaceMessages(rebuilt.Messages())
 	_ = c.emit(llm.CompactionEndEvent{
 		Reason:           reason,
 		Summary:          result.Summary,
-		KeptMessageCount: result.KeptCount,
+		KeptMessageCount: result.KeptMessageCount,
 		TokensBefore:     tokensBefore,
-		TokensAfter:      compaction.EstimateContextTokens(rebuilt.Messages),
+		TokensAfter:      compaction.EstimateContextTokens(rebuilt.Messages()),
 		Usage:            result.Usage,
 	})
 	return nil
@@ -248,11 +243,12 @@ func (c *Coordinator) emit(event llm.AgentEvent) error {
 
 // contextTokens 按陈旧标记选择 token 估算方式：陈旧时保留尾部的 usage 反映压缩前的大上下文，
 // 改用纯消息体估算防止压缩刚结束就重复触发
-func contextTokens(proj SessionContext) int {
+
+func contextTokens(proj compaction.ContextView) int {
 	if proj.UsageStale {
-		return compaction.EstimateContextTokens(proj.Messages)
+		return compaction.EstimateContextTokens(proj.Messages())
 	}
-	return compaction.ContextTokens(proj.Messages)
+	return compaction.ContextTokens(proj.Messages())
 }
 
 // lastAssistant 返回消息序列中最后一条 assistant 消息

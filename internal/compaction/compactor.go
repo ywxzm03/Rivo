@@ -39,38 +39,37 @@ type Compactor struct {
 	Retry RetryPolicy
 }
 
-// Result 一次压缩的产出：Summary 为最终摘要文本，CutIndex/KeptCount 告知调用方如何截断保留
+// Result 一次压缩的产出：FirstKeptSourceID 标记保留区首条 entry
 type Result struct {
-	Summary      string
-	CutIndex     int
-	KeptCount    int
-	TokensBefore int
-	Usage        llm.Usage
-	IsSplitTurn  bool
+	Summary           string
+	FirstKeptSourceID string
+	KeptMessageCount  int
+	TokensBefore      int
+	Usage             llm.Usage
+	IsSplitTurn       bool
 }
 
-// Compact 对 messages 执行一次压缩。previousSummary 非空时序列化从 messages[1] 开始，
-// 跳过上次回插的摘要消息，其内容已经作为 <previous-summary> 传入，不重复参与摘要；
-// split turn 时对历史与轮次前缀分别摘要后合并
-func (c *Compactor) Compact(ctx context.Context, messages []llm.Message, previousSummary, instructions string) (Result, error) {
+// Compact 对当前上下文视图执行一次压缩；compaction entry 作为 boundary，不参与新摘要素材
+func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions string) (Result, error) {
+	messages := view.Messages()
 	tokensBefore := ContextTokens(messages)
-	start := 0
-	if previousSummary != "" && len(messages) > 0 {
-		start = 1
-	}
-	plan := FindCutPoint(messages, start, c.Config.KeepRecentTokens)
+	start, previousSummary := compactionBoundary(view.Entries)
+	plan := FindCutPoint(view.Entries, start, c.Config.KeepRecentTokens)
 	if plan.CutIndex <= start {
 		return Result{}, fmt.Errorf("compaction: no compressible history range")
 	}
 	result := Result{
-		CutIndex:     plan.CutIndex,
-		KeptCount:    len(messages) - plan.CutIndex,
-		TokensBefore: tokensBefore,
-		IsSplitTurn:  plan.IsSplitTurn,
+		FirstKeptSourceID: view.Entries[plan.CutIndex].SourceID,
+		KeptMessageCount:  MessageCount(view.Entries[plan.CutIndex:]),
+		TokensBefore:      tokensBefore,
+		IsSplitTurn:       plan.IsSplitTurn,
 	}
 	if plan.IsSplitTurn {
-		history := messages[start:plan.TurnStartIndex]
-		turnPrefix := messages[plan.TurnStartIndex:plan.CutIndex]
+		history := SummaryMessages(view.Entries[start:plan.TurnStartIndex])
+		turnPrefix := SummaryMessages(view.Entries[plan.TurnStartIndex:plan.CutIndex])
+		if len(history) == 0 && previousSummary == "" && len(turnPrefix) == 0 {
+			return Result{}, fmt.Errorf("compaction: no compressible history range")
+		}
 		var summary string
 		var usage llm.Usage
 		// 1.先摘历史；历史区为空时以上次摘要为合并基线，绝不丢弃已整合的历史
@@ -84,30 +83,50 @@ func (c *Compactor) Compact(ctx context.Context, messages []llm.Message, previou
 			summary = previousSummary
 		}
 		// 2.再摘轮次前缀并合并
-		prefixSummary, prefixUsage, err := c.summarizeRegion(ctx, turnPrefix, "", "", true)
-		if err != nil {
-			return Result{}, err
-		}
-		if summary == "" {
-			summary, usage = prefixSummary, prefixUsage
-		} else {
-			summary = MergeSummaries(summary, prefixSummary)
-			usage = llm.Usage{
-				InputTokens:  usage.InputTokens + prefixUsage.InputTokens,
-				OutputTokens: usage.OutputTokens + prefixUsage.OutputTokens,
+		if len(turnPrefix) > 0 {
+			prefixSummary, prefixUsage, err := c.summarizeRegion(ctx, turnPrefix, "", "", true)
+			if err != nil {
+				return Result{}, err
+			}
+			if summary == "" {
+				summary, usage = prefixSummary, prefixUsage
+			} else {
+				summary = MergeSummaries(summary, prefixSummary)
+				usage = llm.Usage{
+					InputTokens:  usage.InputTokens + prefixUsage.InputTokens,
+					OutputTokens: usage.OutputTokens + prefixUsage.OutputTokens,
+				}
 			}
 		}
 		result.Summary = summary
 		result.Usage = usage
 		return result, nil
 	}
-	summary, usage, err := c.summarizeRegion(ctx, messages[start:plan.CutIndex], previousSummary, instructions, false)
+	conversation := SummaryMessages(view.Entries[start:plan.CutIndex])
+	if len(conversation) == 0 {
+		return Result{}, fmt.Errorf("compaction: no compressible history range")
+	}
+	summary, usage, err := c.summarizeRegion(ctx, conversation, previousSummary, instructions, false)
 	if err != nil {
 		return Result{}, err
 	}
 	result.Summary = summary
 	result.Usage = usage
 	return result, nil
+}
+
+// compactionBoundary 返回最新 compaction 后的 entry 起点和增量摘要基线
+func compactionBoundary(entries []ContextEntry) (int, string) {
+	index := -1
+	for i, entry := range entries {
+		if entry.Kind == ContextCompaction {
+			index = i
+		}
+	}
+	if index < 0 {
+		return 0, ""
+	}
+	return index + 1, entries[index].Summary
 }
 
 // summarizeRegion 对一段消息生成摘要：turnPrefix 模式用轮次前缀提示词，

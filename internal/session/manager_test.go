@@ -201,12 +201,12 @@ func TestOpenReloadAndContinue(t *testing.T) {
 	}
 
 	ctx := m2.BuildContext()
-	if len(ctx.Messages) != 3 {
-		t.Fatalf("messages = %d, want 3", len(ctx.Messages))
+	if len(ctx.Messages()) != 3 {
+		t.Fatalf("messages = %d, want 3", len(ctx.Messages()))
 	}
-	if messageRole(ctx.Messages[0]) != "user" || messageRole(ctx.Messages[1]) != "assistant" || messageRole(ctx.Messages[2]) != "toolResult" {
+	if messageRole(ctx.Messages()[0]) != "user" || messageRole(ctx.Messages()[1]) != "assistant" || messageRole(ctx.Messages()[2]) != "toolResult" {
 		t.Errorf("message roles = %s/%s/%s, want user/assistant/toolResult",
-			messageRole(ctx.Messages[0]), messageRole(ctx.Messages[1]), messageRole(ctx.Messages[2]))
+			messageRole(ctx.Messages()[0]), messageRole(ctx.Messages()[1]), messageRole(ctx.Messages()[2]))
 	}
 	if ctx.Provider != "openai" || ctx.Model != "gpt-5" {
 		t.Errorf("model = %s/%s, want openai/gpt-5", ctx.Provider, ctx.Model)
@@ -277,8 +277,8 @@ func TestOpenDuplicateIDAndOrphan(t *testing.T) {
 	}
 	// 孤儿 entry 的路径在断点停止，只包含自身
 	ctx := m.BuildContext()
-	if len(ctx.Messages) != 1 {
-		t.Fatalf("messages from orphan leaf = %d, want 1", len(ctx.Messages))
+	if len(ctx.Messages()) != 1 {
+		t.Fatalf("messages from orphan leaf = %d, want 1", len(ctx.Messages()))
 	}
 }
 
@@ -300,8 +300,8 @@ func TestOpenUnknownEntryKeepsTreeChain(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	ctx := m.BuildContext()
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2 (unknown entry contributes no message but keeps chain)", len(ctx.Messages))
+	if len(ctx.Messages()) != 2 {
+		t.Fatalf("messages = %d, want 2 (unknown entry contributes no message but keeps chain)", len(ctx.Messages()))
 	}
 	// leaf 在未知 entry 之后，新追加成为其后代
 	if err := m.AppendMessage(userMsg("u3")); err != nil {

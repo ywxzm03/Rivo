@@ -23,15 +23,14 @@ func TestSystemMessageProjectionInPlace(t *testing.T) {
 		}
 	}
 	ctx := m.BuildContext()
-	if len(ctx.Messages) != 3 {
-		t.Fatalf("messages = %d, want 3", len(ctx.Messages))
+	if len(ctx.Messages()) != 3 {
+		t.Fatalf("messages = %d, want 3", len(ctx.Messages()))
 	}
-	if messageRole(ctx.Messages[0]) != "system" || messageRole(ctx.Messages[2]) != "system" {
-		t.Fatalf("roles = [%s, %s, %s], want system in place", messageRole(ctx.Messages[0]), messageRole(ctx.Messages[1]), messageRole(ctx.Messages[2]))
+	if messageRole(ctx.Messages()[0]) != "system" || messageRole(ctx.Messages()[2]) != "system" {
+		t.Fatalf("roles = [%s, %s, %s], want system in place", messageRole(ctx.Messages()[0]), messageRole(ctx.Messages()[1]), messageRole(ctx.Messages()[2]))
 	}
-	// EntryIDs 与消息同序
-	if len(ctx.EntryIDs) != 3 {
-		t.Fatalf("entryIDs = %d, want 3", len(ctx.EntryIDs))
+	if len(ctx.Entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(ctx.Entries))
 	}
 }
 
@@ -51,12 +50,12 @@ func TestSystemMessageCodecRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := reopened.BuildContext()
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(ctx.Messages))
+	if len(ctx.Messages()) != 2 {
+		t.Fatalf("messages = %d, want 2", len(ctx.Messages()))
 	}
-	got, ok := ctx.Messages[1].(llm.SystemMessage)
+	got, ok := ctx.Messages()[1].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("message = %T, want SystemMessage", ctx.Messages[1])
+		t.Fatalf("message = %T, want SystemMessage", ctx.Messages()[1])
 	}
 	if got.Sections["preamble"] != "base" || got.Sections["cwd"] != "/work" {
 		t.Errorf("sections = %v, want round-tripped content", got.Sections)
@@ -86,21 +85,47 @@ func TestCompactionSnapshotLeadsProjection(t *testing.T) {
 	ctx := m.BuildContext()
 
 	// 首条为压缩快照
-	if len(ctx.Messages) == 0 {
+	if len(ctx.Messages()) == 0 {
 		t.Fatal("messages empty")
 	}
-	first, ok := ctx.Messages[0].(llm.SystemMessage)
+	first, ok := ctx.Messages()[0].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("first message = %T, want SystemMessage snapshot", ctx.Messages[0])
+		t.Fatalf("first message = %T, want SystemMessage snapshot", ctx.Messages()[0])
 	}
 	if first.Sections["preamble"] != "snapshot" {
 		t.Errorf("snapshot preamble = %q, want snapshot content", first.Sections["preamble"])
 	}
 	// 保留区内的旧 system 条目被丢弃，不再出现旧 preamble
-	for i, msg := range ctx.Messages {
+	for i, msg := range ctx.Messages() {
 		if _, ok := msg.(llm.SystemMessage); ok && i > 0 {
 			t.Errorf("messages[%d] is an extra system message, want only the snapshot", i)
 		}
+	}
+}
+
+func TestCompactionKeepsSystemPatchAfterBoundary(t *testing.T) {
+	m := New("/project", t.TempDir())
+	if err := m.AppendMessage(systemMsg(map[string]string{"preamble": "old"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(userMsg("u1")); err != nil {
+		t.Fatal(err)
+	}
+	kept := m.leafID
+	snapshot := &llm.SystemMessage{Sections: map[string]string{"preamble": "snapshot"}}
+	if err := m.AppendCompaction("summary", kept, 100, snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(systemMsg(map[string]string{"cwd": "/after"})); err != nil {
+		t.Fatal(err)
+	}
+	ctx := m.BuildContext()
+	if len(ctx.Messages()) != 4 {
+		t.Fatalf("messages = %d, want snapshot, summary, retained message, and patch", len(ctx.Messages()))
+	}
+	patch, ok := ctx.Messages()[3].(llm.SystemMessage)
+	if !ok || patch.Sections["cwd"] != "/after" {
+		t.Fatalf("messages[3] = %#v, want post-compaction system patch", ctx.Messages()[3])
 	}
 }
 
@@ -117,9 +142,9 @@ func TestCompactionWithoutSystemMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := m.BuildContext()
-	for _, msg := range ctx.Messages {
+	for _, msg := range ctx.Messages() {
 		if _, ok := msg.(llm.SystemMessage); ok {
-			t.Fatalf("messages = %+v, want no system message", ctx.Messages)
+			t.Fatalf("messages = %+v, want no system message", ctx.Messages())
 		}
 	}
 }
@@ -142,9 +167,9 @@ func TestCompactionSnapshotCodecRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := reopened.BuildContext()
-	got, ok := ctx.Messages[0].(llm.SystemMessage)
+	got, ok := ctx.Messages()[0].(llm.SystemMessage)
 	if !ok {
-		t.Fatalf("first message = %T, want SystemMessage", ctx.Messages[0])
+		t.Fatalf("first message = %T, want SystemMessage", ctx.Messages()[0])
 	}
 	if got.Sections["preamble"] != "snap" {
 		t.Errorf("sections = %v, want round-tripped snapshot", got.Sections)
