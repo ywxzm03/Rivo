@@ -139,11 +139,11 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 	if !aborted {
 		message.Divider = &tui.TurnDividerView{Elapsed: time.Since(start)}
 	}
-	p.state.Messages = append(p.state.Messages, message)
 	if aborted {
 		// 与真实行为一致：partial 正文 + 消息级取消标记，渲染层追加提示行
 		message.Aborted = true
 	}
+	p.state.Messages = append(p.state.Messages, message)
 	if input == "error" {
 		return tui.OperationDoneMsg{Snapshot: &p.state, Err: errors.New("simulated request failure")}
 	}
