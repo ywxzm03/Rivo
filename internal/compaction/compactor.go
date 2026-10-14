@@ -174,7 +174,10 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 					final, usage = ev.Message, ev.Message.Usage
 				}
 			case llm.AssistantMessageErrorEvent:
-				if ev.Err != nil {
+				if ev.Reason == llm.StopReasonAborted {
+					// 中止是终态：即使底层错误文本未包装 context.Canceled，也不得进入重试
+					streamErr = fmt.Errorf("compaction: summary call aborted: %w", context.Canceled)
+				} else if ev.Err != nil {
 					// 上游中断必须显式报错，避免流关闭后被误报成「摘要为空」
 					streamErr = fmt.Errorf("compaction: summary call failed: %w", ev.Err)
 				} else {
