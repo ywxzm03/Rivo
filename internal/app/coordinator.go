@@ -160,8 +160,7 @@ func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage
 	c.recovered = true
 	// 1.省略失败尝试：它必然是最后落盘的 entry，磁盘上保留、投影上排除；失败原因不吞掉
 	if oerr := c.omitLastAttempt(); oerr != nil {
-		runErr = oerr
-		return reply, runErr
+		return reply, errors.Join(runErr, oerr)
 	}
 	// 3.压缩成功才重试该轮；失败按原始错误收场
 	if cerr := c.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
@@ -173,6 +172,21 @@ func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage
 	}
 	c.pendingRecovery = false
 	return c.Agent.Continue(ctx)
+}
+
+// retryOverflowRecovery 在省略标记补写成功后继续完成同一轮溢出恢复
+func (c *Coordinator) retryOverflowRecovery(ctx context.Context, resume bool) (*llm.AssistantMessage, error) {
+	if !c.pendingRecovery || c.Compactor == nil {
+		return nil, nil
+	}
+	if err := c.compact(ctx, CompactionReasonOverflow, ""); err != nil {
+		return nil, err
+	}
+	c.pendingRecovery = false
+	if resume {
+		return c.Agent.Continue(ctx)
+	}
+	return nil, nil
 }
 
 // Compact 手动触发一次压缩，instructions 为聚焦指令；与 Run 互斥避免并发读写

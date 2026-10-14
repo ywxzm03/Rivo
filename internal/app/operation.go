@@ -96,6 +96,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	// 1.补写原候选记录，不重跑模型或工具；同一操作重试从已提交边界续接
 	if a.session.HasPending() {
 		messages := a.session.PendingMessages()
+		pendingEdit := a.session.PendingContextEdit()
 		previous := a.pendingRequest
 		if result.Err = a.session.RetryPending(); result.Err != nil {
 			return result
@@ -105,6 +106,13 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		result.Replayed = true
+		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.pendingRecovery {
+			resume := previous != nil && *previous == request && request.Kind == OperationRun
+			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
+			if result.Err != nil || resume {
+				return result
+			}
+		}
 		a.coordinator.resetRecovery()
 		if previous != nil && *previous == request {
 			if request.Kind != OperationRun {

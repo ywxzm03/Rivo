@@ -216,6 +216,16 @@ func (m *SessionManager) PendingMessages() []llm.Message {
 	return messages
 }
 
+// PendingContextEdit 返回待写批次中的上下文编辑；没有则返回 nil
+func (m *SessionManager) PendingContextEdit() *ContextEditEntry {
+	for _, e := range m.pending {
+		if edit, ok := e.(*ContextEditEntry); ok {
+			return edit
+		}
+	}
+	return nil
+}
+
 // AppendMessages 整体提交一个消息批次，返回与消息顺序对应的稳定 entry ID
 func (m *SessionManager) AppendMessages(messages []llm.Message) ([]string, error) {
 	entries := make([]Entry, len(messages))
