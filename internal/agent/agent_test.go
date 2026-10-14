@@ -988,3 +988,98 @@ func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
 		t.Errorf("messages = %d, want 4", got)
 	}
 }
+
+func TestAgentResumeAbortedAssistantDoesNotRunTools(t *testing.T) {
+	ping := &fakeTool{name: "ping"}
+	calls := 0
+	a := NewAgent(
+		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		llm.Context{Tools: []llm.Tool{ping}},
+		doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "unexpected"}}}),
+		nil,
+	)
+	committed := &llm.AssistantMessage{
+		Content:    toolCalls("ping"),
+		StopReason: llm.StopReasonAborted,
+	}
+
+	reply, err := a.Resume(context.Background(), committed)
+	if err != nil || reply != committed {
+		t.Fatalf("reply=%+v err=%v", reply, err)
+	}
+	if len(ping.arguments) != 0 || calls != 0 {
+		t.Fatalf("aborted resume executed work: tool calls=%d streams=%d", len(ping.arguments), calls)
+	}
+}
+
+func TestAgentResumeReportsCommittedLengthAssistant(t *testing.T) {
+	var end llm.AgentEndEvent
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1", MaxTokens: 100}}, llm.Context{}, nil, func(event llm.AgentEvent) error {
+		if current, ok := event.(llm.AgentEndEvent); ok {
+			end = current
+		}
+		return nil
+	})
+	committed := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.TextContent{Text: "truncated"}},
+		StopReason: llm.StopReasonLength,
+		Usage:      llm.Usage{OutputTokens: 50},
+	}
+
+	if _, err := a.Resume(context.Background(), committed); err != nil {
+		t.Fatal(err)
+	}
+	if len(end.Messages) != 1 {
+		t.Fatalf("agent_end messages=%d, want 1", len(end.Messages))
+	}
+	message, ok := end.Messages[0].(llm.AssistantMessage)
+	if !ok || message.StopReason != llm.StopReasonLength {
+		t.Fatalf("agent_end message=%T %+v, want committed length assistant", end.Messages[0], end.Messages[0])
+	}
+}
+
+func TestAgentSequentialCancellationCompletesToolResults(t *testing.T) {
+	started := make(chan struct{})
+	tool := &controlledTool{
+		name: "sequential",
+		mode: llm.ToolExecutionSequential,
+		run: func(ctx context.Context) (llm.ToolResult, error) {
+			close(started)
+			<-ctx.Done()
+			return llm.ToolResult{}, ctx.Err()
+		},
+	}
+	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{tool}}, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := []llm.ToolCall{
+		{ID: "one", Name: "sequential"},
+		{ID: "two", Name: "sequential"},
+		{ID: "three", Name: "sequential"},
+	}
+	resultCh := make(chan []llm.ToolResultMessage, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		results, err := a.executeToolBatch(ctx, calls)
+		resultCh <- results
+		errCh <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sequential tool")
+	}
+	cancel()
+	results := <-resultCh
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(calls) {
+		t.Fatalf("tool results=%d, want %d", len(results), len(calls))
+	}
+	for i, result := range results {
+		if result.ToolCallID != calls[i].ID || !result.IsError {
+			t.Fatalf("result[%d]=%+v, want aborted result for %q", i, result, calls[i].ID)
+		}
+	}
+}

@@ -115,11 +115,11 @@ func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*l
 	}
 	if committed != nil {
 		calls := assistantToolCalls(*committed)
-		if len(calls) == 0 || isRecoverableLength(*committed, a.AgentConfig.Model) {
+		if committed.StopReason == llm.StopReasonAborted || len(calls) == 0 || isRecoverableLength(*committed, a.AgentConfig.Model) {
 			if err := a.emit(llm.TurnEndEvent{Message: *committed}); err != nil {
 				return nil, err
 			}
-			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+			if err := a.emitAgentEndWithMessages(firstMessageIndex, []llm.Message{*committed}); err != nil {
 				return nil, err
 			}
 			return committed, nil
@@ -470,6 +470,17 @@ func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason,
 // emitAgentEnd 汇总本次运行新增的消息并发出 agent_end
 func (a *Agent) emitAgentEnd(firstMessageIndex int, cause ...error) error {
 	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
+	return a.emitAgentEndMessages(messages, cause...)
+}
+
+// emitAgentEndWithMessages 在恢复路径补充已提交但不属于当前内存切片的消息
+func (a *Agent) emitAgentEndWithMessages(firstMessageIndex int, extra []llm.Message, cause ...error) error {
+	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
+	messages = append(messages, extra...)
+	return a.emitAgentEndMessages(messages, cause...)
+}
+
+func (a *Agent) emitAgentEndMessages(messages []llm.Message, cause ...error) error {
 	var err error
 	if len(cause) > 0 {
 		err = cause[0]
@@ -522,7 +533,9 @@ func (a *Agent) executeToolBatch(ctx context.Context, calls []llm.ToolCall) ([]l
 func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall) ([]llm.ToolResultMessage, error) {
 	results := make([]llm.ToolResultMessage, 0, len(calls))
 	var eventErr error
-	for _, call := range calls {
+	completed := 0
+	for completed < len(calls) {
+		call := calls[completed]
 		if eventErr = a.emitToolStart(call); eventErr != nil {
 			break
 		}
@@ -534,11 +547,18 @@ func (a *Agent) executeSequentialBatch(ctx context.Context, calls []llm.ToolCall
 			result, isError = executeToolCall(ctx, a, call)
 		}
 		results = append(results, toolResultMessage(call, result, isError))
+		completed++
 		if eventErr = a.emitToolEnd(call, result, isError); eventErr != nil {
 			break
 		}
 		if isError && ctx.Err() != nil {
 			break
+		}
+	}
+	if ctx.Err() != nil && completed < len(calls) {
+		// 取消后未启动的调用也要写入结果，保持 assistant tool call 与 result 一一对应
+		for _, call := range calls[completed:] {
+			results = append(results, toolResultMessage(call, abortedToolResult(), true))
 		}
 	}
 	if err := a.commitToolResults(results, eventErr == nil); err != nil {
