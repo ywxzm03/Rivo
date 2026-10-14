@@ -10,6 +10,7 @@ import (
 	"github.com/atotto/clipboard"
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
@@ -39,8 +40,7 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 			if err := clipboard.WriteAll(text); err == nil {
 				return nil
 			}
-			_, err := fmt.Fprint(stderr, osc52.New(text))
-			return err
+			return writeOSC52(stdout, text)
 		},
 	})
 	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(stdin)), tea.WithOutput(tui.NewCursorWriter(stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -53,4 +53,13 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 		return 1
 	}
 	return 0
+}
+
+// writeOSC52 仅向确认可用的终端输出 OSC52，避免重定向时虚报复制成功
+func writeOSC52(stdout *os.File, text string) error {
+	if stdout == nil || !term.IsTerminal(stdout.Fd()) {
+		return fmt.Errorf("clipboard: terminal output unavailable")
+	}
+	_, err := fmt.Fprint(stdout, osc52.New(text))
+	return err
 }

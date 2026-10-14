@@ -31,6 +31,22 @@ func TestMarkdownRendererBoundsWidthAndRoleCache(t *testing.T) {
 	}
 }
 
+func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
+	m := testModel(80, 8)
+	m.openSelector("model", "")
+	for _, budget := range []int{3, 6} {
+		view := m.selector.view(80, budget)
+		lines := strings.Split(view, "\n")
+		if len(lines) != m.selector.height(budget) {
+			t.Fatalf("budget=%d rendered=%d measured=%d", budget, len(lines), m.selector.height(budget))
+		}
+		plain := ansi.Strip(view)
+		if !strings.Contains(plain, "Select Model") || !strings.Contains(plain, "> ") {
+			t.Fatalf("budget=%d lost selector fixed UI: %q", budget, plain)
+		}
+	}
+}
+
 func TestAnimatedToolFramesReuseStaticMarkdownPreview(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true

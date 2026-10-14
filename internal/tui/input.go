@@ -219,7 +219,7 @@ func filterMouseRunes(value string, pending *string) (string, bool) {
 		clean.WriteString(value[i : i+prefix])
 		i += prefix
 	}
-	for _, prefix := range []string{"^[", "^[[", "M[", "["} {
+	for _, prefix := range []string{"^[[<", "M[<", "[<"} {
 		text := clean.String()
 		if !strings.HasSuffix(text, prefix) {
 			continue

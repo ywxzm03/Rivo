@@ -47,7 +47,7 @@ func TestInputReaderPreservesValidMouseReports(t *testing.T) {
 func TestFilterMouseRunesHandlesSplitReports(t *testing.T) {
 	var pending string
 	var got string
-	for _, part := range []string{"[", "<", "64;94;23", "M", "hello"} {
+	for _, part := range []string{"[<", "64;94;23", "M", "hello"} {
 		clean, handled := filterMouseRunes(part, &pending)
 		if !handled && part != "hello" {
 			t.Fatalf("part %q was not handled", part)
@@ -56,6 +56,14 @@ func TestFilterMouseRunesHandlesSplitReports(t *testing.T) {
 	}
 	if got != "hello" || pending != "" {
 		t.Fatalf("filtered split report = %q pending=%q", got, pending)
+	}
+}
+
+func TestFilterMouseRunesPreservesStandaloneBracket(t *testing.T) {
+	var pending string
+	clean, handled := filterMouseRunes("[", &pending)
+	if handled || clean != "[" || pending != "" {
+		t.Fatalf("standalone bracket = %q handled=%v pending=%q", clean, handled, pending)
 	}
 }
 

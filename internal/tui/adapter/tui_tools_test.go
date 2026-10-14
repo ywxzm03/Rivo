@@ -53,6 +53,21 @@ func TestCompletedThinkingSnapshotIsProjectedWithoutStreamEvent(t *testing.T) {
 	}
 }
 
+func TestCallsOnlyAssistantSnapshotWritesToolGroup(t *testing.T) {
+	runtime := &Runtime{sequence: 1}
+	message := llm.AssistantMessage{Content: []llm.Content{
+		llm.ToolCall{ID: "call-1", Name: "read", Arguments: map[string]any{"path": "a.go"}},
+	}}
+
+	converted, ok := runtime.liveAssistantLocked(message, "assistant-1", nil)
+	if !ok || converted.ToolGroup == nil || len(converted.ToolGroup.Calls) != 1 {
+		t.Fatalf("converted = %+v", converted)
+	}
+	if len(runtime.messages) != 1 || runtime.messages[0].ToolGroup == nil || len(runtime.messages[0].ToolGroup.Calls) != 1 {
+		t.Fatalf("runtime messages = %+v, want persisted tool call", runtime.messages)
+	}
+}
+
 func TestEmptyAssistantStartShowsWorkingGroup(t *testing.T) {
 	runtime := &Runtime{sequence: 1}
 	converted, ok := runtime.liveAssistantLocked(llm.AssistantMessage{}, "assistant-1", nil)

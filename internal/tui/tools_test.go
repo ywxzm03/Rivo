@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
+
+func TestShortenToolPathRequiresHomeBoundary(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	separator := string(os.PathSeparator)
+	if got := shortenToolPath(home); got != "~" {
+		t.Fatalf("home path = %q, want ~", got)
+	}
+	if got := shortenToolPath(home + separator + "project"); got != "~"+separator+"project" {
+		t.Fatalf("child path = %q, want home-relative path", got)
+	}
+	if got := shortenToolPath(home + "-backup/project"); got != home+"-backup/project" {
+		t.Fatalf("lookalike path = %q, want unchanged", got)
+	}
+}
 
 func testToolGroup(count int) *ToolGroupView {
 	group := &ToolGroupView{ID: "group", Active: true}

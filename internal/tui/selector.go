@@ -127,11 +127,16 @@ func (s *selector) filter() {
 }
 
 func (s *selector) height(budget int) int {
+	budget = max(1, budget)
 	base := 12
 	if budget < 20 {
 		base = 6
 	}
-	return min(budget, base+max(1, min(10, len(s.filtered))))
+	rows := len(s.filtered)
+	if rows == 0 {
+		rows = 1
+	}
+	return min(budget, base+min(10, rows))
 }
 
 // view 小窗口省略空白与详情，始终为搜索、选择行和边框留出空间
@@ -142,9 +147,15 @@ func (s *selector) view(width, budget int) string {
 	if compact {
 		base = 6
 	}
-	count := max(1, min(10, height-base))
-	start := max(0, min(s.selected-count/2, len(s.filtered)-count))
-	end := min(len(s.filtered), start+count)
+	count := 0
+	if height > base {
+		count = min(10, min(height-base, len(s.filtered)))
+	}
+	start, end := 0, 0
+	if count > 0 {
+		start = max(0, min(s.selected-count/2, len(s.filtered)-count))
+		end = min(len(s.filtered), start+count)
+	}
 	lines := []string{rule(width, "", borderColor, false)}
 	if !compact {
 		lines = append(lines, "")
@@ -185,7 +196,7 @@ func (s *selector) view(width, budget int) string {
 		}
 		lines = append(lines, ansi.Truncate(line, width, "…"))
 	}
-	if len(s.filtered) == 0 {
+	if len(s.filtered) == 0 && height > base {
 		lines = append(lines, colored(mutedColor, "  No matches"))
 	}
 	position := ""
@@ -202,7 +213,8 @@ func (s *selector) view(width, budget int) string {
 	}
 	lines = append(lines, colored(dimColor, ansi.Truncate("  Enter to select · Escape/Ctrl+C to cancel", width, "…")), rule(width, "", borderColor, false))
 	if len(lines) > height {
-		lines = lines[len(lines)-height:]
+		// 极小窗口优先保留标题和搜索框，避免从底部裁掉固定 UI
+		lines = lines[:height]
 	}
 	return strings.Join(lines, "\n")
 }

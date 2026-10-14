@@ -236,6 +236,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 			group = r.ensureToolGroupLocked(id)
 		}
 		r.addAssistantCallsLocked(group, calls)
+		r.setToolGroupLocked(group)
 	}
 	if len(blocks) > 0 && group == nil {
 		// A provider may deliver the completed assistant snapshot without a

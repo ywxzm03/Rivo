@@ -30,7 +30,7 @@ func cloneToolGroup(group *ToolGroupView) *ToolGroupView {
 
 func shortenToolPath(path string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && strings.HasPrefix(path, home) {
+	if err == nil && (path == home || strings.HasPrefix(path, home+string(os.PathSeparator))) {
 		return "~" + strings.TrimPrefix(path, home)
 	}
 	return path
