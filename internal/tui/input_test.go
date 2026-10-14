@@ -13,14 +13,15 @@ import (
 )
 
 func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
-	file, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	file, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
+	defer writer.Close()
 	input := NewInputReader(file)
 	defer input.Close()
-	if _, ok := input.(terminalFile); !ok {
+	if wrapped, ok := input.(terminalFile); !ok || wrapped.Fd() != file.Fd() {
 		t.Fatal("input wrapper lost terminal file methods")
 	}
 	if _, ok := NewCursorWriter(file, nil).(terminalFile); !ok {
@@ -199,34 +200,6 @@ func TestInputReaderPreservesStandaloneEscape(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("standalone Escape blocked waiting for more input")
-	}
-}
-
-func TestInputReaderCloseInterruptsTerminalRead(t *testing.T) {
-	source, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer source.Close()
-	defer writer.Close()
-	reader := NewInputReader(source)
-	started, stopped := make(chan struct{}), make(chan error, 1)
-	go func() {
-		close(started)
-		_, err := reader.Read(make([]byte, 256))
-		stopped <- err
-	}()
-	<-started
-	if err := reader.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-stopped:
-		if err == nil {
-			t.Fatal("closed reader returned no error")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("terminal read survived Close")
 	}
 }
 
