@@ -14,6 +14,7 @@ var commands = []struct{ name, description string }{
 	{"model", "<provider/model> — Select model (opens selector UI)"},
 	{"thinking", "<level> — Set thinking level"},
 	{"resume", "Resume a previous session"},
+	{"rename", "<new Name> — Rename the current session"},
 	{"compact", "[instructions] — Compact the conversation"},
 	{"exit", "Exit Rivo"},
 }
@@ -261,6 +262,12 @@ func (m *Model) submit() tea.Cmd {
 		return m.openSelector("resume", arg)
 	case "/compact":
 		return m.dispatch("compact", arg)
+	case "/rename":
+		if arg == "" {
+			m.notice("Usage: /rename <new Name>")
+			return nil
+		}
+		return m.dispatch("rename", arg)
 	default:
 		m.notice("Unknown command: " + name)
 	}

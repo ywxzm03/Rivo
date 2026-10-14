@@ -222,6 +222,9 @@ func (a *App) ContextView() compaction.ContextView { return a.session.BuildConte
 // SessionID 返回显示身份使用的会话命名空间
 func (a *App) SessionID() string { return a.session.ID() }
 
+// SessionName 返回已提交的 Thread 显示名称
+func (a *App) SessionName() string { return a.session.Name() }
+
 // CurrentModel 返回当前运行模型副本
 func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
 

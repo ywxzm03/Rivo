@@ -17,6 +17,7 @@ const (
 	OperationModel    OperationKind = "model"
 	OperationThinking OperationKind = "thinking"
 	OperationResume   OperationKind = "resume"
+	OperationRename   OperationKind = "rename"
 )
 
 type OperationRequest struct {
@@ -168,6 +169,8 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		result.Err = a.setThinkingLevel(llm.ThinkingLevel(request.Value))
 	case OperationResume:
 		result.Next, result.Err = Open(request.Value, a.cfg, a.onEvent)
+	case OperationRename:
+		result.Err = a.session.AppendSessionInfo(request.Value)
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}

@@ -85,6 +85,7 @@ type Message struct {
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
 type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
+	SessionName                                      string
 	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
 	CurrentModel ModelOption
 	Models       []ModelOption
@@ -92,7 +93,7 @@ type Snapshot struct {
 	Messages     []Message
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact
+// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -127,6 +128,7 @@ type OperationDoneMsg struct {
 	Changes        []Message
 	Snapshot       *Snapshot
 	Err            error
+	Notice         string
 }
 type flushMsg struct{}
 
@@ -284,6 +286,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Err != nil {
 			m.notice("Error: " + msg.Err.Error())
+		} else if msg.Notice != "" {
+			m.notice(msg.Notice)
 		}
 		m.layout()
 		m.refreshTranscript()

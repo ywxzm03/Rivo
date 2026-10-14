@@ -21,6 +21,7 @@ const summaryMaxRunes = 80
 type SessionInfo struct {
 	Path    string
 	ModTime time.Time
+	Name    string
 	// Summary 为首条用户消息的截断摘要，无对话内容时为空
 	Summary string
 }
@@ -53,10 +54,12 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 			continue
 		}
 		path := filepath.Join(dir, f.Name())
+		name, summary := readSessionMetadata(path)
 		infos = append(infos, SessionInfo{
 			Path:    path,
 			ModTime: info.ModTime(),
-			Summary: firstUserSummary(path),
+			Name:    name,
+			Summary: summary,
 		})
 	}
 	// 1.修改时间倒序，最新的排最前，恢复取第一项；同时间戳按路径保证顺序确定
@@ -72,36 +75,44 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 // summaryLineLimit 限制摘要扫描的单行缓冲；超长行（如内嵌 base64 图片的 user 消息）不进内存直接跳过
 const summaryLineLimit = 1 << 20
 
-// firstUserSummary 逐行扫描会话文件，返回首条用户消息折叠空白后的截断摘要；
-// 读取失败、行超限或无对话内容时返回空串。命中首条 user 消息即返回，避免列表场景全量解析历史；
-// 读行有界，超限记录跳过，内存占用不随会话内容增长
-func firstUserSummary(path string) string {
+// readSessionMetadata 有界扫描会话文件，取最新名称与首条用户摘要；
+// 摘要确定后只解码名称记录，内存占用不随会话内容增长
+func readSessionMetadata(path string) (name, summary string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer f.Close()
 	reader := bufio.NewReader(f)
+	hasSummary := false
 	for {
 		line, oversize, readErr := readBoundedLine(reader)
 		if !oversize {
 			trimmed := bytes.TrimSpace(line)
-			if len(trimmed) > 0 {
-				var probe entryLine
-				if json.Unmarshal(trimmed, &probe) == nil && probe.Type != TypeSession {
-					entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
-					if decodeErr == nil {
-						if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
-							// 1.多行输入折叠为单空格，避免破坏编号列表排版
-							return truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
+			var probe entryLine
+			if json.Unmarshal(trimmed, &probe) == nil {
+				switch probe.Type {
+				case TypeSessionInfo:
+					var info SessionInfoEntry
+					if json.Unmarshal(trimmed, &info) == nil {
+						name = info.Name
+					}
+				case TypeMessage:
+					if !hasSummary {
+						entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
+						if decodeErr == nil {
+							if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
+								// 多行输入折叠为空格，避免破坏会话列表排版
+								summary = truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
+								hasSummary = true
+							}
 						}
 					}
 				}
 			}
 		}
 		if readErr != nil {
-			// 2.EOF 或读取错误均停止：EOF 前已处理完剩余内容
-			return ""
+			return name, summary
 		}
 	}
 }

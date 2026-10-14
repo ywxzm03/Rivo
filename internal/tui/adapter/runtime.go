@@ -129,7 +129,11 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err}
+		var notice string
+		if req.Kind == "rename" && result.Err == nil {
+			notice = "Session renamed: " + snapshot.SessionName
+		}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice}
 	}
 }
 
@@ -405,7 +409,7 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Messages: messages}
+		Thinking: string(thinking), Models: models, Messages: messages, SessionName: r.app.SessionName()}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
@@ -413,7 +417,11 @@ func listSessionOptions(cwd string) []tui.SessionOption {
 	sessions, _ := session.ListSessions(cwd)
 	options := make([]tui.SessionOption, 0, len(sessions))
 	for _, item := range sessions {
-		options = append(options, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: session.RelativeTime(item.ModTime)})
+		label := item.Name
+		if label == "" {
+			label = item.Summary
+		}
+		options = append(options, tui.SessionOption{Path: item.Path, Summary: label, Modified: session.RelativeTime(item.ModTime)})
 	}
 	return options
 }
