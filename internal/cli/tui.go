@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/atotto/clipboard"
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
@@ -31,7 +32,11 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
+	if msg := a.ModelFallbackMessage(); msg != "" {
+		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
+	}
 	runtime.Attach(a)
+	output := newSerializedOutput(stdout)
 	model := tui.New(runtime.Snapshot(), tui.Handlers{
 		Request:       runtime.Request,
 		Cancel:        runtime.Cancel,
@@ -40,10 +45,10 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 			if err := clipboard.WriteAll(text); err == nil {
 				return nil
 			}
-			return writeOSC52(stdout, text)
+			return writeOSC52(output, text)
 		},
 	})
-	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(stdin)), tea.WithOutput(tui.NewCursorWriter(stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(stdin)), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	runtime.SetProgram(program)
 	_, err = program.Run()
 	runtime.Cancel()
@@ -55,8 +60,55 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	return 0
 }
 
+// serializedOutput 串行化 Bubble Tea 渲染与 OSC52 fallback 的终端写入
+type serializedOutput struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+func newSerializedOutput(file *os.File) *serializedOutput {
+	return &serializedOutput{file: file}
+}
+
+func (w *serializedOutput) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return w.file.Write(data)
+}
+
+func (w *serializedOutput) Read(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return w.file.Read(data)
+}
+
+func (w *serializedOutput) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	return w.file.Close()
+}
+
+func (w *serializedOutput) Fd() uintptr {
+	if w.file == nil {
+		return 0
+	}
+	return w.file.Fd()
+}
+
 // writeOSC52 仅向确认可用的终端输出 OSC52，避免重定向时虚报复制成功
-func writeOSC52(stdout *os.File, text string) error {
+func writeOSC52(stdout interface {
+	io.Writer
+	Fd() uintptr
+}, text string) error {
 	if stdout == nil || !term.IsTerminal(stdout.Fd()) {
 		return fmt.Errorf("clipboard: terminal output unavailable")
 	}

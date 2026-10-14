@@ -117,7 +117,7 @@ func (s *selector) filter() {
 	} else {
 		labels := make([]string, len(s.items))
 		for i, item := range s.items {
-			labels[i] = item.label + " " + item.description
+			labels[i] = item.label + " " + item.description + " " + item.detail
 		}
 		for _, match := range fuzzy.Find(query, labels) {
 			s.filtered = append(s.filtered, s.items[match.Index])
