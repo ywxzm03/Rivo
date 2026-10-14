@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
@@ -65,5 +66,31 @@ func TestAgentEndSendsOnlyChangedBlocksWithLongHistory(t *testing.T) {
 	_ = r.handleEvent(llm.AgentEndEvent{})
 	if len(sent) != 1 {
 		t.Fatalf("completion sent %d history blocks, want one changed divider", len(sent))
+	}
+}
+
+func TestSnapshotIncludesAllConfiguredModels(t *testing.T) {
+	setupAdapterEnv(t)
+	cfg, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runtime{app: a, cfg: cfg, cwd: t.TempDir()}
+	snapshot := r.snapshotLocked(false)
+	if len(snapshot.Models) != len(cfg.AvailableModels()) {
+		t.Fatalf("snapshot models = %d, want %d", len(snapshot.Models), len(cfg.AvailableModels()))
+	}
+	got := make(map[string]bool, len(snapshot.Models))
+	for _, model := range snapshot.Models {
+		got[model.Key()] = true
+	}
+	for _, model := range cfg.AvailableModels() {
+		if !got[model.Provider+"/"+model.ID] {
+			t.Fatalf("snapshot omitted configured model %s/%s", model.Provider, model.ID)
+		}
 	}
 }

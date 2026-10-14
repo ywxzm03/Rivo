@@ -41,6 +41,14 @@ func TestPasteNoFoldSmall(t *testing.T) {
 	}
 }
 
+func TestPastePreservesTerminalLikeText(t *testing.T) {
+	m := testModel(80, 24)
+	pasteText(m, "arr[M] [<tag>\x01")
+	if got := m.editor.Value(); got != "arr[M] [<tag>" {
+		t.Fatalf("paste text = %q, want terminal-like text preserved and control byte cleaned", got)
+	}
+}
+
 func TestManualTypingNoFold(t *testing.T) {
 	m := testModel(80, 24)
 	typeText(m, strings.Repeat("x", 1001))

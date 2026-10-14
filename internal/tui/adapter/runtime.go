@@ -396,9 +396,6 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	models := make([]tui.ModelOption, 0)
 	for _, candidate := range r.app.AvailableModels() {
-		if candidate.Provider != "deepseek" || candidate.ID != "deepseek-v4.1-flash" {
-			continue
-		}
 		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate)})
 	}
 	current := modelOption(model)

@@ -269,7 +269,7 @@ func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 
 // isTerminalControlKey prevents incomplete CSI/SGR reports from becoming text.
 func isTerminalControlKey(msg tea.KeyMsg) bool {
-	if msg.Type != tea.KeyRunes {
+	if msg.Type != tea.KeyRunes || msg.Paste {
 		return false
 	}
 	value := string(msg.Runes)

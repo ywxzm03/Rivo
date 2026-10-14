@@ -85,7 +85,7 @@ type Message struct {
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
 type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
-	// CurrentModel 保留运行中的模型，即使选择器暂时只展示有限目录
+	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
 	CurrentModel ModelOption
 	Models       []ModelOption
 	Sessions     []SessionOption
