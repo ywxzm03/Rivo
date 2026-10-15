@@ -26,49 +26,102 @@ type skillFrontmatter struct {
 // discoverSkills 加载全局与项目级 skills；全局先加载，重名时先加载者胜
 func discoverSkills(cwd, agentDir string) []Skill {
 	var skills []Skill
-	seen := make(map[string]bool)
+	seenNames := make(map[string]bool)
+	seenFiles := make(map[string]bool)
+	add := func(skill Skill) {
+		// 1.同一份 SKILL.md 通过多个软链接出现时只保留第一次结果
+		fileKey := skillFileKey(skill.FilePath)
+		if seenFiles[fileKey] {
+			return
+		}
+		// 2.全局目录先加入，名称冲突时它胜出
+		if seenNames[skill.Name] {
+			return
+		}
+		seenFiles[fileKey] = true
+		seenNames[skill.Name] = true
+		skills = append(skills, skill)
+	}
 	// 1.全局目录优先，冲突时它胜出
 	for _, skill := range loadSkillsFromDir(filepath.Join(agentDir, skillsDirName)) {
-		if seen[skill.Name] {
-			continue
-		}
-		seen[skill.Name] = true
-		skills = append(skills, skill)
+		add(skill)
 	}
 	// 2.项目级目录补充，重名项跳过
 	for _, skill := range loadSkillsFromDir(filepath.Join(cwd, ".rivo", skillsDirName)) {
-		if seen[skill.Name] {
-			continue
-		}
-		seen[skill.Name] = true
-		skills = append(skills, skill)
+		add(skill)
 	}
 	return skills
 }
 
-// loadSkillsFromDir 扫描 skills 根目录：含 SKILL.md 的子目录视为 skill，不再向内递归；
-// 目录不存在或读取失败按空结果处理
+// loadSkillsFromDir 扫描 skills 根目录及其子目录，目录不存在或读取失败按空结果处理
 func loadSkillsFromDir(dir string) []Skill {
+	return loadSkillsFromDirRecursive(dir, make(map[string]bool))
+}
+
+// loadSkillsFromDirRecursive 递归扫描目录并按真实路径防止软链接循环
+func loadSkillsFromDirRecursive(dir string, visited map[string]bool) []Skill {
+	dirKey, ok := skillFileKeyIfExists(dir)
+	if !ok || visited[dirKey] {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
+	visited[dirKey] = true
+	// 当前目录声明了 Skill 时，优先使用它并停止向下递归
+	for _, entry := range entries {
+		if entry.Name() != "SKILL.md" {
+			continue
+		}
+		rootSkillPath := filepath.Join(dir, entry.Name())
+		info, err := os.Stat(rootSkillPath)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		if skill, ok := loadSkillFromFile(rootSkillPath, dir); ok {
+			return []Skill{skill}
+		}
+		return nil
+	}
+
 	var skills []Skill
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
 			continue
 		}
 		skillDir := filepath.Join(dir, entry.Name())
-		skillPath := filepath.Join(skillDir, "SKILL.md")
-		info, err := os.Stat(skillPath)
-		if err != nil || !info.Mode().IsRegular() {
+		info, err := os.Stat(skillDir)
+		if err != nil || !info.IsDir() {
 			continue
 		}
-		if skill, ok := loadSkillFromFile(skillPath, skillDir); ok {
-			skills = append(skills, skill)
-		}
+		skills = append(skills, loadSkillsFromDirRecursive(skillDir, visited)...)
 	}
 	return skills
+}
+
+// skillFileKey 返回存在路径的绝对真实路径，用于目录访问和文件去重
+func skillFileKey(path string) string {
+	if key, ok := skillFileKeyIfExists(path); ok {
+		return key
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(absolute)
+	}
+	return filepath.Clean(path)
+}
+
+// skillFileKeyIfExists 解析文件或目录软链接并确认路径存在
+func skillFileKeyIfExists(path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return filepath.Clean(resolved), true
+	}
+	return filepath.Clean(absolute), true
 }
 
 // loadSkillFromFile 解析单个 SKILL.md：frontmatter 非法或校验失败时跳过
