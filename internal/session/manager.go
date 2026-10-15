@@ -14,7 +14,7 @@ import (
 )
 
 // SessionManager 管理一个树形 JSONL 会话：entry 按文件序追加，leaf 指向当前分支位置，
-// 设置先写入隐藏草稿，首条对话消息发布 JSONL；持久化成功后才推进内存
+// 设置先写入隐藏草稿，命名或首条对话消息发布 JSONL；持久化成功后才推进内存
 type SessionManager struct {
 	header      Header
 	entries     []Entry
@@ -49,7 +49,7 @@ func dirName(cwd string) string {
 	return "--" + replacer.Replace(trimmed) + "--"
 }
 
-// New 在 dir 下创建新会话；header 只在内存，文件名此时确定，落盘延迟到首条对话消息
+// New 在 dir 下创建新会话；header 只在内存，正式发布延迟到命名或首条对话消息
 func New(cwd, dir string) *SessionManager {
 	header := Header{
 		Type:      TypeSession,
@@ -125,6 +125,25 @@ func (m *SessionManager) AppendThinkingLevelChange(level string) error {
 	return m.appendEntry(&ThinkingLevelChangeEntry{ThinkingLevel: level})
 }
 
+// AppendSessionInfo 规范化名称并追加元数据，空名称不提交
+func (m *SessionManager) AppendSessionInfo(name string) error {
+	name = strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(name))
+	if name == "" {
+		return errors.New("Usage: /rename <new Name>")
+	}
+	return m.appendEntry(&SessionInfoEntry{Name: name})
+}
+
+// Name 从文件追加顺序取最新名称，切换分支不改变 Thread 名称
+func (m *SessionManager) Name() string {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if info, ok := m.entries[i].(*SessionInfoEntry); ok {
+			return info.Name
+		}
+	}
+	return ""
+}
+
 // AppendUsage 记录不依附消息的模型用量，note 为空时不写入
 func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usage, note string) error {
 	return m.appendEntry(&UsageEntry{
@@ -196,7 +215,7 @@ type CommitError struct{ Err error }
 func (e *CommitError) Error() string { return e.Err.Error() }
 func (e *CommitError) Unwrap() error { return e.Err }
 
-// Path 返回发布后的会话路径；无对话时该路径尚不存在
+// Path 返回会话路径；未命名且无对话时正式文件尚不存在
 func (m *SessionManager) Path() string { return m.sessionFile }
 
 // ID 返回会话命名空间
@@ -320,7 +339,7 @@ func (m *SessionManager) persist(entries []Entry) error {
 			return err
 		}
 		draft := m.sessionFile + ".draft"
-		if !hasConversation(all) {
+		if !shouldPublish(all) {
 			return os.Rename(f.Name(), draft)
 		}
 		// 同目录重命名发布完整文件，不依赖文件系统支持硬链接
@@ -396,14 +415,19 @@ func entryTypeName(e Entry) string {
 		return TypeCompaction
 	case *ContextEditEntry:
 		return TypeContextEdit
+	case *SessionInfoEntry:
+		return TypeSessionInfo
 	default:
 		return ""
 	}
 }
 
-// hasConversation 判断是否已有 user 或 assistant 消息，作为首次落盘的触发条件
-func hasConversation(entries []Entry) bool {
+// shouldPublish 命名或产生首条对话后发布正式会话，其余设置留在草稿
+func shouldPublish(entries []Entry) bool {
 	for _, e := range entries {
+		if info, ok := e.(*SessionInfoEntry); ok && info.Name != "" {
+			return true
+		}
 		me, ok := e.(*MessageEntry)
 		if !ok {
 			continue

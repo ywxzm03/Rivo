@@ -21,14 +21,22 @@ type markdownRendererKey struct {
 	role  string
 }
 
-func primitive(color string) style.StylePrimitive { return style.StylePrimitive{Color: &color} }
-
 // markdownStyle 逐项映射 Pi Markdown/语法高亮 token，不混入 Glamour 默认配色
 func markdownStyle(role string) style.StyleConfig {
+	primitive := func(color string) style.StylePrimitive {
+		// Skill 正文统一浅白色，保留各 Markdown 节点的排版和强调样式
+		if role == "skill" {
+			color = textColor
+		}
+		return style.StylePrimitive{Color: &color}
+	}
 	zero, one := uint(0), uint(1)
 	yes := true
 	quote, center, column, row := "│ ", "┼", "│", "─"
 	quoteColor, bulletColor := mutedColor, accentColor
+	if role == "skill" {
+		quoteColor, bulletColor = textColor, textColor
+	}
 	text := primitive(textColor)
 	if role == "thinking" {
 		text = primitive(thinkingColor)
@@ -153,6 +161,19 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(parts, "\n")
 	}
 	if message.Role == "user" {
+		if skill := message.Skill; skill != nil {
+			label := "[skill] " + skill.Name
+			var parts []string
+			if m.showAllTools {
+				parts = append(parts, colored(accentColor, ansi.Wrap(label, width, "")), indent(m.markdown.render(skill.Content, "skill", width)))
+			} else {
+				parts = append(parts, colored(mutedColor, ansi.Wrap(label+" (Ctrl+O to expand)", width, "")))
+			}
+			if skill.Arguments != "" {
+				parts = append(parts, m.renderMessage(Message{Role: "user", Text: skill.Arguments}))
+			}
+			return strings.Join(parts, "\n\n")
+		}
 		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
 		body := ansi.Strip(m.markdown.render(message.Text, "user", width))
 		lines := strings.Split(body, "\n")

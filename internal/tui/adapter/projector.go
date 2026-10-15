@@ -357,7 +357,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 			case llm.UserMessage:
 				seal()
 				if text := textContent(current.Content); text != "" {
-					projected = append(projected, tui.Message{ID: id, Role: "user", Text: text})
+					projected = append(projected, tui.Message{ID: id, Role: "user", Text: text, Skill: skillInvocation(text)})
 				}
 			case llm.AssistantMessage:
 				if current.StopReason == llm.StopReasonError {
