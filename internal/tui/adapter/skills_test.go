@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -165,6 +167,72 @@ func TestResourceBoundariesRefreshSkillMetadata(t *testing.T) {
 	done = r.request(tui.Request{Kind: "resume", Value: files[0]})().(tui.OperationDoneMsg)
 	if done.Err != nil || len(done.Snapshot.Skills) != 0 {
 		t.Fatal("resume reused the previous skill directory snapshot")
+	}
+}
+
+func TestLinkedSkillReloadsIntoCompletionAndInvocation(t *testing.T) {
+	payloads := make(chan string, 1)
+	r, path, _ := newSkillRuntime(t, func(w http.ResponseWriter, req *http.Request) {
+		data, _ := io.ReadAll(req.Body)
+		payloads <- string(data)
+		completeSkillResponse(w)
+	})
+	// 1.将已安装的 Skill 改为指向外部目录的嵌套软链接
+	targetDir := filepath.Join(t.TempDir(), "docs")
+	if err := os.Rename(filepath.Dir(path), targetDir); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(os.Getenv("RIVO_AGENT_DIR"), "skills", "catalog", "linked")
+	if err := os.MkdirAll(filepath.Dir(linkDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	done := r.request(tui.Request{Kind: "reload"})().(tui.OperationDoneMsg)
+	if done.Err != nil || done.Snapshot == nil || len(done.Snapshot.Skills) != 1 || done.Snapshot.Skills[0].Name != "pdf-tools" {
+		t.Fatalf("reload = %+v, want linked skill in snapshot", done)
+	}
+	linkPath := filepath.Join(linkDir, "SKILL.md")
+	if skills := r.app.Skills(); len(skills) != 1 || skills[0].FilePath != linkPath || skills[0].BaseDir != linkDir {
+		t.Fatalf("skills = %+v, want paths through the directory link", skills)
+	}
+
+	// 2.真实快照中的 Skill 同时支持裸名查询和 skill 前缀补全
+	var request tui.Request
+	for _, input := range []string{"/pdf", "/skill"} {
+		request = tui.Request{}
+		model := tui.New(*done.Snapshot, tui.Handlers{Request: func(req tui.Request) tea.Cmd { request = req; return nil }})
+		model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(input)})
+		if view := ansi.Strip(model.View()); !strings.Contains(view, "→ skill:pdf-tools") {
+			t.Fatalf("input %q: completion missing from %q", input, view)
+		}
+		model.Update(tea.KeyMsg{Type: tea.KeyTab})
+		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("User request")})
+		model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if request.Kind != "run" || request.Value != "/skill:pdf-tools User request" {
+			t.Fatalf("completed request = %+v", request)
+		}
+	}
+
+	// 3.补全后的调用通过链接读取正文，断链后 reload 清除候选
+	done = r.request(request)().(tui.OperationDoneMsg)
+	if done.Err != nil {
+		t.Fatal(done.Err)
+	}
+	if payload := <-payloads; !strings.Contains(payload, "Original instructions") || !strings.Contains(payload, "User request") {
+		t.Fatalf("linked skill body or arguments missing from payload: %s", payload)
+	}
+	if len(r.messages) != 2 || r.messages[0].Skill == nil || r.messages[0].Skill.Location != linkPath {
+		t.Fatal("saved invocation did not preserve the skill link path")
+	}
+	if err := os.RemoveAll(targetDir); err != nil {
+		t.Fatal(err)
+	}
+	done = r.request(tui.Request{Kind: "reload"})().(tui.OperationDoneMsg)
+	if done.Err != nil || done.Snapshot == nil || len(done.Snapshot.Skills) != 0 {
+		t.Fatalf("reload = %+v, want missing linked skill removed", done)
 	}
 }
 
