@@ -23,6 +23,7 @@ const (
 	TypeUsage               = "usage"
 	TypeCompaction          = "compaction"
 	TypeContextEdit         = "context_edit"
+	TypeSessionInfo         = "session_info"
 )
 
 // Header 会话文件首行，只记录元数据，不参与树结构
@@ -64,6 +65,12 @@ type ModelChangeEntry struct {
 type ThinkingLevelChangeEntry struct {
 	EntryBase
 	ThinkingLevel string `json:"thinkingLevel"`
+}
+
+// SessionInfoEntry 保存整个 Thread 的显示名称，不参与模型上下文
+type SessionInfoEntry struct {
+	EntryBase
+	Name string `json:"name"`
 }
 
 // Usage 不依附消息的 token 记录，计入会话用量但不进 LLM 上下文

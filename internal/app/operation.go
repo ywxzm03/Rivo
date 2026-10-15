@@ -17,6 +17,9 @@ const (
 	OperationModel    OperationKind = "model"
 	OperationThinking OperationKind = "thinking"
 	OperationResume   OperationKind = "resume"
+	OperationRename   OperationKind = "rename"
+	OperationNew      OperationKind = "new"
+	OperationReload   OperationKind = "reload"
 )
 
 type OperationRequest struct {
@@ -88,7 +91,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	defer func() {
 		a.agent.ReplaceMessages(a.session.BuildContext().Messages())
 		var commitErr *session.CommitError
-		if errors.As(result.Err, &commitErr) && a.pendingRequest == nil {
+		if errors.As(result.Err, &commitErr) && a.session.HasPending() && a.pendingRequest == nil {
 			copy := request
 			a.pendingRequest = &copy
 		}
@@ -168,6 +171,12 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		result.Err = a.setThinkingLevel(llm.ThinkingLevel(request.Value))
 	case OperationResume:
 		result.Next, result.Err = Open(request.Value, a.cfg, a.onEvent)
+	case OperationRename:
+		result.Err = a.session.AppendSessionInfo(request.Value)
+	case OperationNew:
+		result.Next, result.Err = a.newSession()
+	case OperationReload:
+		a.Reload()
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}

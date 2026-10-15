@@ -45,6 +45,7 @@ type Runtime struct {
 	toolStarted            map[string]time.Time
 	turnStarted            time.Time
 	turnRetrying           bool
+	pendingSkillInput      *skillInput
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {
@@ -57,6 +58,16 @@ func (r *Runtime) SetProgram(program *tea.Program) {
 func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
 	activeApp := r.app
+	r.mu.Unlock()
+	value := req.Value
+	if req.Kind == "run" {
+		var err error
+		value, err = r.expandSkillInput(activeApp, value)
+		if err != nil {
+			return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
+		}
+	}
+	r.mu.Lock()
 	if req.Kind == "run" {
 		r.messageIndexLocked("")
 		r.operationLastAssistant, r.operationHadToolGroup = r.lastAssistantIndex, r.hasToolGroup
@@ -71,18 +82,34 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		r.turnRetrying = false
 	}
 	r.mu.Unlock()
-	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: req.Value})
+	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value})
 	if err != nil {
 		return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
 	}
 	return func() tea.Msg {
 		result := op.Wait()
 		r.mu.Lock()
+		var commitErr *session.CommitError
+		if errors.As(result.Err, &commitErr) {
+			if req.Kind == "run" && strings.HasPrefix(req.Value, "/skill:") {
+				r.pendingSkillInput = &skillInput{raw: req.Value, expanded: value}
+			}
+		} else {
+			r.pendingSkillInput = nil
+		}
 		reset := result.Next != nil || r.resetNeeded || result.Replayed
 		if result.Next != nil {
 			r.app = result.Next
 			r.namespace = result.Next.SessionID()
 			r.messages = nil
+			r.pendingSkillInput = nil
+			if req.Kind == "new" {
+				r.operationEntries = nil
+				r.sequence, r.assistantTurn = 0, 0
+				r.userID = ""
+				r.toolStarted = nil
+				r.turnStarted, r.turnRetrying = time.Time{}, false
+			}
 		}
 		if reset {
 			r.replaceMessagesLocked(r.app.ContextView())
@@ -129,7 +156,18 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err}
+		var notice string
+		if result.Err == nil {
+			switch req.Kind {
+			case "rename":
+				notice = "Session renamed: " + snapshot.SessionName
+			case "new":
+				notice = "New session started"
+			case "reload":
+				notice = "Reloaded context files and skills"
+			}
+		}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, ResetSessionUI: req.Kind == "new" && result.Next != nil}
 	}
 }
 
@@ -361,6 +399,7 @@ func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Mess
 	switch message := message.(type) {
 	case llm.UserMessage:
 		converted.Role, converted.Text = "user", textContent(message.Content)
+		converted.Skill = skillInvocation(converted.Text)
 	case llm.AssistantMessage:
 		converted.Role = "assistant"
 		for _, content := range message.Content {
@@ -400,12 +439,16 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate)})
 	}
 	current := modelOption(model)
+	var skills []tui.SkillOption
+	for _, skill := range r.app.Skills() {
+		skills = append(skills, tui.SkillOption{Name: skill.Name, Description: skill.Description})
+	}
 	var messages []tui.Message
 	if includeMessages {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Messages: messages}
+		Thinking: string(thinking), Models: models, Messages: messages, SessionName: r.app.SessionName(), Skills: skills}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
@@ -413,7 +456,11 @@ func listSessionOptions(cwd string) []tui.SessionOption {
 	sessions, _ := session.ListSessions(cwd)
 	options := make([]tui.SessionOption, 0, len(sessions))
 	for _, item := range sessions {
-		options = append(options, tui.SessionOption{Path: item.Path, Summary: item.Summary, Modified: session.RelativeTime(item.ModTime)})
+		label := item.Name
+		if label == "" {
+			label = item.Summary
+		}
+		options = append(options, tui.SessionOption{Path: item.Path, Summary: label, Modified: session.RelativeTime(item.ModTime)})
 	}
 	return options
 }

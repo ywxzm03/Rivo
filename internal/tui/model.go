@@ -28,6 +28,16 @@ type SessionOption struct {
 	Path, Summary, Modified string
 }
 
+// SkillOption 是命令补全使用的技能元数据，不向 UI 暴露文件读取职责
+type SkillOption struct {
+	Name, Description string
+}
+
+// SkillInvocationView 保存已提交正文的显示投影，不重新读取磁盘
+type SkillInvocationView struct {
+	Name, Location, Content, Arguments string
+}
+
 // ToolStatus 表示工具调用在 compact transcript 中的状态
 type ToolStatus string
 
@@ -80,19 +90,22 @@ type Message struct {
 	Aborted                  bool
 	ToolGroup                *ToolGroupView
 	Divider                  *TurnDividerView
+	Skill                    *SkillInvocationView
 }
 
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
 type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
+	SessionName                                      string
 	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
 	CurrentModel ModelOption
 	Models       []ModelOption
 	Sessions     []SessionOption
 	Messages     []Message
+	Skills       []SkillOption
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact
+// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename/new/reload
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -127,6 +140,8 @@ type OperationDoneMsg struct {
 	Changes        []Message
 	Snapshot       *Snapshot
 	Err            error
+	Notice         string
+	ResetSessionUI bool
 }
 type flushMsg struct{}
 
@@ -269,6 +284,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy, m.flushPending, m.status = false, false, ""
+		if msg.ResetSessionUI {
+			m.resetSessionUI()
+		}
 		if msg.Snapshot != nil {
 			if msg.RetainMessages {
 				m.applyMetadata(*msg.Snapshot)
@@ -284,6 +302,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Err != nil {
 			m.notice("Error: " + msg.Err.Error())
+		} else if msg.Notice != "" {
+			m.notice(msg.Notice)
 		}
 		m.layout()
 		m.refreshTranscript()
@@ -344,6 +364,10 @@ func (m *Model) applySnapshot(s Snapshot) {
 	m.state.Messages = append([]Message(nil), s.Messages...)
 	for i := range m.state.Messages {
 		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
+		if skill := m.state.Messages[i].Skill; skill != nil {
+			copy := *skill
+			m.state.Messages[i].Skill = &copy
+		}
 		if divider := m.state.Messages[i].Divider; divider != nil {
 			copy := *divider
 			m.state.Messages[i].Divider = &copy
@@ -401,6 +425,25 @@ func (m *Model) notice(value string) {
 	m.refreshTranscript()
 }
 
+// resetSessionUI 仅在新会话切换成功后恢复编辑器与显示偏好的初始状态
+func (m *Model) resetSessionUI() {
+	m.editor.Reset()
+	m.resetPastes()
+	m.history, m.draft = nil, ""
+	m.historyPos, m.completion = 0, 0
+	m.completionHidden = true
+	m.selector = nil
+	m.editor.Focus()
+	m.hideThinking, m.showAllTools = false, false
+	m.clearSelection()
+	m.cache = make(map[string]cachedMessage)
+	m.markdownPreview = make(map[string]string)
+	m.copyNoticeSeq++
+	m.copyNotice = false
+	m.lastCtrlC = time.Time{}
+	m.viewport.GotoTop()
+}
+
 // refreshTranscript 仅重渲染内容/宽度/思考可见性发生变化的消息
 func (m *Model) refreshTranscript() {
 	if m.width == 0 {
@@ -442,6 +485,8 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state.Messages = messages
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
+	m.state.Skills = append([]SkillOption(nil), s.Skills...)
+	m.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}

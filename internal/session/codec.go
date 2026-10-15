@@ -101,6 +101,12 @@ func decodeEntry(typ, line string) (Entry, error) {
 			return nil, err
 		}
 		return &e, nil
+	case TypeSessionInfo:
+		var e SessionInfoEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			return nil, err
+		}
+		return &e, nil
 	case TypeUsage:
 		var e UsageEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
