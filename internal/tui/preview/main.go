@@ -214,7 +214,9 @@ func main() {
 			driver.cancel()
 		}
 	}}), scene: *scene}
-	program := tea.NewProgram(model, tea.WithInput(tui.NewInputReader(os.Stdin)), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	input := tui.NewInputReader(os.Stdin)
+	defer input.Close()
+	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	driver.send = program.Send
 	_, err := program.Run()
 	if driver.cancel != nil {
