@@ -12,6 +12,7 @@ const (
 	dimColor            = "#999999" // dim
 	thinkingColor       = "#999999" // thinkingText
 	userBg              = "#373737" // user message frame
+	userBgHover         = "#464646" // hovered jump pill
 	greenColor          = "#4eba65" // success / inserted
 	redColor            = "#ff6b80" // error / deleted
 	yellowColor         = "#ffc107" // warning

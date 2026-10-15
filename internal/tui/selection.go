@@ -21,6 +21,8 @@ func (m *Model) clearSelection() {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	m.mousePosition = screenPoint{x: msg.X, y: msg.Y}
+	m.mousePositionSet = true
 	if mouseIsWheel(msg) {
 		if m.selector == nil {
 			var cmd tea.Cmd

@@ -196,6 +196,8 @@ type Model struct {
 	selecting        bool
 	lastClick        screenPoint
 	lastClickAt      time.Time
+	mousePosition    screenPoint
+	mousePositionSet bool
 	mouseFragment    string
 	copyNoticeSeq    uint64
 	copyNotice       bool

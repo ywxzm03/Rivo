@@ -67,6 +67,27 @@ func TestJumpToBottomMouseClick(t *testing.T) {
 	}
 }
 
+func TestJumpToBottomPillHoverUsesClaudeHoverBackground(t *testing.T) {
+	m := scrollableModel(t)
+	bounds, ok := m.jumpPillBounds()
+	if !ok {
+		t.Fatal("jump pill should be visible before hover")
+	}
+	base := m.View()
+	if !strings.Contains(base, "48;2;55;55;55") || strings.Contains(base, "48;2;70;70;70") {
+		t.Fatalf("base pill background = %q, want #373737 without hover color", base)
+	}
+	m.Update(tea.MouseMsg{X: (bounds.left + bounds.right) / 2, Y: bounds.y, Action: tea.MouseActionMotion, Button: tea.MouseButtonNone})
+	hovered := m.View()
+	if !strings.Contains(hovered, "48;2;70;70;70") {
+		t.Fatalf("hovered pill background = %q, want #464646", hovered)
+	}
+	m.Update(tea.MouseMsg{X: 0, Y: 0, Action: tea.MouseActionMotion, Button: tea.MouseButtonNone})
+	if strings.Contains(m.View(), "48;2;70;70;70") {
+		t.Fatal("moving away from pill should restore the base background")
+	}
+}
+
 func TestJumpToBottomPillHiddenForCompletionAndSelector(t *testing.T) {
 	m := scrollableModel(t)
 	typeText(m, "/")

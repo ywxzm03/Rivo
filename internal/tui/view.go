@@ -138,6 +138,11 @@ func (m *Model) jumpPillVisible() bool {
 	return ok
 }
 
+func (m *Model) jumpPillHovered() bool {
+	bounds, ok := m.jumpPillBounds()
+	return ok && m.mousePositionSet && m.mousePosition.y == bounds.y && m.mousePosition.x >= bounds.left && m.mousePosition.x < bounds.right
+}
+
 // paintJumpPill 在 transcript 最后一行覆盖 Claude 风格的到底提示
 func (m *Model) paintJumpPill(lines []string) {
 	bounds, ok := m.jumpPillBounds()
@@ -149,8 +154,12 @@ func (m *Model) paintJumpPill(lines []string) {
 	if lineWidth < m.width {
 		line += strings.Repeat(" ", m.width-lineWidth)
 	}
+	background := userBg
+	if m.jumpPillHovered() {
+		background = userBgHover
+	}
 	pill := lipgloss.NewStyle().
-		Background(lipgloss.Color(userBg)).
+		Background(lipgloss.Color(background)).
 		Foreground(lipgloss.Color(textColor)).
 		Faint(true).
 		Render(jumpToBottomLabel)
