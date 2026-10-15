@@ -81,8 +81,12 @@ func TestManualCompactionHidesPromptAfterCompletionAndResume(t *testing.T) {
 			t.Fatalf("compacted transcript has %d messages; want the retained user and assistant with source IDs", len(snapshot.Messages))
 		}
 	}
-	if view := ansi.Strip(model.View()); strings.Contains(view, "<summary>") || strings.Contains(view, "internal compaction summary") || !strings.Contains(view, "kept answer") {
+	view := ansi.Strip(model.View())
+	if strings.Contains(view, "<summary>") || strings.Contains(view, "internal compaction summary") || !strings.Contains(view, "kept answer") {
 		t.Fatalf("compacted frame = %q", view)
+	}
+	if !strings.Contains(view, "Context compacted (manual)") {
+		t.Fatalf("compaction completion was not rendered: %q", view)
 	}
 	resumed := New(cfg, cwd, "main")
 	reopened, err := app.Open(sm.Path(), cfg, resumed.HandleEvent)
