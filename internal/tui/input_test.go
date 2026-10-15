@@ -93,13 +93,29 @@ func TestFilterMouseRunesPreservesMalformedNumericText(t *testing.T) {
 }
 
 func TestInputReaderPreservesBracketedPaste(t *testing.T) {
-	value := "\x1b[200~[<64;94;23M\ntext\x1b[201~"
-	data, err := io.ReadAll(NewInputReader(strings.NewReader(value)))
-	if err != nil {
-		t.Fatal(err)
+	value := "\x1b[200~[<64;94;23M [Markdown]\ntext 中文 👋\x1b[201~"
+	var parts []io.Reader
+	for i := range len(value) {
+		parts = append(parts, strings.NewReader(value[i:i+1]))
 	}
-	if string(data) != value {
-		t.Fatalf("bracketed paste changed: %q", data)
+	for _, test := range []struct {
+		name  string
+		input io.Reader
+	}{
+		{name: "whole", input: strings.NewReader(value)},
+		{name: "bytewise", input: io.MultiReader(parts...)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := NewInputReader(test.input)
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != value {
+				t.Fatalf("bracketed paste changed: %q", data)
+			}
+		})
 	}
 }
 
@@ -139,7 +155,9 @@ func TestInputReaderParsesBytewiseMouseAndPaste(t *testing.T) {
 		mice              int
 	}{
 		{name: "mouse", input: "draft\x1b[<64;105;13M\x1b[<65;105;13M\r", want: "draft", mice: 2},
-		{name: "paste", input: "\x1b[200~[<64;105;13M [Markdown] 中文\x1b[201~\r", want: "[<64;105;13M [Markdown] 中文"},
+		// Bubble Tea's Windows fallback decodes ANSI input; UTF-8 preservation is
+		// checked directly in TestInputReaderPreservesBracketedPaste
+		{name: "paste", input: "\x1b[200~[<64;105;13M [Markdown] text\x1b[201~\r", want: "[<64;105;13M [Markdown] text"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var parts []io.Reader
