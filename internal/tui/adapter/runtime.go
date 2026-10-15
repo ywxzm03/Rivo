@@ -45,7 +45,10 @@ type Runtime struct {
 	toolStarted            map[string]time.Time
 	turnStarted            time.Time
 	turnRetrying           bool
-	pendingSkillInput      *skillInput
+	// compactionNotice 只供手动压缩完成时投影到 TUI，不进入会话上下文
+	compactionNotice    *tui.Message
+	compactionNoticeSeq uint64
+	pendingSkillInput   *skillInput
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {
@@ -58,6 +61,7 @@ func (r *Runtime) SetProgram(program *tea.Program) {
 func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
 	activeApp := r.app
+	r.compactionNotice = nil
 	r.mu.Unlock()
 	value := req.Value
 	if req.Kind == "run" {
@@ -149,6 +153,11 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.sealToolGroupLocked()
 			changes = append(changes, r.messages[index])
 		}
+		// 手动压缩不产生普通消息，完成后追加可见提示；内部摘要仍只留在模型上下文
+		if req.Kind == "compact" && result.Err == nil && r.compactionNotice != nil {
+			changes = append(changes, *r.compactionNotice)
+		}
+		r.compactionNotice = nil
 		snapshot := r.snapshotLocked(reset)
 
 		r.mu.Unlock()
@@ -291,8 +300,16 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 		if event.Error == "" {
 			status = "Working"
 			r.resetNeeded = true
+			r.compactionNoticeSeq++
+			notice := tui.Message{
+				ID:   fmt.Sprintf("%s/compaction/%d", r.namespace, r.compactionNoticeSeq),
+				Role: "summary",
+				Text: fmt.Sprintf("Context compacted (%s): %d -> %d tokens", event.Reason, event.TokensBefore, event.TokensAfter),
+			}
+			r.compactionNotice = &notice
 		} else {
 			status = "Compaction failed"
+			r.compactionNotice = nil
 		}
 	}
 	if message != nil {
