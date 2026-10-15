@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -97,6 +98,7 @@ func NewInputReader(source io.Reader) io.ReadCloser {
 
 type inputReader struct {
 	source  cancelreader.CancelReader
+	readMu  sync.Mutex
 	pending []byte
 	ready   []byte
 	reads   chan inputRead
@@ -140,7 +142,9 @@ func (r *inputReader) Read(dst []byte) (int, error) {
 			r.reads = reads
 			go func() {
 				buf := make([]byte, 256)
+				r.readMu.Lock()
 				n, err := r.source.Read(buf)
+				r.readMu.Unlock()
 				reads <- inputRead{data: buf[:n], err: err}
 			}()
 		}
@@ -181,7 +185,11 @@ func (r *inputReader) Close() error {
 	if r.source == nil {
 		return nil
 	}
-	r.source.Cancel()
+	if r.source.Cancel() {
+		// Let the active read consume cancellation before releasing its resources
+		r.readMu.Lock()
+		defer r.readMu.Unlock()
+	}
 	return r.source.Close()
 }
 

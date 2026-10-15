@@ -203,6 +203,93 @@ func TestInputReaderPreservesStandaloneEscape(t *testing.T) {
 	}
 }
 
+func TestInputReaderCloseWithPendingRead(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cancelable bool
+	}{
+		{name: "cancelable", cancelable: true},
+		{name: "fallback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &pendingInputReader{
+				started: make(chan struct{}), canceled: make(chan struct{}),
+				release: make(chan struct{}), closed: make(chan struct{}),
+				cancelable: test.cancelable,
+			}
+			defer func() {
+				select {
+				case <-source.release:
+				default:
+					close(source.release)
+				}
+			}()
+			reader := &inputReader{source: source}
+			readDone := make(chan error, 1)
+			go func() {
+				_, err := reader.Read(make([]byte, 256))
+				readDone <- err
+			}()
+			<-source.started
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- reader.Close() }()
+			<-source.canceled
+			if test.cancelable {
+				select {
+				case <-source.closed:
+					t.Fatal("source closed before the pending read finished")
+				case <-time.After(20 * time.Millisecond):
+				}
+			} else {
+				select {
+				case <-source.closed:
+				case <-time.After(time.Second):
+					t.Fatal("Close blocked on an uncancelable read")
+				}
+			}
+			close(source.release)
+			select {
+			case err := <-closeDone:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Close did not finish after the pending read returned")
+			}
+			select {
+			case err := <-readDone:
+				if err != io.ErrClosedPipe {
+					t.Fatalf("canceled read error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("pending read did not finish after Close")
+			}
+		})
+	}
+}
+
+// pendingInputReader keeps a canceled read active until the test releases it
+type pendingInputReader struct {
+	started, canceled, release, closed chan struct{}
+	cancelable                         bool
+}
+
+func (r *pendingInputReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	return 0, io.ErrClosedPipe
+}
+
+func (r *pendingInputReader) Cancel() bool {
+	close(r.canceled)
+	return r.cancelable
+}
+
+func (r *pendingInputReader) Close() error {
+	close(r.closed)
+	return nil
+}
+
 // runTerminalInput exercises Bubble Tea's byte parser before events reach the editor
 func runTerminalInput(t *testing.T, input io.Reader) (*Model, []tea.MouseMsg) {
 	t.Helper()
