@@ -36,7 +36,7 @@ func newSkillRuntime(t *testing.T, handler http.HandlerFunc) (*Runtime, string, 
 			t.Fatal(err)
 		}
 	}
-	path := filepath.Join(agentDir, "skills", `docs & "guide"`, "SKILL.md")
+	path := filepath.Join(agentDir, "skills", "docs & guide", "SKILL.md")
 	writeManualSkill(t, path, "Original instructions")
 	cfg, err := app.Load()
 	if err != nil {
