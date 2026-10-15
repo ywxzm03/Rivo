@@ -43,16 +43,17 @@ func TestMessageEndBindsLiveIdentityToCommittedSource(t *testing.T) {
 	}
 }
 
-func TestSummaryRoleUsesContextKindAndSessionNamespace(t *testing.T) {
+func TestCompactionVisibilityUsesContextKindAndSessionNamespace(t *testing.T) {
 	text := "The conversation history before this point was compacted into a summary."
 	view := testContext([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}})
 	one, two := &Runtime{namespace: "one"}, &Runtime{namespace: "two"}
-	if one.projectContext(view)[0].Role != "user" {
-		t.Fatal("ordinary text was mistaken for a summary")
+	first, second := one.projectContext(view), two.projectContext(view)
+	if len(first) != 1 || first[0].Role != "user" || first[0].Text != text || first[0].ID == second[0].ID {
+		t.Fatal("ordinary text or session namespace was lost")
 	}
 	view.Entries[0].Kind = compaction.ContextCompaction
-	if one.projectContext(view)[0].Role != "summary" || one.projectContext(view)[0].ID == two.projectContext(view)[0].ID {
-		t.Fatal("summary kind or session namespace was lost")
+	if len(one.projectContext(view)) != 0 || len(two.projectContext(view)) != 0 {
+		t.Fatal("compaction entry appeared in the transcript")
 	}
 }
 

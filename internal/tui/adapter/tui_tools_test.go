@@ -145,11 +145,23 @@ func TestHistoryProjectionMarksUnfinishedToolsInterrupted(t *testing.T) {
 	}
 }
 
-func TestHistoryProjectionKeepsCompactionSummaryRole(t *testing.T) {
+func TestHistoryProjectionHidesCompactionEntry(t *testing.T) {
 	runtime := &Runtime{}
-	projected := runtime.projectContext(compaction.ContextView{Entries: []compaction.ContextEntry{{SourceID: "summary", Kind: compaction.ContextCompaction, Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "summary text"}}}}}}})
-	if len(projected) != 1 || projected[0].Role != "summary" {
+	view := compaction.ContextView{Entries: []compaction.ContextEntry{
+		{SourceID: "summary", Kind: compaction.ContextCompaction, Messages: []llm.Message{
+			llm.SystemMessage{Sections: map[string]string{"preamble": "internal system snapshot"}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: compaction.WrappedSummary("internal summary")}}},
+		}},
+		{SourceID: "kept", Kind: compaction.ContextMessage, Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "kept message"}}},
+		}},
+	}}
+	projected := runtime.projectContext(view)
+	if len(projected) != 1 || projected[0].Role != "user" || projected[0].Text != "kept message" || projected[0].ID != "/entry/kept/message" {
 		t.Fatalf("projected = %+v", projected)
+	}
+	if len(view.Messages()) != 3 {
+		t.Fatal("display projection changed the model context")
 	}
 }
 

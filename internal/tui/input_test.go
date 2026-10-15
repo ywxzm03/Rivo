@@ -1,19 +1,27 @@
 package tui
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
-	file, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	file, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, ok := NewInputReader(file).(terminalFile); !ok {
+	defer writer.Close()
+	input := NewInputReader(file)
+	defer input.Close()
+	if wrapped, ok := input.(terminalFile); !ok || wrapped.Fd() != file.Fd() {
 		t.Fatal("input wrapper lost terminal file methods")
 	}
 	if _, ok := NewCursorWriter(file, nil).(terminalFile); !ok {
@@ -85,12 +93,242 @@ func TestFilterMouseRunesPreservesMalformedNumericText(t *testing.T) {
 }
 
 func TestInputReaderPreservesBracketedPaste(t *testing.T) {
-	value := "\x1b[200~[<64;94;23M\ntext\x1b[201~"
-	data, err := io.ReadAll(NewInputReader(strings.NewReader(value)))
+	value := "\x1b[200~[<64;94;23M [Markdown]\ntext 中文 👋\x1b[201~"
+	var parts []io.Reader
+	for i := range len(value) {
+		parts = append(parts, strings.NewReader(value[i:i+1]))
+	}
+	for _, test := range []struct {
+		name  string
+		input io.Reader
+	}{
+		{name: "whole", input: strings.NewReader(value)},
+		{name: "bytewise", input: io.MultiReader(parts...)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := NewInputReader(test.input)
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != value {
+				t.Fatalf("bracketed paste changed: %q", data)
+			}
+		})
+	}
+}
+
+func TestInputReaderParsesSplitMouseReports(t *testing.T) {
+	report := "\x1b[<64;105;13M"
+	for split := 1; split < len(report); split++ {
+		t.Run(fmt.Sprint(split), func(t *testing.T) {
+			input := io.MultiReader(strings.NewReader("draft"+report[:split]), strings.NewReader(report[split:]+"\r"))
+			model, mice := runTerminalInput(t, input)
+			if model.editor.Value() != "draft" || len(mice) != 1 || mice[0].Button != tea.MouseButtonWheelUp {
+				t.Fatalf("split %d: editor=%q mouse=%+v", split, model.editor.Value(), mice)
+			}
+		})
+	}
+}
+
+func TestInputReaderParsesRapidMouseReports(t *testing.T) {
+	input := "draft" + strings.Repeat("\x1b[<64;105;13M\x1b[<65;105;13M", 100) + "\r"
+	model, mice := runTerminalInput(t, strings.NewReader(input))
+	if model.editor.Value() != "draft" || len(mice) != 200 {
+		t.Fatalf("rapid scroll: editor=%q mouse count=%d", model.editor.Value(), len(mice))
+	}
+	for i, mouse := range mice {
+		button := tea.MouseButtonWheelUp
+		if i%2 != 0 {
+			button = tea.MouseButtonWheelDown
+		}
+		if mouse.Button != button || mouse.X != 104 || mouse.Y != 12 {
+			t.Fatalf("report %d = %+v", i, mouse)
+		}
+	}
+}
+
+func TestInputReaderParsesBytewiseMouseAndPaste(t *testing.T) {
+	for _, test := range []struct {
+		name, input, want string
+		mice              int
+	}{
+		{name: "mouse", input: "draft\x1b[<64;105;13M\x1b[<65;105;13M\r", want: "draft", mice: 2},
+		// Bubble Tea's Windows fallback decodes ANSI input; UTF-8 preservation is
+		// checked directly in TestInputReaderPreservesBracketedPaste
+		{name: "paste", input: "\x1b[200~[<64;105;13M [Markdown] text\x1b[201~\r", want: "[<64;105;13M [Markdown] text"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var parts []io.Reader
+			for i := range len(test.input) {
+				parts = append(parts, strings.NewReader(test.input[i:i+1]))
+			}
+			model, mice := runTerminalInput(t, io.MultiReader(parts...))
+			if model.editor.Value() != test.want || len(mice) != test.mice {
+				t.Fatalf("editor=%q mouse count=%d", model.editor.Value(), len(mice))
+			}
+		})
+	}
+}
+
+func TestInputReaderPreservesSmallReads(t *testing.T) {
+	value := "hello\x1b[<64;105;13M\x1b[200~" + strings.Repeat("[<65;2;3M", 100) + "\x1b[201~world"
+	reader := NewInputReader(strings.NewReader(value))
+	defer reader.Close()
+	var got strings.Builder
+	buf := make([]byte, 3)
+	for {
+		n, err := reader.Read(buf)
+		got.Write(buf[:n])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got.String() != value {
+		t.Fatalf("small reads changed input: %q", got.String())
+	}
+}
+
+func TestInputReaderPreservesStandaloneEscape(t *testing.T) {
+	source, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != value {
-		t.Fatalf("bracketed paste changed: %q", data)
+	defer source.Close()
+	defer writer.Close()
+	reader := NewInputReader(source)
+	defer reader.Close()
+	if _, err := writer.WriteString("\x1b"); err != nil {
+		t.Fatal(err)
 	}
+	result := make(chan inputRead, 1)
+	go func() {
+		buf := make([]byte, 256)
+		n, err := reader.Read(buf)
+		result <- inputRead{data: buf[:n], err: err}
+	}()
+	select {
+	case got := <-result:
+		if string(got.data) != "\x1b" || got.err != nil {
+			t.Fatalf("standalone escape = %q, err=%v", got.data, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standalone Escape blocked waiting for more input")
+	}
+}
+
+func TestInputReaderCloseWithPendingRead(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cancelable bool
+	}{
+		{name: "cancelable", cancelable: true},
+		{name: "fallback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &pendingInputReader{
+				started: make(chan struct{}), canceled: make(chan struct{}),
+				release: make(chan struct{}), closed: make(chan struct{}),
+				cancelable: test.cancelable,
+			}
+			defer func() {
+				select {
+				case <-source.release:
+				default:
+					close(source.release)
+				}
+			}()
+			reader := &inputReader{source: source}
+			readDone := make(chan error, 1)
+			go func() {
+				_, err := reader.Read(make([]byte, 256))
+				readDone <- err
+			}()
+			<-source.started
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- reader.Close() }()
+			<-source.canceled
+			if test.cancelable {
+				select {
+				case <-source.closed:
+					t.Fatal("source closed before the pending read finished")
+				case <-time.After(20 * time.Millisecond):
+				}
+			} else {
+				select {
+				case <-source.closed:
+				case <-time.After(time.Second):
+					t.Fatal("Close blocked on an uncancelable read")
+				}
+			}
+			close(source.release)
+			select {
+			case err := <-closeDone:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Close did not finish after the pending read returned")
+			}
+			select {
+			case err := <-readDone:
+				if err != io.ErrClosedPipe {
+					t.Fatalf("canceled read error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("pending read did not finish after Close")
+			}
+		})
+	}
+}
+
+// pendingInputReader keeps a canceled read active until the test releases it
+type pendingInputReader struct {
+	started, canceled, release, closed chan struct{}
+	cancelable                         bool
+}
+
+func (r *pendingInputReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	return 0, io.ErrClosedPipe
+}
+
+func (r *pendingInputReader) Cancel() bool {
+	close(r.canceled)
+	return r.cancelable
+}
+
+func (r *pendingInputReader) Close() error {
+	close(r.closed)
+	return nil
+}
+
+// runTerminalInput exercises Bubble Tea's byte parser before events reach the editor
+func runTerminalInput(t *testing.T, input io.Reader) (*Model, []tea.MouseMsg) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	model := testModel(80, 24)
+	var mice []tea.MouseMsg
+	reader := NewInputReader(input)
+	defer reader.Close()
+	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if mouse, ok := msg.(tea.MouseMsg); ok {
+				mice = append(mice, mouse)
+			}
+			if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
+				return tea.QuitMsg{}
+			}
+			return msg
+		}))
+	if _, err := program.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return model, mice
 }
