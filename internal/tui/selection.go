@@ -40,6 +40,10 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if msg.Button != tea.MouseButtonLeft {
 			return nil
 		}
+		if bounds, ok := m.jumpPillBounds(); ok && msg.Y == bounds.y && msg.X >= bounds.left && msg.X < bounds.right {
+			m.jumpToBottom()
+			return nil
+		}
 		now := time.Now()
 		if m.clock != nil {
 			now = m.clock()
@@ -203,7 +207,7 @@ func paintSelection(lines []string, anchor, focus screenPoint) {
 	if pointBefore(focus, anchor) {
 		anchor, focus = focus, anchor
 	}
-	style := lipgloss.NewStyle().Background(lipgloss.Color("#5b616b"))
+	style := lipgloss.NewStyle().Background(lipgloss.Color(selectionBackground))
 	for y := max(0, anchor.y); y <= min(focus.y, len(lines)-1); y++ {
 		line := ansi.Strip(lines[y])
 		width := ansi.StringWidth(line)

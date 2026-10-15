@@ -2,22 +2,29 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Pi dark.json 的 okhsl 经 Pi colors 转换为 hex；仅保留本阶段使用的 token
+// Claude Code dark 主题的语义色 token；固定 RGB 并沿用终端颜色降级
 const (
-	textColor     = "#dee0e1" // text / userMessageText
-	inputBorder   = "#dee0e1" // editor border and prompt
-	mutedColor    = "#9da5a9" // muted / mdQuote / mdLinkUrl
-	accentColor   = "#a798d7" // accent / mdCode / mdListBullet
-	borderColor   = "#5fa8cc" // border
-	dimColor      = "#7e888e" // dim
-	thinkingColor = "#96a0a4" // thinkingText
-	userBg        = "#3a3d42" // user message frame
-	greenColor    = "#68b78d" // success / mdCodeBlock / syntaxNumber
-	redColor      = "#ea7f81" // error
-	yellowColor   = "#cd9a22" // warning / mdHeading / syntaxFunction
-	blueColor     = "#69add0" // mdLink / syntaxKeyword
-	variableColor = "#5db3ba" // syntaxVariable
-	stringColor   = "#de8d5a" // syntaxString
+	textColor           = "#ffffff" // text / userMessageText
+	inputBorder         = "#888888" // editor border and prompt
+	mutedColor          = "#999999" // muted / mdQuote / mdLinkUrl
+	accentColor         = "#b1b9f9" // accent / mdCode / mdListBullet
+	borderColor         = "#888888" // border
+	dimColor            = "#999999" // dim
+	thinkingColor       = "#999999" // thinkingText
+	userBg              = "#373737" // user message frame
+	greenColor          = "#4eba65" // success / inserted
+	redColor            = "#ff6b80" // error / deleted
+	yellowColor         = "#ffc107" // warning
+	blueColor           = "#b1b9f9" // mdLink
+	variableColor       = "#ffffff" // syntaxVariable / syntaxProperty
+	stringColor         = "#e6db74" // syntaxString / syntaxRegexp
+	codeTextColor       = "#f8f8f2" // syntaxText / syntaxPunctuation
+	syntaxKeywordColor  = "#f92672" // syntaxKeyword / syntaxOperator
+	syntaxStorageColor  = "#66d9ef" // syntaxStorage
+	syntaxTypeColor     = "#a6e22e" // syntaxType / syntaxFunction
+	syntaxLiteralColor  = "#be84ff" // syntaxLiteral / syntaxNumber
+	syntaxCommentColor  = "#75715e" // syntaxComment / syntaxMeta
+	selectionBackground = "#264f78" // text selection
 )
 
 func colored(color, value string) string {

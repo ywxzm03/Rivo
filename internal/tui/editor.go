@@ -84,6 +84,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
+	if msg.String() == "esc" && m.jumpPillVisible() {
+		m.jumpToBottom()
+		return nil
+	}
 	if m.selector != nil {
 		return m.selectorKey(msg)
 	}
