@@ -239,7 +239,11 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 		if !continueRun {
 			break
 		}
-		result.Reply, result.Err = a.coordinator.ContinueQueued(ctx)
+		reply, err := a.coordinator.ContinueQueued(ctx)
+		if reply != nil {
+			result.Reply = reply
+		}
+		result.Err = err
 	}
 	return result
 }

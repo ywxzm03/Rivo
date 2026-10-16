@@ -130,6 +130,49 @@ func TestAppSteeringRunsWithinTheActiveOperation(t *testing.T) {
 	}
 }
 
+type steeringWithdrawRunner struct {
+	withdraw func()
+	calls    int
+}
+
+func (r *steeringWithdrawRunner) Run(context.Context, string) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *steeringWithdrawRunner) Continue(context.Context) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *steeringWithdrawRunner) Steer(string) error { return nil }
+
+func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
+	r.calls++
+	r.withdraw()
+	return nil, nil
+}
+
+func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &steeringWithdrawRunner{}
+	runner.withdraw = func() { a.agent.TakeSteering() }
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	if err := a.agent.Steer("withdraw me"); err != nil {
+		t.Fatal(err)
+	}
+	want := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{Reply: want})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result.Reply != want {
+		t.Fatalf("reply = %p, want original %p", result.Reply, want)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("ContinueSteering calls = %d, want one", runner.calls)
+	}
+}
+
 func TestClearOperationMovesLeafWithoutChangingFileOrSettings(t *testing.T) {
 	a := operationApp(t, nil, nil)
 	if err := a.SetThinkingLevel(llm.ThinkingLevelHigh); err != nil {

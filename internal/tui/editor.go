@@ -235,22 +235,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-// isSteeringDequeueKey 接受 Bubble Tea 的标准键值和终端拆包后保留的 Alt CSI 片段
-func isSteeringDequeueKey(msg tea.KeyMsg) bool {
-	if msg.String() == "alt+up" {
-		return true
-	}
-	if !msg.Alt || msg.Type != tea.KeyRunes {
-		return false
-	}
-	switch string(msg.Runes) {
-	case "[A", "[1;3A", "OA":
-		return true
-	default:
-		return false
-	}
-}
-
 func (m *Model) quit() tea.Cmd {
 	m.closing = true
 	if m.handlers.Cancel != nil {

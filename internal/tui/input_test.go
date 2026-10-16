@@ -214,6 +214,27 @@ func TestInputReaderRoutesAltUpToDequeue(t *testing.T) {
 	}
 }
 
+func TestSteeringDequeueKeyVariants(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.KeyMsg
+		want bool
+	}{
+		{name: "semantic", key: tea.KeyMsg{Type: tea.KeyUp, Alt: true}, want: true},
+		{name: "csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3A"), Alt: true}, want: true},
+		{name: "lowercase-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3a"), Alt: true}, want: true},
+		{name: "meta-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;9A"), Alt: true}, want: true},
+		{name: "application", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("OA"), Alt: true}, want: true},
+		{name: "ctrl-alt", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;7A"), Alt: true}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isSteeringDequeueKey(test.key); got != test.want {
+				t.Fatalf("isSteeringDequeueKey(%q) = %v, want %v", test.key.String(), got, test.want)
+			}
+		})
+	}
+}
+
 func TestInputReaderPreservesSmallReads(t *testing.T) {
 	value := "hello\x1b[<64;105;13M\x1b[200~" + strings.Repeat("[<65;2;3M", 100) + "\x1b[201~world"
 	reader := NewInputReader(strings.NewReader(value))
