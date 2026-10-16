@@ -44,14 +44,28 @@ type OperationResult struct {
 
 // Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
 type Operation struct {
-	ID     uint64
-	cancel context.CancelFunc
-	done   chan struct{}
-	result OperationResult
+	ID      uint64
+	kind    OperationKind
+	closing bool
+	cancel  context.CancelFunc
+	done    chan struct{}
+	result  OperationResult
 }
 
 func (o *Operation) Cancel()               { o.cancel() }
 func (o *Operation) Wait() OperationResult { <-o.done; return o.result }
+
+var ErrSteeringUnavailable = errors.New("app: steering is unavailable")
+
+// EnqueueSteering 接受运行中的一条 steering；压缩或操作收尾期间拒绝输入
+func (a *App) EnqueueSteering(input string) error {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.active == nil || a.active.kind != OperationRun || a.active.closing {
+		return ErrSteeringUnavailable
+	}
+	return a.coordinator.EnqueueSteering(input)
+}
 
 // Start 接受后立即执行操作，一个 App 同时只接受一个会话修改，不隐式排队
 func (a *App) Start(ctx context.Context, request OperationRequest) (*Operation, error) {
@@ -62,7 +76,7 @@ func (a *App) Start(ctx context.Context, request OperationRequest) (*Operation, 
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	a.operationID++
-	op := &Operation{ID: a.operationID, cancel: cancel, done: make(chan struct{})}
+	op := &Operation{ID: a.operationID, kind: request.Kind, cancel: cancel, done: make(chan struct{})}
 	a.active = op
 	a.operationMu.Unlock()
 	go func() {
@@ -80,6 +94,9 @@ func (a *App) Start(ctx context.Context, request OperationRequest) (*Operation, 
 func (a *App) Cancel() {
 	a.operationMu.Lock()
 	op := a.active
+	if op != nil {
+		op.closing = true
+	}
 	a.operationMu.Unlock()
 	if op != nil {
 		op.Cancel()
@@ -103,6 +120,11 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			copy := request
 			a.pendingRequest = &copy
 		}
+		a.operationMu.Lock()
+		if a.active != nil {
+			a.active.closing = true
+		}
+		a.operationMu.Unlock()
 	}()
 	// 1.补写原候选记录，不重跑模型或工具；同一操作重试从已提交边界续接
 	if a.session.HasPending() && request.Kind != OperationDelete {
@@ -113,6 +135,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		a.pendingRequest = nil
+		a.acknowledgePendingSteering(messages)
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
@@ -121,6 +144,9 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			resume := previous != nil && *previous == request && request.Kind == OperationRun
 			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
 			if result.Err != nil || resume {
+				if resume {
+					result = a.continueQueuedSteering(ctx, result)
+				}
 				return result
 			}
 		}
@@ -131,8 +157,8 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			}
 			if len(messages) == 0 {
 				// 压缩点或省略标记已补写，续接原请求，不重复记录用户输入
-				result.Reply, result.Err = a.agent.Continue(ctx)
-				result.Reply, result.Err = a.coordinator.finishRun(ctx, result.Reply, result.Err)
+				result.Reply, result.Err = a.coordinator.Continue(ctx)
+				result = a.continueQueuedSteering(ctx, result)
 				return result
 			}
 			if len(messages) > 0 {
@@ -140,10 +166,11 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 				case llm.AssistantMessage:
 					result.Reply, result.Err = a.agent.Resume(ctx, &last)
 					result.Reply, result.Err = a.coordinator.finishRun(ctx, result.Reply, result.Err)
+					result = a.continueQueuedSteering(ctx, result)
 					return result
 				case llm.ToolResultMessage, llm.UserMessage:
-					result.Reply, result.Err = a.agent.Continue(ctx)
-					result.Reply, result.Err = a.coordinator.finishRun(ctx, result.Reply, result.Err)
+					result.Reply, result.Err = a.coordinator.Continue(ctx)
+					result = a.continueQueuedSteering(ctx, result)
 					return result
 				}
 			}
@@ -170,6 +197,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	switch request.Kind {
 	case OperationRun:
 		result.Reply, result.Err = a.coordinator.Run(ctx, request.Value)
+		result = a.continueQueuedSteering(ctx, result)
 	case OperationCompact:
 		result.Err = a.coordinator.Compact(ctx, request.Value)
 	case OperationModel:
@@ -196,6 +224,40 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		result.Err = errors.New("app: unknown operation")
 	}
 	return result
+}
+
+// continueQueuedSteering 在释放操作所有权前消费已接受的 steering，并关闭收尾窗口
+func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult) OperationResult {
+	for result.Err == nil && ctx.Err() == nil {
+		a.operationMu.Lock()
+		continueRun := a.active != nil && !a.active.closing && a.agent.HasSteering()
+		if !continueRun && a.active != nil {
+			a.active.closing = true
+		}
+		a.operationMu.Unlock()
+		if !continueRun {
+			break
+		}
+		reply, err := a.coordinator.ContinueQueued(ctx)
+		if reply != nil {
+			result.Reply = reply
+		}
+		result.Err = err
+	}
+	return result
+}
+
+func (a *App) acknowledgePendingSteering(messages []llm.Message) {
+	for _, message := range messages {
+		user, ok := message.(llm.UserMessage)
+		if !ok || len(user.Content) != 1 {
+			continue
+		}
+		text, ok := user.Content[0].(llm.TextContent)
+		if ok {
+			a.agent.AcknowledgeSteering(text.Text)
+		}
+	}
 }
 
 // clearSession 移动当前叶子到空根，保留会话文件与运行时设置

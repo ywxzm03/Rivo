@@ -85,6 +85,34 @@ func TestCoordinatorNotificationDoesNotOwnPersistence(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
+	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
+	coord.compacting = true
+	if err := coord.EnqueueSteering("during compact"); !errors.Is(err, ErrSteeringDuringCompaction) {
+		t.Fatalf("EnqueueSteering() error = %v, want compaction error", err)
+	}
+	if len(runner.appended) != 0 {
+		t.Fatal("steering reached runner during compaction")
+	}
+	coord.compacting = false
+	if err := coord.EnqueueSteering("after compact"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.appended) != 1 || messageTextForTest(t, runner.appended[0]) != "after compact" {
+		t.Fatalf("runner appended = %+v", runner.appended)
+	}
+}
+
+func TestCoordinatorContinueQueuedRequiresQueuedRunner(t *testing.T) {
+	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
+	if _, err := coord.ContinueQueued(context.Background()); !errors.Is(err, ErrQueuedRunnerUnavailable) {
+		t.Fatalf("ContinueQueued() error = %v, want queued runner error", err)
+	}
+	if runner.continueCalls != 0 {
+		t.Fatalf("Continue() calls = %d, want none", runner.continueCalls)
+	}
+}
+
 func TestCoordinatorPersistFailureAborts(t *testing.T) {
 	sm := session.New("/project", t.TempDir())
 	if err := os.WriteFile(sm.Path(), []byte("junk\n"), 0o644); err != nil {
@@ -163,6 +191,11 @@ func (f *fakeRunner) Continue(_ context.Context) (*llm.AssistantMessage, error) 
 		return f.contFn()
 	}
 	return nil, nil
+}
+
+func (f *fakeRunner) Steer(input string) error {
+	f.appended = append(f.appended, textMsg(input))
+	return nil
 }
 
 func (f *fakeRunner) ReplaceMessages(messages []llm.Message) {

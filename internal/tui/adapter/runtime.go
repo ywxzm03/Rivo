@@ -39,6 +39,7 @@ type Runtime struct {
 	messages               []tui.Message
 	sequence               int
 	userID                 string
+	userMessages           int
 	assistantTurn          int
 	currentAssistantID     string
 	activeToolAnchorID     string
@@ -63,6 +64,17 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	activeApp := r.app
 	r.compactionNotice = nil
 	r.mu.Unlock()
+	if req.Kind == "steer" {
+		var err error
+		if activeApp == nil {
+			err = app.ErrSteeringUnavailable
+		} else {
+			err = activeApp.EnqueueSteering(req.Value)
+		}
+		return func() tea.Msg {
+			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Err: err}
+		}
+	}
 	value := req.Value
 	if req.Kind == "run" {
 		var err error
@@ -79,6 +91,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		r.operationEntries = nil
 		r.sequence++
 		r.userID = fmt.Sprintf("%s/live/%d/user", r.namespace, r.sequence)
+		r.userMessages = 0
 		r.currentAssistantID, r.activeToolAnchorID = "", ""
 		r.assistantTurn = 0
 		r.toolStarted = make(map[string]time.Time)
@@ -116,7 +129,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.pendingSkillInput = nil
 			if req.Kind == "new" {
 				r.operationEntries = nil
-				r.sequence, r.assistantTurn = 0, 0
+				r.sequence, r.userMessages, r.assistantTurn = 0, 0, 0
 				r.userID = ""
 				r.toolStarted = nil
 				r.turnStarted, r.turnRetrying = time.Time{}, false
@@ -212,6 +225,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	var message *tui.Message
 	var previousID string
 	var status string
+	steeringChanged := false
 	previousToolAnchor := r.activeToolAnchorID
 	switch event := event.(type) {
 	case llm.AgentStartEvent:
@@ -227,6 +241,11 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 		switch current := event.Message.(type) {
 		case llm.UserMessage:
 			r.sealToolGroupLocked()
+			r.userMessages++
+			if r.userMessages > 1 {
+				steeringChanged = true
+				r.userID = fmt.Sprintf("%s/live/%d/user/%d", r.namespace, r.sequence, r.userMessages)
+			}
 			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
 			if ok {
 				message = &converted
@@ -337,6 +356,9 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	}
 	if status != "" {
 		notifications = append(notifications, tui.StatusMsg(status))
+	}
+	if steeringChanged && r.app != nil {
+		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages()})
 	}
 	send := r.send
 	r.mu.Unlock()
@@ -489,8 +511,9 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	if includeMessages {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
+	steering := r.app.SteeringMessages()
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
@@ -544,6 +567,28 @@ func (r *Runtime) Attach(a *app.App) {
 	r.app = a
 	r.namespace = a.SessionID()
 	r.replaceMessagesLocked(a.ContextView())
+}
+
+// RestoreSteering 原子取出运行中尚未消费的 steering，供 TUI 撤回到编辑器
+func (r *Runtime) RestoreSteering() []string {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.TakeSteering()
+}
+
+// EnqueueSteering 同步接受一条 steering，队列操作不涉及磁盘或模型调用
+func (r *Runtime) EnqueueSteering(value string) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrSteeringUnavailable
+	}
+	return activeApp.EnqueueSteering(value)
 }
 
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }

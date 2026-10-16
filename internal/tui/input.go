@@ -333,6 +333,22 @@ func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 	return 0, false
 }
 
+// isSteeringDequeueKey 接受 Bubble Tea 的标准键值和常见 Alt CSI 片段
+func isSteeringDequeueKey(msg tea.KeyMsg) bool {
+	if msg.String() == "alt+up" {
+		return true
+	}
+	if !msg.Alt || msg.Type != tea.KeyRunes {
+		return false
+	}
+	switch string(msg.Runes) {
+	case "[A", "OA", "[1;3A", "[1;3a", "[1;9A", "[1;9a":
+		return true
+	default:
+		return false
+	}
+}
+
 // isTerminalControlKey prevents incomplete CSI/SGR reports from becoming text.
 func isTerminalControlKey(msg tea.KeyMsg) bool {
 	if msg.Type != tea.KeyRunes || msg.Paste {

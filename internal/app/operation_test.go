@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,6 +89,89 @@ func TestOperationOwnershipCancellationAndJoin(t *testing.T) {
 		t.Fatal("completion retained operation ownership", err)
 	}
 	a.Wait()
+}
+
+func TestAppSteeringRunsWithinTheActiveOperation(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	a := operationApp(t, func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+		}
+		events := make(chan llm.AssistantMessageEvent, 1)
+		events <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}}
+		close(events)
+		return events, nil
+	}, nil)
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := a.EnqueueSteering("steer"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if result := op.Wait(); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want initial response plus steering response", calls)
+	}
+	var users []string
+	for _, message := range a.ContextView().Messages() {
+		if user, ok := message.(llm.UserMessage); ok {
+			users = append(users, messageTextForTest(t, user))
+		}
+	}
+	if len(users) != 2 || users[0] != "initial" || users[1] != "steer" {
+		t.Fatalf("user messages = %v", users)
+	}
+}
+
+type steeringWithdrawRunner struct {
+	withdraw func()
+	calls    int
+}
+
+func (r *steeringWithdrawRunner) Run(context.Context, string) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *steeringWithdrawRunner) Continue(context.Context) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *steeringWithdrawRunner) Steer(string) error { return nil }
+
+func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
+	r.calls++
+	r.withdraw()
+	return nil, nil
+}
+
+func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &steeringWithdrawRunner{}
+	runner.withdraw = func() { a.agent.TakeSteering() }
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	if err := a.agent.Steer("withdraw me"); err != nil {
+		t.Fatal(err)
+	}
+	want := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{Reply: want})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result.Reply != want {
+		t.Fatalf("reply = %p, want original %p", result.Reply, want)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("ContinueSteering calls = %d, want one", runner.calls)
+	}
 }
 
 func TestClearOperationMovesLeafWithoutChangingFileOrSettings(t *testing.T) {
@@ -205,6 +289,80 @@ func TestAssistantCommitRetryReusesOutputAndEntryID(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reloaded.BuildContext(), a.session.BuildContext()) {
 		t.Fatal("disk and memory diverged after retry")
+	}
+}
+
+func TestSteeringCommitRetryDoesNotDuplicateQueuedMessage(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	turnEnded, allowSteering := make(chan struct{}), make(chan struct{})
+	var firstTurn sync.Once
+	calls := 0
+	stream := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+		}
+		reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}
+		events := make(chan llm.AssistantMessageEvent, 1)
+		events <- llm.AssistantMessageDoneEvent{Message: reply}
+		close(events)
+		return events, nil
+	}
+	sink := func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.TurnEndEvent); ok {
+			firstTurn.Do(func() {
+				close(turnEnded)
+				<-allowSteering
+			})
+		}
+		return nil
+	}
+	a := operationApp(t, stream, sink)
+	if err := a.session.AppendMessage(textMsg("seed")); err != nil {
+		t.Fatal(err)
+	}
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := a.EnqueueSteering("queued"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-turnEnded
+	restore := blockSessionWrites(t, a)
+	close(allowSteering)
+	if result := op.Wait(); result.Err == nil {
+		t.Fatal("want steering commit failure")
+	}
+	if got := a.SteeringMessages(); len(got) != 1 || got[0] != "queued" {
+		t.Fatalf("steering queue = %v, want queued message restored", got)
+	}
+	restore()
+	if _, err := a.Run(context.Background(), "next"); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.SteeringMessages(); len(got) != 0 {
+		t.Fatalf("steering queue after retry = %v, want empty", got)
+	}
+	queued, next := 0, 0
+	for _, message := range a.ContextView().Messages() {
+		user, ok := message.(llm.UserMessage)
+		if !ok || len(user.Content) != 1 {
+			continue
+		}
+		text, _ := user.Content[0].(llm.TextContent)
+		switch text.Text {
+		case "queued":
+			queued++
+		case "next":
+			next++
+		}
+	}
+	if queued != 1 || next != 1 {
+		t.Fatalf("retried user messages = queued:%d next:%d, want one each", queued, next)
 	}
 }
 

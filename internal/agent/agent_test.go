@@ -162,6 +162,181 @@ func TestAgentRunToolLoop(t *testing.T) {
 	}
 }
 
+func TestAgentSteeringConsumesOneMessageAfterEachCompletedResponse(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "third"}}},
+	)
+	var agent *Agent
+	onEvent := func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.TurnEndEvent); ok && calls == 1 {
+			if err := agent.Steer("correct this"); err != nil {
+				return err
+			}
+			return agent.Steer("then explain")
+		}
+		return nil
+	}
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, onEvent)
+	if _, err := agent.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("stream calls = %d, want 3", calls)
+	}
+	if len(agent.AgentContext.Messages) != 6 {
+		t.Fatalf("messages = %d, want initial/first/steering/second/steering/third", len(agent.AgentContext.Messages))
+	}
+	if got := messageText(agent.AgentContext.Messages[2]); got != "correct this" {
+		t.Fatalf("steering message = %q, want correct this", got)
+	}
+	if got := messageText(agent.AgentContext.Messages[4]); got != "then explain" {
+		t.Fatalf("second steering message = %q, want then explain", got)
+	}
+	if agent.HasSteering() {
+		t.Fatal("steering queue not drained")
+	}
+}
+
+func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
+	var commits int
+	sentinel := errors.New("storage unavailable")
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	var agent *Agent
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.TurnEndEvent); ok {
+			return agent.Steer("pending")
+		}
+		return nil
+	})
+	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+		commits++
+		if commits == 3 {
+			return []string{"pending-entry"}, sentinel
+		}
+		ids := make([]string, len(messages))
+		for i := range ids {
+			ids[i] = "entry"
+		}
+		return ids, nil
+	}
+	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want storage error", err)
+	}
+	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "pending" {
+		t.Fatalf("steering queue = %v, want pending message restored", got)
+	}
+	if !agent.AcknowledgeSteering("pending") || agent.HasSteering() {
+		t.Fatal("retried pending steering was not acknowledged")
+	}
+}
+
+func TestAgentSteeringEmitsMessageStartOnlyAfterCommitSuccess(t *testing.T) {
+	sentinel := errors.New("storage unavailable")
+	commits := 0
+	var events []llm.AgentEvent
+	streamFn := doneStreamFn(new(int),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}},
+	)
+	var agent *Agent
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		if _, ok := event.(llm.TurnEndEvent); ok && commits == 2 {
+			return agent.Steer("retry")
+		}
+		return nil
+	})
+	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+		commits++
+		if commits == 3 {
+			return []string{"pending-entry"}, sentinel
+		}
+		return []string{"entry"}, nil
+	}
+	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want storage error", err)
+	}
+	for _, event := range events {
+		if start, ok := event.(llm.MessageStartEvent); ok && messageText(start.Message) == "retry" {
+			t.Fatal("steering MessageStartEvent emitted before commit succeeded")
+		}
+	}
+	if _, err := agent.Continue(context.Background()); err != nil {
+		t.Fatalf("Continue() error = %v", err)
+	}
+	starts := 0
+	for _, event := range events {
+		start, ok := event.(llm.MessageStartEvent)
+		if ok && messageText(start.Message) == "retry" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("steering MessageStartEvent count = %d, want 1", starts)
+	}
+}
+
+func TestAgentSteeringRestoresWhenHostRejectsWithoutEntryID(t *testing.T) {
+	sentinel := errors.New("pending submission already exists")
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	agent.CommitMessages = func([]llm.Message) ([]string, error) {
+		return []string{""}, sentinel
+	}
+	if err := agent.Steer("retry me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want pending submission error", err)
+	}
+	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "retry me" {
+		t.Fatalf("steering queue = %v, want retry me", got)
+	}
+}
+
+func TestAgentSteeringClaimPreventsDequeueDuplicate(t *testing.T) {
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	var agent *Agent
+	var restored []string
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		start, ok := event.(llm.MessageStartEvent)
+		if ok && messageText(start.Message) == "queued" {
+			restored = agent.TakeSteering()
+		}
+		return nil
+	})
+	if err := agent.Steer("queued"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored) != 0 {
+		t.Fatalf("dequeue during claim returned %+v, want empty", restored)
+	}
+	users := 0
+	for _, message := range agent.AgentContext.Messages {
+		if messageText(message) == "queued" {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Fatalf("queued message persisted %d times, want once", users)
+	}
+}
+
+func messageText(message llm.Message) string {
+	user, ok := message.(llm.UserMessage)
+	if !ok || len(user.Content) != 1 {
+		return ""
+	}
+	text, _ := user.Content[0].(llm.TextContent)
+	return text.Text
+}
+
 func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 	firstRelease := make(chan struct{})
 	secondRelease := make(chan struct{})

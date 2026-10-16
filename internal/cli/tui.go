@@ -38,9 +38,11 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	runtime.Attach(a)
 	output := newSerializedOutput(stdout)
 	model := tui.New(runtime.Snapshot(), tui.Handlers{
-		Request:       runtime.Request,
-		Cancel:        runtime.Cancel,
-		ReadClipboard: clipboard.ReadAll,
+		Request:         runtime.Request,
+		Cancel:          runtime.Cancel,
+		EnqueueSteering: runtime.EnqueueSteering,
+		RestoreSteering: runtime.RestoreSteering,
+		ReadClipboard:   clipboard.ReadAll,
 		WriteClipboard: func(text string) error {
 			if err := clipboard.WriteAll(text); err == nil {
 				return nil

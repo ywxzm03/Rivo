@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -93,7 +94,7 @@ func press(m *Model, key tea.KeyType) tea.Cmd {
 // assertFrame 检查组件原始高度，避免最终截断掩盖布局溢出
 func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
-	dock := m.editor.Height() + 2 + m.completionRows(len(m.completionItems()))
+	dock := m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems()))
 	if m.selector != nil {
 		dock = len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
 		if dock != m.selector.height(m.height-2) {
@@ -184,6 +185,227 @@ func TestEditorWrapHistoryAndBusyDraft(t *testing.T) {
 	press(m, tea.KeyEnter)
 	if m.editor.Value() != "draft" || !m.busy {
 		t.Fatal("busy submission must preserve draft and operation")
+	}
+}
+
+func TestBusySubmitRoutesPlainTextToSteering(t *testing.T) {
+	m := testModel(60, 15)
+	var request Request
+	m.handlers.Request = func(got Request) tea.Cmd {
+		request = got
+		return nil
+	}
+	m.busy, m.status = true, "Working"
+	typeText(m, "steer this run")
+	press(m, tea.KeyEnter)
+	if request.Kind != "steer" || request.Value != "steer this run" {
+		t.Fatalf("request = %+v, want steering request", request)
+	}
+	if m.editor.Value() != "" || !m.busy {
+		t.Fatal("steering submission cleared busy state incorrectly")
+	}
+}
+
+func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
+	m := testModel(80, 24)
+	var requests []Request
+	var restored int
+	m.handlers.Request = func(request Request) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}
+	m.handlers.RestoreSteering = func() []string {
+		restored++
+		return []string{"queued message"}
+	}
+	m.busy, m.status = true, "Working"
+	typeText(m, "draft")
+	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if restored != 1 {
+		t.Fatalf("restore calls = %d, want one call", restored)
+	}
+	if got, want := m.editor.Value(), "queued message\n\ndraft"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("requests = %+v, want no resubmission", requests)
+	}
+	if m.state.Steering != nil {
+		t.Fatalf("steering state = %+v, want empty", m.state.Steering)
+	}
+	if strings.Contains(m.status, "Restored") {
+		t.Fatalf("restore status = %q, want no success message", m.status)
+	}
+}
+
+func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
+	m := testModel(80, 24)
+	queued := make([]string, 0, 1)
+	m.handlers.EnqueueSteering = func(value string) error {
+		queued = append(queued, value)
+		return nil
+	}
+	m.handlers.RestoreSteering = func() []string {
+		messages := append([]string(nil), queued...)
+		queued = nil
+		return messages
+	}
+	m.busy, m.status = true, "Working"
+	typeText(m, "same message")
+	press(m, tea.KeyEnter)
+	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if len(queued) != 0 {
+		t.Fatalf("backend queue = %+v, want empty after dequeue", queued)
+	}
+	if got, want := m.editor.Value(), "same message"; got != want {
+		t.Fatalf("editor = %q, want one restored message", got)
+	}
+	if strings.Count(m.editor.Value(), "same message") != 1 {
+		t.Fatalf("restored message appears more than once: %q", m.editor.Value())
+	}
+}
+
+func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'[', 'A'}, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'O', 'A'}, Alt: true},
+	} {
+		m := testModel(80, 24)
+		m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
+		m.busy = true
+		m.Update(key)
+		if got := m.editor.Value(); got != "queued" {
+			t.Fatalf("key %q restored editor = %q, want queued", key.String(), got)
+		}
+	}
+}
+
+func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
+	if !shouldRestoreSteeringOnPlainUp(runtime.GOOS) {
+		t.Skip("plain Up fallback is macOS-specific")
+	}
+	m := testModel(80, 24)
+	m.busy = true
+	m.state.Steering = []string{"queued"}
+	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.editor.Value(); got != "queued" {
+		t.Fatalf("editor = %q, want queued message", got)
+	}
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("steering = %+v, want empty", m.state.Steering)
+	}
+}
+
+func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want bool
+	}{
+		{goos: "darwin", want: true},
+		{goos: "linux", want: false},
+		{goos: "windows", want: false},
+	} {
+		if got := shouldRestoreSteeringOnPlainUp(test.goos); got != test.want {
+			t.Fatalf("shouldRestoreSteeringOnPlainUp(%q) = %v, want %v", test.goos, got, test.want)
+		}
+	}
+}
+
+func TestOperationDonePreservesSteeringWithdrawalAgainstStaleSnapshot(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.state.Steering = []string{"queued"}
+	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
+	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if got := m.editor.Value(); got != "queued" {
+		t.Fatalf("editor = %q, want queued message", got)
+	}
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("steering = %+v, want empty", m.state.Steering)
+	}
+	m.Update(OperationDoneMsg{Snapshot: &Snapshot{Steering: []string{"queued"}}, RetainMessages: true})
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("stale snapshot restored steering = %+v, want empty", m.state.Steering)
+	}
+}
+
+func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.state.Steering = []string{"first", "second"}
+	m.layout()
+	plain := ansi.Strip(m.View())
+	for _, want := range []string{"Steering: first", "Steering: second", "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("view = %q, missing %q", plain, want)
+		}
+	}
+	assertFrame(t, m)
+}
+
+func TestSteeringDequeueKeyLabelByOS(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "darwin", want: "option+up"},
+		{goos: "windows", want: "alt+up"},
+		{goos: "linux", want: "alt+up"},
+	} {
+		if got := steeringDequeueKeyLabelForOS(test.goos); got != test.want {
+			t.Fatalf("steeringDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
+		}
+	}
+}
+
+func TestPendingSteeringViewUsesOnlyTheFirstLine(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Steering = []string{"first line\nsecond line"}
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "Steering: first line") {
+		t.Fatalf("view = %q, missing first line", plain)
+	}
+	if strings.Contains(plain, "second line") {
+		t.Fatalf("view = %q, rendered text after first line", plain)
+	}
+}
+
+func TestEscapeRestoresSteeringBeforeCancel(t *testing.T) {
+	m := testModel(80, 24)
+	cancelled := 0
+	m.handlers.RestoreSteering = func() []string { return []string{"queued message"} }
+	m.handlers.Cancel = func() { cancelled++ }
+	m.busy = true
+	press(m, tea.KeyEsc)
+	if cancelled != 1 {
+		t.Fatalf("cancelled = %d, want one cancellation", cancelled)
+	}
+	if got, want := m.editor.Value(), "queued message"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+}
+
+func TestRejectedSteeringRestoresInputAfterOperationEnds(t *testing.T) {
+	m := testModel(60, 15)
+	m.handlers.Request = func(Request) tea.Cmd { return nil }
+	m.busy, m.status = true, "Working"
+	typeText(m, "late steering")
+	press(m, tea.KeyEnter)
+	m.Update(OperationDoneMsg{ID: m.operationID})
+	m.Update(SteeringResultMsg{ID: m.operationID, Value: "late steering", Err: fmt.Errorf("operation ended")})
+	if m.editor.Value() != "late steering" {
+		t.Fatalf("restored editor = %q, want late steering", m.editor.Value())
+	}
+}
+
+func TestRejectedSteeringDoesNotOverwriteNewDraft(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy = true
+	typeText(m, "new draft")
+	m.Update(SteeringResultMsg{Value: "late steering", Err: fmt.Errorf("operation ended")})
+	if got := m.editor.Value(); got != "new draft" {
+		t.Fatalf("draft = %q, want new draft", got)
 	}
 }
 

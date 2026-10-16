@@ -112,6 +112,7 @@ type Snapshot struct {
 	Tree         []TreeNode
 	Messages     []Message
 	Skills       []SkillOption
+	Steering     []string
 }
 
 // Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload/clear/delete
@@ -123,10 +124,14 @@ type Request struct {
 
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
 type Handlers struct {
-	Request        func(Request) tea.Cmd
-	Cancel         func()
-	ReadClipboard  func() (string, error)
-	WriteClipboard func(string) error
+	Request func(Request) tea.Cmd
+	Cancel  func()
+	// EnqueueSteering 同步接受一条 steering，避免撤回与异步入队竞态
+	EnqueueSteering func(string) error
+	// RestoreSteering 原子取出后台尚未消费的 steering，供撤回到编辑器
+	RestoreSteering func() []string
+	ReadClipboard   func() (string, error)
+	WriteClipboard  func(string) error
 }
 
 // MessageMsg 更新具有同一 ID 的消息；OperationDoneMsg 才结束整个用户操作
@@ -137,6 +142,12 @@ type MessageCommittedMsg struct {
 }
 
 type StatusMsg string
+type SteeringResultMsg struct {
+	ID    uint64
+	Value string
+	Err   error
+}
+type SteeringStateMsg struct{ Messages []string }
 type MessageTail struct {
 	AfterID  string
 	Messages []Message
@@ -195,6 +206,9 @@ type Model struct {
 	historyPos       int
 	draft            string
 	busy, closing    bool
+	steeringRestored bool
+	canceling        bool
+	compacting       bool
 	status           string
 	hideThinking     bool
 	showAllTools     bool
@@ -293,12 +307,41 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushPending = false
 		m.refreshTranscript()
 	case StatusMsg:
-		m.status = string(msg)
+		value := string(msg)
+		m.status = value
+		switch {
+		case strings.HasPrefix(value, "Compacting context"):
+			m.compacting = true
+		}
+	case SteeringResultMsg:
+		if msg.ID != 0 && msg.ID != m.operationID {
+			return m, nil
+		}
+		if msg.Err != nil {
+			if strings.TrimSpace(m.editor.Value()) == "" {
+				m.editor.SetValue(msg.Value)
+				m.editor.CursorEnd()
+			}
+			m.completion, m.completionHidden = 0, true
+			m.notice("Error: " + msg.Err.Error())
+		} else if m.busy {
+			m.steeringRestored = false
+			m.state.Steering = append(m.state.Steering, msg.Value)
+			if !m.canceling && !m.compacting {
+				m.status = "Working"
+			}
+		}
+		m.layout()
+	case SteeringStateMsg:
+		m.steeringRestored = false
+		m.state.Steering = append([]string(nil), msg.Messages...)
+		m.layout()
 	case OperationDoneMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
 			return m, nil
 		}
 		m.busy, m.flushPending, m.status = false, false, ""
+		m.canceling, m.compacting = false, false
 		if msg.Quit && msg.Err == nil {
 			m.closing = true
 			return m, tea.Quit
@@ -308,11 +351,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Snapshot != nil {
 			if msg.RetainMessages {
+				preserveSteering := m.steeringRestored
 				m.applyMetadata(*msg.Snapshot)
+				if preserveSteering {
+					m.state.Steering = nil
+				}
 			} else {
 				m.applySnapshot(*msg.Snapshot)
 			}
 		}
+		m.steeringRestored = false
 		if msg.ResetTranscript {
 			m.viewport.GotoBottom()
 			m.cache = make(map[string]cachedMessage)
@@ -386,6 +434,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applySnapshot 复制切片边界，预览/运行侧之后的赋值不会改动 UI
 func (m *Model) applySnapshot(s Snapshot) {
 	m.applyMetadata(s)
+	m.steeringRestored = false
 	m.messageIndex = make(map[string]int, len(s.Messages))
 	for i, message := range s.Messages {
 		m.messageIndex[message.ID] = i
@@ -405,6 +454,7 @@ func (m *Model) applySnapshot(s Snapshot) {
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
+	m.state.Steering = append([]string(nil), s.Steering...)
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}
@@ -447,11 +497,68 @@ func (m *Model) dispatch(kind, value string) tea.Cmd {
 		return nil
 	}
 	m.busy, m.status = true, "Working"
+	m.canceling, m.compacting = false, false
 	if kind == "compact" {
 		m.status = "Compacting context…"
+		m.compacting = true
 	}
 	m.operationID++
 	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value}))
+}
+
+// dispatchSteering 把运行中的普通输入交给当前操作，不改变操作 ID 或 busy 状态
+func (m *Model) dispatchSteering(value string) tea.Cmd {
+	if !m.busy {
+		return nil
+	}
+	if m.handlers.EnqueueSteering != nil {
+		if err := m.handlers.EnqueueSteering(value); err != nil {
+			m.editor.SetValue(value)
+			m.editor.CursorEnd()
+			m.completion, m.completionHidden = 0, true
+			m.notice("Error: " + err.Error())
+			m.layout()
+			return nil
+		}
+		m.steeringRestored = false
+		m.state.Steering = append(m.state.Steering, value)
+		if !m.canceling && !m.compacting {
+			m.status = "Working"
+		}
+		m.layout()
+		return nil
+	}
+	if m.handlers.Request == nil {
+		return nil
+	}
+	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "steer", Value: value})
+}
+
+// restoreQueuedSteering 按 PI 的顺序把 steering 放回编辑器，并原子清空后台队列
+func (m *Model) restoreQueuedSteering() int {
+	var queued []string
+	if m.handlers.RestoreSteering != nil {
+		queued = m.handlers.RestoreSteering()
+	} else {
+		queued = append([]string(nil), m.state.Steering...)
+	}
+	m.state.Steering = nil
+	if len(queued) == 0 {
+		m.layout()
+		return 0
+	}
+	m.steeringRestored = true
+	queuedText := strings.Join(queued, "\n\n")
+	current := m.editor.Value()
+	if strings.TrimSpace(current) != "" {
+		queuedText += "\n\n" + current
+	}
+	m.editor.SetValue(queuedText)
+	m.editor.CursorEnd()
+	m.completion, m.completionHidden = 0, true
+	m.resetPastes()
+	m.layout()
+	return len(queued)
 }
 
 func (m *Model) notice(value string) {
@@ -521,6 +628,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Skills = append([]SkillOption(nil), s.Skills...)
+	m.state.Steering = append([]string(nil), s.Steering...)
 	m.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)

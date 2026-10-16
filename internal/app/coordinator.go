@@ -17,7 +17,17 @@ type Runner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
 	// Continue 在不追加用户消息的情况下重入运行循环
 	Continue(ctx context.Context) (*llm.AssistantMessage, error)
+	// Steer 把输入加入当前运行的 steering 队列
+	Steer(input string) error
 }
+
+type queuedRunner interface {
+	ContinueSteering(context.Context) (*llm.AssistantMessage, error)
+}
+
+var ErrSteeringDuringCompaction = errors.New("app: steering is unavailable during context compaction")
+
+var ErrQueuedRunnerUnavailable = errors.New("app: queued steering runner is unavailable")
 
 // 压缩原因，随 compaction 事件暴露给消费者
 const (
@@ -45,8 +55,10 @@ type Coordinator struct {
 	// promptSections 是当前基线分节，由装配层设置、Reload 时替换；请求前与重放结果 diff
 	promptSections prompt.Sections
 	// mu 只保护基线分节；runMu 串行化编排，生命周期所有权由 App 管理
-	mu    sync.Mutex
-	runMu sync.Mutex
+	mu         sync.Mutex
+	runMu      sync.Mutex
+	stateMu    sync.Mutex
+	compacting bool
 }
 
 // NewCoordinator 创建编排层：next 为事件转发链（CLI 显示等）
@@ -62,6 +74,19 @@ func (c *Coordinator) setModel(model llm.Model) {
 // resetRecovery 开始重放已提交操作时重新建立本轮恢复状态
 func (c *Coordinator) resetRecovery() {
 	c.pendingRecovery, c.recovered = false, false
+}
+
+// EnqueueSteering 在压缩状态锁内接受一条 steering，压缩开始后拒绝新输入
+func (c *Coordinator) EnqueueSteering(input string) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.compacting {
+		return ErrSteeringDuringCompaction
+	}
+	if c.Agent == nil {
+		return errors.New("app: steering runner is unavailable")
+	}
+	return c.Agent.Steer(input)
 }
 
 // SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
@@ -151,6 +176,28 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 	return c.finishRun(ctx, reply, runErr)
 }
 
+// Continue 续接当前会话并完成一次溢出恢复，供同一操作消费晚到的 steering
+func (c *Coordinator) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	reply, runErr := c.Agent.Continue(ctx)
+	return c.finishRun(ctx, reply, runErr)
+}
+
+// ContinueQueued 只在 Runner 成功认领 steering 时续跑
+func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage, error) {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	var reply *llm.AssistantMessage
+	var runErr error
+	if runner, ok := c.Agent.(queuedRunner); ok {
+		reply, runErr = runner.ContinueSteering(ctx)
+	} else {
+		return nil, ErrQueuedRunnerUnavailable
+	}
+	return c.finishRun(ctx, reply, runErr)
+}
+
 // finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
 func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage, runErr error) (*llm.AssistantMessage, error) {
 	// 无压缩器时无法恢复（窗口未知等场景）：按原始错误收场，失败尝试保留在会话中
@@ -231,6 +278,14 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	if c.Compactor == nil {
 		return errors.New("session: context compaction not enabled")
 	}
+	c.stateMu.Lock()
+	c.compacting = true
+	c.stateMu.Unlock()
+	defer func() {
+		c.stateMu.Lock()
+		c.compacting = false
+		c.stateMu.Unlock()
+	}()
 	proj := c.m.BuildContext()
 	tokensBefore := contextTokens(proj)
 	if err := c.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
