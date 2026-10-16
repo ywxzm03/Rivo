@@ -16,8 +16,8 @@ func TestNewRegistersBuiltinModels(t *testing.T) {
 			continue
 		}
 		found = true
-		if m.API != llm.APIOpenAIResponses {
-			t.Errorf("%s API = %q, want %q", m.ID, m.API, llm.APIOpenAIResponses)
+		if m.API != llm.APIOpenAICompletions {
+			t.Errorf("%s API = %q, want %q", m.ID, m.API, llm.APIOpenAICompletions)
 		}
 		if m.Provider != ProviderID {
 			t.Errorf("%s Provider = %q, want %q", m.ID, m.Provider, ProviderID)

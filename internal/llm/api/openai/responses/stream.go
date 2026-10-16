@@ -50,6 +50,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		requestOptions = append(requestOptions,
 			option.WithHeader("session_id", opts.SessionID),
 			option.WithHeader("x-client-request-id", opts.SessionID),
+			option.WithHeader("x-session-affinity", opts.SessionID),
 		)
 	}
 	stream := cl.api.Responses.NewStreaming(ctx, params, requestOptions...)

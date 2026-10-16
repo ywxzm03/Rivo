@@ -3,6 +3,7 @@ package llm
 type API string
 
 const APIOpenAIResponses API = "openai-responses"
+const APIOpenAICompletions API = "openai-completions"
 
 type Model struct {
 	ID       string
@@ -12,7 +13,7 @@ type Model struct {
 
 	// SupportsImages 表示这个模型接受图片输入
 	SupportsImages bool
-	// Reasoning 表示这个模型支持 Responses reasoning
+	// Reasoning 表示这个模型支持 provider reasoning
 	Reasoning bool
 	// ReasoningEffort 是模型默认的 reasoning effort
 	ReasoningEffort ReasoningEffort

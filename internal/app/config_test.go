@@ -223,6 +223,22 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	}
 }
 
+func TestLoadCustomProviderSelectsChatCompletionsAPI(t *testing.T) {
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{"baseUrl":"http://127.0.0.1:3425/v1","api":"openai-completions","apiKey":"openai","models":[{"id":"gpt-5.6-sol","api":"openai-completions"}]}}}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := cfg.lookupProvider("openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.models) != 1 || spec.models[0].API != llm.APIOpenAICompletions {
+		t.Fatalf("models = %#v, want chat completions model", spec.models)
+	}
+}
+
 func TestAvailableModelsUsesRegistryContents(t *testing.T) {
 	wanted := llm.Model{ID: "configured", Provider: "custom"}
 	cfg := Config{registry: map[string]providerSpec{

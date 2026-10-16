@@ -35,7 +35,7 @@ func TestBuildParamsPromptCacheFields(t *testing.T) {
 			name:  "older OpenAI model only uses session key",
 			model: llm.Model{ID: "gpt-5", Provider: "openai", API: llm.APIOpenAIResponses},
 			opts:  llm.Options{SessionID: "session-old"},
-			want:  `{"model":"gpt-5","prompt_cache_key":"session-old"}`,
+			want:  `{"model":"gpt-5"}`,
 		},
 		{
 			name:  "DeepSeek Responses omits cache fields",
@@ -46,7 +46,7 @@ func TestBuildParamsPromptCacheFields(t *testing.T) {
 		{
 			name:  "OpenAI GPT-5.6 omits cache fields without session key",
 			model: llm.Model{ID: "gpt-5.6-terra", Provider: "openai", API: llm.APIOpenAIResponses},
-			want:  `{"model":"gpt-5.6-terra"}`,
+			want:  `{"model":"gpt-5.6-terra","prompt_cache_options":{"ttl":"30m"}}`,
 		},
 	}
 
@@ -139,7 +139,7 @@ func TestStreamAddsOpenAICacheHeadersOnly(t *testing.T) {
 				}
 			}
 
-			for _, name := range []string{"session_id", "x-client-request-id"} {
+			for _, name := range []string{"session_id", "x-client-request-id", "x-session-affinity"} {
 				got := gotHeaders.Get(name)
 				if tt.wantHeader && got != tt.sessionID {
 					t.Fatalf("%s = %q, want %q", name, got, tt.sessionID)

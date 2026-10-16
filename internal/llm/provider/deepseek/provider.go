@@ -2,8 +2,10 @@ package deepseek
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/llm/api/openai/completions"
 	"github.com/ywxzm03/Rivo/internal/llm/api/openai/responses"
 )
 
@@ -17,8 +19,9 @@ type Config struct {
 }
 
 type Provider struct {
-	client *responses.Client
-	models []llm.Model
+	responses   *responses.Client
+	completions *completions.Client
+	models      []llm.Model
 }
 
 func New(cfg Config) *Provider {
@@ -26,13 +29,21 @@ func New(cfg Config) *Provider {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	return &Provider{
-		client: responses.NewClient(cfg.APIKey, cfg.BaseURL),
-		models: builtinModels(),
+		responses:   responses.NewClient(cfg.APIKey, cfg.BaseURL),
+		completions: completions.NewClient(cfg.APIKey, cfg.BaseURL),
+		models:      builtinModels(),
 	}
 }
 
 func (p *Provider) Models() []llm.Model { return p.models }
 
 func (p *Provider) Stream(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-	return p.client.Stream(ctx, model, c, opts)
+	switch model.API {
+	case llm.APIOpenAIResponses:
+		return p.responses.Stream(ctx, model, c, opts)
+	case llm.APIOpenAICompletions:
+		return p.completions.Stream(ctx, model, c, opts)
+	default:
+		return nil, fmt.Errorf("deepseek: unsupported protocol %q", model.API)
+	}
 }

@@ -67,11 +67,15 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 		if name == "" {
 			name = m.ID
 		}
+		api := p.API
+		if m.API != "" {
+			api = m.API
+		}
 		models = append(models, llm.Model{
 			ID:               m.ID,
 			Name:             name,
 			Provider:         id,
-			API:              llm.APIOpenAIResponses,
+			API:              llm.API(api),
 			Reasoning:        m.Reasoning,
 			SupportsImages:   m.SupportsImages,
 			ContextWindow:    m.ContextWindow,

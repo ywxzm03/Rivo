@@ -10,6 +10,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/llm/api/openai/cache"
 )
 
 // BuildParams 将 Rivo 上下文和模型配置转换为 Responses 请求参数
@@ -22,11 +23,11 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		Model: model.ID,
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
 	}
-	if model.Provider == "openai" && opts.SessionID != "" {
-		params.PromptCacheKey = param.NewOpt(opts.SessionID)
-	}
-	if model.Provider == "openai" && opts.SessionID != "" && supportsPromptCacheOptions(model) {
-		params.PromptCacheOptions = responses.ResponseNewParamsPromptCacheOptions{Ttl: "30m"}
+	if cache.SupportsPromptCacheOptions(model) {
+		params.PromptCacheOptions = responses.ResponseNewParamsPromptCacheOptions{Ttl: cache.PromptCacheTTL}
+		if opts.SessionID != "" {
+			params.PromptCacheKey = param.NewOpt(cache.PromptCacheKey(opts.SessionID))
+		}
 	}
 	if opts.MaxTokens > 0 {
 		params.MaxOutputTokens = param.NewOpt(int64(opts.MaxTokens))
