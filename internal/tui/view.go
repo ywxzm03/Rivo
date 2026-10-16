@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,7 +53,7 @@ func (m *Model) layout() {
 	if previousWidth != m.editor.Width() || previousHeight != m.editor.Height() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
-	dock := m.editor.Height() + 2
+	dock := m.pendingRows() + m.editor.Height() + 2
 	if m.selector != nil {
 		m.selector.input.Width = max(1, m.width-3)
 		dock = m.selector.height(max(1, m.height-2))
@@ -181,6 +182,7 @@ func (m *Model) frameLines() []string {
 	if m.selector != nil {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
+		lines = append(lines, m.pendingLines()...)
 		label := ""
 		if m.busy {
 			label = m.spinner.View() + " " + m.status
@@ -204,6 +206,53 @@ func (m *Model) frameLines() []string {
 	}
 	lines = append(lines, splitFrameLines(m.footer())...)
 	return lines
+}
+
+// pendingRows 返回 PI 风格队列区域占用的行数
+func (m *Model) pendingRows() int {
+	if m.selector != nil || len(m.state.Steering) == 0 {
+		return 0
+	}
+	rows := len(m.state.Steering) + 2
+	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems())))
+	return min(rows, available)
+}
+
+// pendingLines 显示每条待消费消息和撤回提示
+func (m *Model) pendingLines() []string {
+	if len(m.state.Steering) == 0 {
+		return nil
+	}
+	lines := []string{""}
+	for _, message := range m.state.Steering {
+		if index := strings.IndexByte(message, '\n'); index >= 0 {
+			message = message[:index]
+		}
+		lines = append(lines, ansi.Truncate(colored(dimColor, "Steering: "+message), m.width, "…"))
+	}
+	hint := "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"
+	lines = append(lines, ansi.Truncate(colored(dimColor, hint), m.width, "…"))
+	rows := m.pendingRows()
+	if len(lines) > rows {
+		if rows <= 0 {
+			return nil
+		}
+		if rows == 1 {
+			return lines[len(lines)-1:]
+		}
+		// Keep the spacer and the hint while showing the earliest messages that fit.
+		visible := append([]string(nil), lines[:rows-1]...)
+		visible = append(visible, lines[len(lines)-1])
+		return visible
+	}
+	return lines
+}
+
+func steeringDequeueKeyLabel() string {
+	if runtime.GOOS == "windows" {
+		return "alt+up"
+	}
+	return "option+up"
 }
 
 func splitFrameLines(view string) []string {

@@ -172,6 +172,48 @@ func TestInputReaderParsesBytewiseMouseAndPaste(t *testing.T) {
 	}
 }
 
+func TestInputReaderRoutesAltUpToDequeue(t *testing.T) {
+	for _, sequence := range []string{"\x1b[1;3A", "\x1b\x1b[A"} {
+		t.Run(fmt.Sprintf("%q", sequence), func(t *testing.T) {
+			model := testModel(80, 24)
+			model.busy = true
+			restored := 0
+			queued := 0
+			model.handlers.RestoreSteering = func() []string {
+				restored++
+				return []string{"queued"}
+			}
+			model.handlers.EnqueueSteering = func(string) error {
+				queued++
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			reader := NewInputReader(strings.NewReader("draft" + sequence + "\r"))
+			defer reader.Close()
+			program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
+				tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+					if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
+						return tea.QuitMsg{}
+					}
+					return msg
+				}))
+			if _, err := program.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if restored != 1 {
+				t.Fatalf("restore calls = %d, want one", restored)
+			}
+			if queued != 0 {
+				t.Fatalf("queue submissions = %d, want none", queued)
+			}
+			if got, want := model.editor.Value(), "queued\n\ndraft"; got != want {
+				t.Fatalf("editor = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestInputReaderPreservesSmallReads(t *testing.T) {
 	value := "hello\x1b[<64;105;13M\x1b[200~" + strings.Repeat("[<65;2;3M", 100) + "\x1b[201~world"
 	reader := NewInputReader(strings.NewReader(value))

@@ -228,6 +228,14 @@ func (a *App) SessionID() string { return a.session.ID() }
 // SessionName 返回已提交的 Thread 显示名称
 func (a *App) SessionName() string { return a.session.Name() }
 
+// TakeSteering 原子清空当前运行中尚未消费的 steering
+func (a *App) TakeSteering() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeSteering()
+}
+
 // Skills 返回当前已发现技能的副本，显式命令由 TUI 适配器消费
 func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
 
@@ -236,6 +244,9 @@ func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
 
 // CurrentThinkingLevel 返回当前思考等级
 func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
+
+// SteeringMessages 返回当前尚未消费的 steering 文本，供显示层生成快照
+func (a *App) SteeringMessages() []string { return a.agent.SteeringMessages() }
 
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
 func (a *App) AutoCompactionEnabled() bool {

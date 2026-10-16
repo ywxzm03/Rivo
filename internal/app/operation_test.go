@@ -88,6 +88,46 @@ func TestOperationOwnershipCancellationAndJoin(t *testing.T) {
 	a.Wait()
 }
 
+func TestAppSteeringRunsWithinTheActiveOperation(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	a := operationApp(t, func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+		}
+		events := make(chan llm.AssistantMessageEvent, 1)
+		events <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}}
+		close(events)
+		return events, nil
+	}, nil)
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := a.EnqueueSteering("steer"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if result := op.Wait(); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want initial response plus steering response", calls)
+	}
+	var users []string
+	for _, message := range a.ContextView().Messages() {
+		if user, ok := message.(llm.UserMessage); ok {
+			users = append(users, messageTextForTest(t, user))
+		}
+	}
+	if len(users) != 2 || users[0] != "initial" || users[1] != "steer" {
+		t.Fatalf("user messages = %v", users)
+	}
+}
+
 func TestAssistantCommitRetryReusesOutputAndEntryID(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	calls := 0

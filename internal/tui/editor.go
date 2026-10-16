@@ -85,12 +85,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
-	if msg.String() == "esc" && m.jumpPillVisible() {
+	if msg.String() == "esc" && m.jumpPillVisible() && !(m.busy && len(m.state.Steering) > 0) {
 		m.jumpToBottom()
 		return nil
 	}
 	if m.selector != nil {
 		return m.selectorKey(msg)
+	}
+	if isSteeringDequeueKey(msg) {
+		if m.restoreQueuedSteering() == 0 {
+			m.status = "No queued messages to restore"
+		}
+		m.layout()
+		return nil
 	}
 	// 终端 bracketed paste 整段到达：只有粘贴走折叠路径，手动输入不经过这里
 	if msg.Paste {
@@ -144,9 +151,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.quit()
 		}
 	case "esc":
-		if m.busy && m.handlers.Cancel != nil {
+		if m.busy {
+			m.restoreQueuedSteering()
 			m.status = "Cancelling…"
-			m.handlers.Cancel()
+			if m.handlers.Cancel != nil {
+				m.handlers.Cancel()
+			}
 		}
 		return nil
 	case "ctrl+l":
@@ -192,6 +202,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	case "up":
+		// Some macOS terminals emit Option+Up as a plain Up sequence. If a
+		// steering is visible, prefer the PI dequeue action over history navigation.
+		if m.busy {
+			restored := m.restoreQueuedSteering()
+			if restored > 0 {
+				m.layout()
+				return nil
+			}
+		}
 		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
 			m.browseHistory(-1)
 			return nil
@@ -212,6 +231,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 	}
 	return cmd
+}
+
+// isSteeringDequeueKey 接受 Bubble Tea 的标准键值和终端拆包后保留的 Alt CSI 片段
+func isSteeringDequeueKey(msg tea.KeyMsg) bool {
+	if msg.String() == "alt+up" {
+		return true
+	}
+	if !msg.Alt || msg.Type != tea.KeyRunes {
+		return false
+	}
+	switch string(msg.Runes) {
+	case "[A", "[1;3A", "OA":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Model) quit() tea.Cmd {
@@ -247,12 +282,33 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 	if m.busy && input != "/exit" {
-		if input == "/tree" || strings.HasPrefix(input, "/tree ") {
-			m.notice("Wait for the current operation to finish before opening the tree.")
-		} else {
-			m.notice("An operation is running. Press Escape to interrupt.")
+		if strings.HasPrefix(m.status, "Cancelling") {
+			m.notice("Wait for the current operation to finish before sending input.")
+			return nil
 		}
-		return nil
+		if strings.HasPrefix(m.status, "Compacting context") {
+			m.notice("Cannot submit input while context compaction is running.")
+			return nil
+		}
+		if strings.HasPrefix(input, "/") {
+			if input == "/tree" || strings.HasPrefix(input, "/tree ") {
+				m.notice("Wait for the current operation to finish before opening the tree.")
+			} else {
+				m.notice("Commands are unavailable while an operation is running.")
+			}
+			return nil
+		}
+		if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil {
+			return nil
+		}
+		m.history = append(m.history, input)
+		m.historyPos = len(m.history)
+		m.draft = ""
+		m.editor.Reset()
+		m.resetPastes()
+		m.completionHidden = true
+		m.layout()
+		return m.dispatchSteering(input)
 	}
 	m.history = append(m.history, input)
 	m.historyPos = len(m.history)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -22,6 +23,73 @@ type Agent struct {
 
 	runGuardOnce sync.Once
 	runGuard     chan struct{}
+	steeringMu   sync.Mutex
+	steering     []steeringMessage
+}
+
+type steeringMessage struct {
+	input string
+}
+
+// Steer 把用户输入加入当前运行的 steering 队列，不打断正在进行的模型或工具
+func (a *Agent) Steer(input string) error {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return errors.New("agent: steering input is empty")
+	}
+	a.steeringMu.Lock()
+	a.steering = append(a.steering, steeringMessage{input: input})
+	a.steeringMu.Unlock()
+	return nil
+}
+
+// HasSteering 返回是否存在等待消费的 steering 输入
+func (a *Agent) HasSteering() bool {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	return len(a.steering) > 0
+}
+
+// SteeringMessages 返回等待消费的 steering 文本副本
+func (a *Agent) SteeringMessages() []string {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	messages := make([]string, len(a.steering))
+	for i, message := range a.steering {
+		messages[i] = message.input
+	}
+	return messages
+}
+
+// TakeSteering 清空等待消费的 steering，并按 FIFO 返回消息文本
+func (a *Agent) TakeSteering() []string {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	messages := make([]string, len(a.steering))
+	for i, message := range a.steering {
+		messages[i] = message.input
+	}
+	a.steering = nil
+	return messages
+}
+
+// takeSteering 原子地认领队首，避免撤回和消费同时看到同一条消息
+func (a *Agent) takeSteering() (steeringMessage, bool) {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	if len(a.steering) == 0 {
+		return steeringMessage{}, false
+	}
+	message := a.steering[0]
+	a.steering = a.steering[1:]
+	return message, true
+}
+
+// restoreSteering 把未被宿主接受的认领消息放回队首
+func (a *Agent) restoreSteering(message steeringMessage) {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	a.steering = append([]steeringMessage{message}, a.steering...)
 }
 
 // PreparedRequest 是一次模型请求的配置与上下文快照
@@ -88,7 +156,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 		return nil, err
 	}
 
-	return a.runLoop(ctx, cancel, firstMessageIndex)
+	return a.runLoop(ctx, cancel, firstMessageIndex, nil)
 }
 
 // Continue 在不追加用户消息的情况下重入运行循环，供编排层在溢出恢复后重试该轮
@@ -96,8 +164,17 @@ func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
 	return a.Resume(ctx, nil)
 }
 
+// ContinueSteering 只在成功认领一条 steering 时续跑，避免撤回与操作收尾之间启动空请求
+func (a *Agent) ContinueSteering(ctx context.Context) (*llm.AssistantMessage, error) {
+	return a.resume(ctx, nil, true)
+}
+
 // Resume 续接已经提交的 assistant 或工具批次，已执行的工具不会再次运行
 func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*llm.AssistantMessage, error) {
+	return a.resume(ctx, committed, false)
+}
+
+func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, requireSteering bool) (*llm.AssistantMessage, error) {
 	release, err := a.acquireRunGuard(ctx)
 	if err != nil {
 		return nil, err
@@ -107,10 +184,24 @@ func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*l
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	firstMessageIndex := len(a.AgentContext.Messages)
+	var initialSteering *steeringMessage
+	if requireSteering {
+		pending, ok := a.takeSteering()
+		if !ok {
+			return nil, nil
+		}
+		initialSteering = &pending
+	}
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
+		if initialSteering != nil {
+			a.restoreSteering(*initialSteering)
+		}
 		return nil, err
 	}
 	if err := a.emit(llm.TurnStartEvent{}); err != nil {
+		if initialSteering != nil {
+			a.restoreSteering(*initialSteering)
+		}
 		return nil, err
 	}
 	if committed != nil {
@@ -135,7 +226,7 @@ func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*l
 			return nil, err
 		}
 	}
-	return a.runLoop(ctx, cancel, firstMessageIndex)
+	return a.runLoop(ctx, cancel, firstMessageIndex, initialSteering)
 }
 
 // ReplaceMessages 用编排层提供的投影消息替换内存消息序列（Tools 不变）
@@ -149,8 +240,32 @@ func (a *Agent) AppendMessage(msg llm.Message) {
 }
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
-func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int) (*llm.AssistantMessage, error) {
+func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int, initialSteering *steeringMessage) (*llm.AssistantMessage, error) {
 	for {
+		// 1.先原子认领一条 steering，撤回只能取得尚未认领的消息
+		var pending steeringMessage
+		var ok bool
+		if initialSteering != nil {
+			pending, ok = *initialSteering, true
+			initialSteering = nil
+		} else {
+			pending, ok = a.takeSteering()
+		}
+		if ok {
+			userMessage := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
+			if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
+				a.restoreSteering(pending)
+				return nil, err
+			}
+			committed, err := a.commitMessagesWithStatus([]llm.Message{userMessage}, true)
+			if !committed {
+				a.restoreSteering(pending)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		// 1.请求准备只返回快照；摘要失败的降级与存储失败的停止由宿主判断
 		if a.PrepareRequest != nil {
 			request, err := a.PrepareRequest(ctx, PreparedRequest{Context: a.AgentContext, Config: a.AgentConfig})
@@ -275,6 +390,13 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
 				return nil, err
+			}
+			if a.HasSteering() {
+				if err := a.emit(llm.TurnStartEvent{}); err != nil {
+					cancel()
+					return nil, err
+				}
+				continue
 			}
 			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
 				cancel()
@@ -693,8 +815,14 @@ func (a *Agent) commitMessages(messages []llm.Message) error {
 }
 
 func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) error {
+	_, err := a.commitMessagesWithStatus(messages, notify)
+	return err
+}
+
+// commitMessagesWithStatus 返回宿主是否已成功接受消息，通知失败不能撤销已提交记录
+func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (bool, error) {
 	if len(messages) == 0 {
-		return nil
+		return true, nil
 	}
 	var ids []string
 	if a.CommitMessages != nil {
@@ -705,17 +833,17 @@ func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) er
 				for i, message := range messages {
 					if i < len(ids) && ids[i] != "" {
 						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-							return errors.Join(err, eventErr)
+							return len(ids) == len(messages), errors.Join(err, eventErr)
 						}
 					}
 				}
 			}
-			return err
+			return len(ids) == len(messages), err
 		}
 	}
 	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
 	if !notify {
-		return nil
+		return true, nil
 	}
 	for i, message := range messages {
 		var id string
@@ -723,10 +851,10 @@ func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) er
 			id = ids[i]
 		}
 		if err := a.emit(llm.MessageEndEvent{Message: message, SourceID: id}); err != nil {
-			return err
+			return true, err
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // assistantToolCalls 保留模型返回的工具调用顺序

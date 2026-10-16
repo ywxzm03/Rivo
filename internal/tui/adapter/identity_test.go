@@ -43,6 +43,19 @@ func TestMessageEndBindsLiveIdentityToCommittedSource(t *testing.T) {
 	}
 }
 
+func TestSteeringUserMessagesGetDistinctLiveIdentities(t *testing.T) {
+	r := &Runtime{namespace: "session", sequence: 3, userID: "session/live/3/user"}
+	first := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}
+	second := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}}
+	r.handleEvent(llm.MessageStartEvent{Message: first})
+	r.handleEvent(llm.MessageEndEvent{Message: first, SourceID: "entry-1"})
+	r.handleEvent(llm.MessageStartEvent{Message: second})
+	r.handleEvent(llm.MessageEndEvent{Message: second, SourceID: "entry-2"})
+	if len(r.messages) != 2 || r.messages[0].ID == r.messages[1].ID {
+		t.Fatalf("steering user identities = %+v", r.messages)
+	}
+}
+
 func TestCompactionVisibilityUsesContextKindAndSessionNamespace(t *testing.T) {
 	text := "The conversation history before this point was compacted into a summary."
 	view := testContext([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}})
