@@ -52,7 +52,11 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		defer stream.Close()
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
 		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: snapshot(partial)}) {
-			sendTerminal(events, llm.AssistantMessageErrorEvent{Reason: llm.StopReasonAborted, Err: context.Canceled, Partial: snapshot(partial)})
+			cause := ctx.Err()
+			if cause == nil {
+				cause = context.Canceled
+			}
+			sendTerminal(events, llm.AssistantMessageErrorEvent{Reason: llm.StopReasonAborted, Err: cause, Partial: snapshot(partial)})
 			return
 		}
 		var textIndex = -1
@@ -134,7 +138,6 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 					state.call.Name = delta.Function.Name
 				}
 				state.arguments += delta.Function.Arguments
-				state.call.Arguments = decodeArguments(state.arguments)
 				partial.Content[state.contentIndex] = state.call
 				if delta.Function.Arguments != "" {
 					if !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: state.contentIndex, Delta: delta.Function.Arguments}) {
@@ -148,6 +151,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 			return
 		}
 		for _, state := range tools {
+			state.call.Arguments = decodeArguments(state.arguments)
 			partial.Content[state.contentIndex] = state.call
 			if !send(llm.AssistantMessageToolCallEndEvent{ContentIndex: state.contentIndex, ToolCall: state.call}) {
 				return
@@ -170,7 +174,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		if !terminal {
 			partial.StopReason = llm.StopReasonStop
 		}
-		if len(tools) > 0 {
+		if len(tools) > 0 && !terminal {
 			partial.StopReason = llm.StopReasonToolUse
 		}
 		if partial.StopReason == llm.StopReasonError {
@@ -190,13 +194,7 @@ func firstChoice(chunk sdk.ChatCompletionChunk) (sdk.ChatCompletionChunkChoice, 
 }
 
 func usageFromChunk(chunk sdk.ChatCompletionChunk) llm.Usage {
-	read := int(chunk.Usage.PromptTokensDetails.CachedTokens)
-	write := int(chunk.Usage.PromptTokensDetails.CacheWriteTokens)
-	input := int(chunk.Usage.PromptTokens) - read - write
-	if input < 0 {
-		input = 0
-	}
-	return llm.Usage{InputTokens: input, OutputTokens: int(chunk.Usage.CompletionTokens)}
+	return llm.Usage{InputTokens: int(chunk.Usage.PromptTokens), OutputTokens: int(chunk.Usage.CompletionTokens)}
 }
 
 func rawDeltaString(raw map[string]any, field string) string {
