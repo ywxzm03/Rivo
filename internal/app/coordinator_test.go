@@ -103,6 +103,16 @@ func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	}
 }
 
+func TestCoordinatorContinueQueuedRequiresQueuedRunner(t *testing.T) {
+	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
+	if _, err := coord.ContinueQueued(context.Background()); !errors.Is(err, ErrQueuedRunnerUnavailable) {
+		t.Fatalf("ContinueQueued() error = %v, want queued runner error", err)
+	}
+	if runner.continueCalls != 0 {
+		t.Fatalf("Continue() calls = %d, want none", runner.continueCalls)
+	}
+}
+
 func TestCoordinatorPersistFailureAborts(t *testing.T) {
 	sm := session.New("/project", t.TempDir())
 	if err := os.WriteFile(sm.Path(), []byte("junk\n"), 0o644); err != nil {

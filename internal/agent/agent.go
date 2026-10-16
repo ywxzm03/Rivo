@@ -28,8 +28,8 @@ type Agent struct {
 }
 
 type steeringMessage struct {
-	input   string
-	started bool
+	input     string
+	retryable bool
 }
 
 // Steer 把用户输入加入当前运行的 steering 队列，不打断正在进行的模型或工具
@@ -72,6 +72,19 @@ func (a *Agent) TakeSteering() []string {
 	}
 	a.steering = nil
 	return messages
+}
+
+// AcknowledgeSteering 删除宿主提交失败后恢复、且已由会话补写的 steering
+func (a *Agent) AcknowledgeSteering(input string) bool {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	for i, message := range a.steering {
+		if message.retryable && message.input == input {
+			a.steering = append(a.steering[:i], a.steering[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // takeSteering 原子地认领队首，避免撤回和消费同时看到同一条消息
@@ -254,18 +267,20 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		if ok {
 			userMessage := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
-			if !pending.started {
-				if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
-					a.restoreSteering(pending)
-					return nil, err
-				}
-				pending.started = true
-			}
-			committed, err := a.commitMessagesWithStatus([]llm.Message{userMessage}, true)
-			if !committed {
-				a.restoreSteering(pending)
-			}
+			ids, err := a.persistMessages([]llm.Message{userMessage})
 			if err != nil {
+				pending.retryable = true
+				a.restoreSteering(pending)
+				return nil, err
+			}
+			if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
+				return nil, err
+			}
+			var sourceID string
+			if len(ids) > 0 {
+				sourceID = ids[0]
+			}
+			if err := a.emit(llm.MessageEndEvent{Message: userMessage, SourceID: sourceID}); err != nil {
 				return nil, err
 			}
 		}
@@ -834,24 +849,19 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 	if len(messages) == 0 {
 		return true, nil
 	}
-	var ids []string
-	if a.CommitMessages != nil {
-		var err error
-		ids, err = a.CommitMessages(messages)
-		if err != nil {
-			if notify {
-				for i, message := range messages {
-					if i < len(ids) && ids[i] != "" {
-						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-							return false, errors.Join(err, eventErr)
-						}
+	ids, err := a.persistMessages(messages)
+	if err != nil {
+		if notify {
+			for i, message := range messages {
+				if i < len(ids) && ids[i] != "" {
+					if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
+						return false, errors.Join(err, eventErr)
 					}
 				}
 			}
-			return false, err
 		}
+		return false, err
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
 	if !notify {
 		return true, nil
 	}
@@ -865,6 +875,22 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 		}
 	}
 	return true, nil
+}
+
+func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	var ids []string
+	if a.CommitMessages != nil {
+		var err error
+		ids, err = a.CommitMessages(messages)
+		if err != nil {
+			return ids, err
+		}
+	}
+	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
+	return ids, nil
 }
 
 // assistantToolCalls 保留模型返回的工具调用顺序

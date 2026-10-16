@@ -135,6 +135,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		a.pendingRequest = nil
+		a.acknowledgePendingSteering(messages)
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
@@ -246,6 +247,19 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 		result.Err = err
 	}
 	return result
+}
+
+func (a *App) acknowledgePendingSteering(messages []llm.Message) {
+	for _, message := range messages {
+		user, ok := message.(llm.UserMessage)
+		if !ok || len(user.Content) != 1 {
+			continue
+		}
+		text, ok := user.Content[0].(llm.TextContent)
+		if ok {
+			a.agent.AcknowledgeSteering(text.Text)
+		}
+	}
 }
 
 // clearSession 移动当前叶子到空根，保留会话文件与运行时设置

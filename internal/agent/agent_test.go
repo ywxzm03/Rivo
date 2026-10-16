@@ -228,9 +228,12 @@ func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "pending" {
 		t.Fatalf("steering queue = %v, want pending message restored", got)
 	}
+	if !agent.AcknowledgeSteering("pending") || agent.HasSteering() {
+		t.Fatal("retried pending steering was not acknowledged")
+	}
 }
 
-func TestAgentSteeringDoesNotRepeatMessageStartAfterCommitFailure(t *testing.T) {
+func TestAgentSteeringEmitsMessageStartOnlyAfterCommitSuccess(t *testing.T) {
 	sentinel := errors.New("storage unavailable")
 	commits := 0
 	var events []llm.AgentEvent
@@ -238,8 +241,12 @@ func TestAgentSteeringDoesNotRepeatMessageStartAfterCommitFailure(t *testing.T) 
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}},
 	)
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	var agent *Agent
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
 		events = append(events, event)
+		if _, ok := event.(llm.TurnEndEvent); ok && commits == 2 {
+			return agent.Steer("retry")
+		}
 		return nil
 	})
 	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
@@ -249,11 +256,13 @@ func TestAgentSteeringDoesNotRepeatMessageStartAfterCommitFailure(t *testing.T) 
 		}
 		return []string{"entry"}, nil
 	}
-	if err := agent.Steer("retry"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want storage error", err)
+	}
+	for _, event := range events {
+		if start, ok := event.(llm.MessageStartEvent); ok && messageText(start.Message) == "retry" {
+			t.Fatal("steering MessageStartEvent emitted before commit succeeded")
+		}
 	}
 	if _, err := agent.Continue(context.Background()); err != nil {
 		t.Fatalf("Continue() error = %v", err)

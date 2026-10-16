@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -288,6 +289,80 @@ func TestAssistantCommitRetryReusesOutputAndEntryID(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reloaded.BuildContext(), a.session.BuildContext()) {
 		t.Fatal("disk and memory diverged after retry")
+	}
+}
+
+func TestSteeringCommitRetryDoesNotDuplicateQueuedMessage(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	turnEnded, allowSteering := make(chan struct{}), make(chan struct{})
+	var firstTurn sync.Once
+	calls := 0
+	stream := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+		}
+		reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "reply"}}}
+		events := make(chan llm.AssistantMessageEvent, 1)
+		events <- llm.AssistantMessageDoneEvent{Message: reply}
+		close(events)
+		return events, nil
+	}
+	sink := func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.TurnEndEvent); ok {
+			firstTurn.Do(func() {
+				close(turnEnded)
+				<-allowSteering
+			})
+		}
+		return nil
+	}
+	a := operationApp(t, stream, sink)
+	if err := a.session.AppendMessage(textMsg("seed")); err != nil {
+		t.Fatal(err)
+	}
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := a.EnqueueSteering("queued"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-turnEnded
+	restore := blockSessionWrites(t, a)
+	close(allowSteering)
+	if result := op.Wait(); result.Err == nil {
+		t.Fatal("want steering commit failure")
+	}
+	if got := a.SteeringMessages(); len(got) != 1 || got[0] != "queued" {
+		t.Fatalf("steering queue = %v, want queued message restored", got)
+	}
+	restore()
+	if _, err := a.Run(context.Background(), "next"); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.SteeringMessages(); len(got) != 0 {
+		t.Fatalf("steering queue after retry = %v, want empty", got)
+	}
+	queued, next := 0, 0
+	for _, message := range a.ContextView().Messages() {
+		user, ok := message.(llm.UserMessage)
+		if !ok || len(user.Content) != 1 {
+			continue
+		}
+		text, _ := user.Content[0].(llm.TextContent)
+		switch text.Text {
+		case "queued":
+			queued++
+		case "next":
+			next++
+		}
+	}
+	if queued != 1 || next != 1 {
+		t.Fatalf("retried user messages = queued:%d next:%d, want one each", queued, next)
 	}
 }
 

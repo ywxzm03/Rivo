@@ -27,6 +27,8 @@ type queuedRunner interface {
 
 var ErrSteeringDuringCompaction = errors.New("app: steering is unavailable during context compaction")
 
+var ErrQueuedRunnerUnavailable = errors.New("app: queued steering runner is unavailable")
+
 // 压缩原因，随 compaction 事件暴露给消费者
 const (
 	CompactionReasonAuto     = "auto"
@@ -191,7 +193,7 @@ func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage
 	if runner, ok := c.Agent.(queuedRunner); ok {
 		reply, runErr = runner.ContinueSteering(ctx)
 	} else {
-		reply, runErr = c.Agent.Continue(ctx)
+		return nil, ErrQueuedRunnerUnavailable
 	}
 	return c.finishRun(ctx, reply, runErr)
 }
