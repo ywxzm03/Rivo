@@ -200,7 +200,7 @@ func TestAgentSteeringConsumesOneMessageAfterEachCompletedResponse(t *testing.T)
 	}
 }
 
-func TestAgentSteeringAcknowledgesHostPendingCommit(t *testing.T) {
+func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	var commits int
 	sentinel := errors.New("storage unavailable")
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
@@ -225,8 +225,48 @@ func TestAgentSteeringAcknowledgesHostPendingCommit(t *testing.T) {
 	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want storage error", err)
 	}
-	if agent.HasSteering() {
-		t.Fatal("host-accepted pending message remained in steering queue")
+	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "pending" {
+		t.Fatalf("steering queue = %v, want pending message restored", got)
+	}
+}
+
+func TestAgentSteeringDoesNotRepeatMessageStartAfterCommitFailure(t *testing.T) {
+	sentinel := errors.New("storage unavailable")
+	commits := 0
+	var events []llm.AgentEvent
+	streamFn := doneStreamFn(new(int),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}},
+	)
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+		commits++
+		if commits == 3 {
+			return []string{"pending-entry"}, sentinel
+		}
+		return []string{"entry"}, nil
+	}
+	if err := agent.Steer("retry"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want storage error", err)
+	}
+	if _, err := agent.Continue(context.Background()); err != nil {
+		t.Fatalf("Continue() error = %v", err)
+	}
+	starts := 0
+	for _, event := range events {
+		start, ok := event.(llm.MessageStartEvent)
+		if ok && messageText(start.Message) == "retry" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("steering MessageStartEvent count = %d, want 1", starts)
 	}
 }
 

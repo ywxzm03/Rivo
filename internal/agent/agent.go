@@ -28,7 +28,8 @@ type Agent struct {
 }
 
 type steeringMessage struct {
-	input string
+	input   string
+	started bool
 }
 
 // Steer 把用户输入加入当前运行的 steering 队列，不打断正在进行的模型或工具
@@ -253,9 +254,12 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		if ok {
 			userMessage := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
-			if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
-				a.restoreSteering(pending)
-				return nil, err
+			if !pending.started {
+				if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
+					a.restoreSteering(pending)
+					return nil, err
+				}
+				pending.started = true
 			}
 			committed, err := a.commitMessagesWithStatus([]llm.Message{userMessage}, true)
 			if !committed {
@@ -839,12 +843,12 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 				for i, message := range messages {
 					if i < len(ids) && ids[i] != "" {
 						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-							return acceptedMessageIDs(ids, len(messages)), errors.Join(err, eventErr)
+							return false, errors.Join(err, eventErr)
 						}
 					}
 				}
 			}
-			return acceptedMessageIDs(ids, len(messages)), err
+			return false, err
 		}
 	}
 	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
@@ -861,18 +865,6 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 		}
 	}
 	return true, nil
-}
-
-func acceptedMessageIDs(ids []string, count int) bool {
-	if len(ids) != count {
-		return false
-	}
-	for _, id := range ids {
-		if id == "" {
-			return false
-		}
-	}
-	return true
 }
 
 // assistantToolCalls 保留模型返回的工具调用顺序
