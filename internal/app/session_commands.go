@@ -1,7 +1,6 @@
 package app
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -24,12 +23,11 @@ func (a *App) newSession() (*App, error) {
 	}
 	// 继承值仅初始化本次运行，恢复其他会话仍使用原启动配置的覆盖规则
 	next.cfg = a.cfg
-	// 2.初始设置写入隐藏草稿，命名或首条对话时与会话一起发布
+	// 2.初始设置只留在内存，首条对话时与会话一起发布
 	if err = next.session.AppendModelChange(model.Provider, model.ID); err == nil {
 		err = next.session.AppendThinkingLevelChange(string(cfg.ThinkingLevel))
 	}
 	if err != nil {
-		_ = os.Remove(next.session.Path() + ".draft")
 		return nil, err
 	}
 	return next, nil

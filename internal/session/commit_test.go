@@ -46,17 +46,23 @@ func TestPendingBatchKeepsIDsAndBlocksNewSubmissions(t *testing.T) {
 	}
 }
 
-func TestSetupPersistsBeforePublishWithoutListingEmptySession(t *testing.T) {
+func TestSetupStaysInMemoryWithoutListingEmptySession(t *testing.T) {
 	dir := t.TempDir()
 	m := New("/project", dir)
 	if err := m.AppendThinkingLevelChange("high"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(m.Path() + ".draft"); err != nil {
-		t.Fatal("setting was published without disk storage", err)
+	if _, err := os.Stat(m.Path()); !os.IsNotExist(err) {
+		t.Fatal("setting created a session file")
+	}
+	if _, err := os.Stat(m.Path() + ".draft"); !os.IsNotExist(err) {
+		t.Fatal("setting created a draft file")
 	}
 	if files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl")); len(files) != 0 {
 		t.Fatal("setting created a visible empty session")
+	}
+	if files, _ := filepath.Glob(filepath.Join(dir, ".rivo-session-*")); len(files) != 0 {
+		t.Fatal("setting created a temporary session file")
 	}
 	if err := m.AppendMessage(userMsg("hello")); err != nil {
 		t.Fatal(err)
