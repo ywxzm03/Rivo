@@ -92,6 +92,32 @@ func doneStreamFn(calls *int, replies ...llm.AssistantMessage) llm.StreamFn {
 	}
 }
 
+func TestAgentPassesSessionIDToModelRequest(t *testing.T) {
+	var got llm.Options
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		got = opts
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+			Content: []llm.Content{llm.TextContent{Text: "done"}},
+		}}
+		close(ch)
+		return ch, nil
+	}
+
+	a := NewAgent(
+		llm.AgentConfig{Model: llm.Model{ID: "m1"}, SessionID: "session-agent"},
+		llm.Context{},
+		streamFn,
+		nil,
+	)
+	if _, err := a.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != "session-agent" {
+		t.Fatalf("StreamFn SessionID = %q, want session-agent", got.SessionID)
+	}
+}
+
 func TestAgentRunToolLoop(t *testing.T) {
 	calls := 0
 	streamFn := doneStreamFn(&calls,

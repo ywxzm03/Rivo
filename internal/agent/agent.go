@@ -173,7 +173,10 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
 		streamCtx, streamCancel := context.WithCancel(ctx)
 		requestContext := contextForModel(a.AgentContext)
-		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{ThinkingLevel: a.AgentConfig.ThinkingLevel})
+		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{
+			ThinkingLevel: a.AgentConfig.ThinkingLevel,
+			SessionID:     a.AgentConfig.SessionID,
+		})
 
 		var final *llm.AssistantMessage
 		var streamReason llm.StopReason

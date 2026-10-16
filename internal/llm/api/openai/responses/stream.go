@@ -45,7 +45,14 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	if err != nil {
 		return nil, err
 	}
-	stream := cl.api.Responses.NewStreaming(ctx, params)
+	var requestOptions []option.RequestOption
+	if model.Provider == "openai" && opts.SessionID != "" {
+		requestOptions = append(requestOptions,
+			option.WithHeader("session_id", opts.SessionID),
+			option.WithHeader("x-client-request-id", opts.SessionID),
+		)
+	}
+	stream := cl.api.Responses.NewStreaming(ctx, params, requestOptions...)
 	events := make(chan llm.AssistantMessageEvent)
 	go func() {
 		defer close(events)
