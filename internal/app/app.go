@@ -246,7 +246,12 @@ func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
 func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
 
 // SteeringMessages 返回当前尚未消费的 steering 文本，供显示层生成快照
-func (a *App) SteeringMessages() []string { return a.agent.SteeringMessages() }
+func (a *App) SteeringMessages() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.SteeringMessages()
+}
 
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
 func (a *App) AutoCompactionEnabled() bool {

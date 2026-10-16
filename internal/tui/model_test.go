@@ -312,17 +312,21 @@ func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
 	}
 }
 
-func TestAltUpRestoresVisibleSteeringWhenBackendIsEmpty(t *testing.T) {
+func TestOperationDonePreservesSteeringWithdrawalAgainstStaleSnapshot(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
 	m.state.Steering = []string{"queued"}
-	m.handlers.RestoreSteering = func() []string { return nil }
+	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
 	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
 	if got := m.editor.Value(); got != "queued" {
 		t.Fatalf("editor = %q, want queued message", got)
 	}
 	if len(m.state.Steering) != 0 {
 		t.Fatalf("steering = %+v, want empty", m.state.Steering)
+	}
+	m.Update(OperationDoneMsg{Snapshot: &Snapshot{Steering: []string{"queued"}}, RetainMessages: true})
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("stale snapshot restored steering = %+v, want empty", m.state.Steering)
 	}
 }
 
@@ -392,6 +396,16 @@ func TestRejectedSteeringRestoresInputAfterOperationEnds(t *testing.T) {
 	m.Update(SteeringResultMsg{ID: m.operationID, Value: "late steering", Err: fmt.Errorf("operation ended")})
 	if m.editor.Value() != "late steering" {
 		t.Fatalf("restored editor = %q, want late steering", m.editor.Value())
+	}
+}
+
+func TestRejectedSteeringDoesNotOverwriteNewDraft(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy = true
+	typeText(m, "new draft")
+	m.Update(SteeringResultMsg{Value: "late steering", Err: fmt.Errorf("operation ended")})
+	if got := m.editor.Value(); got != "new draft" {
+		t.Fatalf("draft = %q, want new draft", got)
 	}
 }
 

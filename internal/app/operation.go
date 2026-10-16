@@ -157,8 +157,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			}
 			if len(messages) == 0 {
 				// 压缩点或省略标记已补写，续接原请求，不重复记录用户输入
-				result.Reply, result.Err = a.agent.Continue(ctx)
-				result.Reply, result.Err = a.coordinator.finishRun(ctx, result.Reply, result.Err)
+				result.Reply, result.Err = a.coordinator.Continue(ctx)
 				result = a.continueQueuedSteering(ctx, result)
 				return result
 			}
@@ -170,8 +169,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 					result = a.continueQueuedSteering(ctx, result)
 					return result
 				case llm.ToolResultMessage, llm.UserMessage:
-					result.Reply, result.Err = a.agent.Continue(ctx)
-					result.Reply, result.Err = a.coordinator.finishRun(ctx, result.Reply, result.Err)
+					result.Reply, result.Err = a.coordinator.Continue(ctx)
 					result = a.continueQueuedSteering(ctx, result)
 					return result
 				}

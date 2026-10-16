@@ -206,6 +206,9 @@ type Model struct {
 	historyPos       int
 	draft            string
 	busy, closing    bool
+	steeringRestored bool
+	canceling        bool
+	compacting       bool
 	status           string
 	hideThinking     bool
 	showAllTools     bool
@@ -304,22 +307,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushPending = false
 		m.refreshTranscript()
 	case StatusMsg:
-		m.status = string(msg)
+		value := string(msg)
+		m.status = value
+		switch {
+		case strings.HasPrefix(value, "Compacting context"):
+			m.compacting = true
+		}
 	case SteeringResultMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
 			return m, nil
 		}
 		if msg.Err != nil {
-			m.editor.SetValue(msg.Value)
-			m.editor.CursorEnd()
+			if strings.TrimSpace(m.editor.Value()) == "" {
+				m.editor.SetValue(msg.Value)
+				m.editor.CursorEnd()
+			}
 			m.completion, m.completionHidden = 0, true
 			m.notice("Error: " + msg.Err.Error())
 		} else if m.busy {
+			m.steeringRestored = false
 			m.state.Steering = append(m.state.Steering, msg.Value)
-			m.status = "Working"
+			if !m.canceling && !m.compacting {
+				m.status = "Working"
+			}
 		}
 		m.layout()
 	case SteeringStateMsg:
+		m.steeringRestored = false
 		m.state.Steering = append([]string(nil), msg.Messages...)
 		m.layout()
 	case OperationDoneMsg:
@@ -327,6 +341,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy, m.flushPending, m.status = false, false, ""
+		m.canceling, m.compacting = false, false
 		if msg.Quit && msg.Err == nil {
 			m.closing = true
 			return m, tea.Quit
@@ -336,11 +351,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Snapshot != nil {
 			if msg.RetainMessages {
+				preserveSteering := m.steeringRestored
 				m.applyMetadata(*msg.Snapshot)
+				if preserveSteering {
+					m.state.Steering = nil
+				}
 			} else {
 				m.applySnapshot(*msg.Snapshot)
 			}
 		}
+		m.steeringRestored = false
 		if msg.ResetTranscript {
 			m.viewport.GotoBottom()
 			m.cache = make(map[string]cachedMessage)
@@ -414,6 +434,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applySnapshot 复制切片边界，预览/运行侧之后的赋值不会改动 UI
 func (m *Model) applySnapshot(s Snapshot) {
 	m.applyMetadata(s)
+	m.steeringRestored = false
 	m.messageIndex = make(map[string]int, len(s.Messages))
 	for i, message := range s.Messages {
 		m.messageIndex[message.ID] = i
@@ -476,8 +497,10 @@ func (m *Model) dispatch(kind, value string) tea.Cmd {
 		return nil
 	}
 	m.busy, m.status = true, "Working"
+	m.canceling, m.compacting = false, false
 	if kind == "compact" {
 		m.status = "Compacting context…"
+		m.compacting = true
 	}
 	m.operationID++
 	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value}))
@@ -497,8 +520,11 @@ func (m *Model) dispatchSteering(value string) tea.Cmd {
 			m.layout()
 			return nil
 		}
+		m.steeringRestored = false
 		m.state.Steering = append(m.state.Steering, value)
-		m.status = "Working"
+		if !m.canceling && !m.compacting {
+			m.status = "Working"
+		}
 		m.layout()
 		return nil
 	}
@@ -513,11 +539,6 @@ func (m *Model) restoreQueuedSteering() int {
 	var queued []string
 	if m.handlers.RestoreSteering != nil {
 		queued = m.handlers.RestoreSteering()
-		if len(queued) == 0 {
-			// A concurrent operation snapshot can lag behind the atomic backend dequeue;
-			// keep the visible mirror available for the next explicit restore action.
-			queued = append([]string(nil), m.state.Steering...)
-		}
 	} else {
 		queued = append([]string(nil), m.state.Steering...)
 	}
@@ -526,6 +547,7 @@ func (m *Model) restoreQueuedSteering() int {
 		m.layout()
 		return 0
 	}
+	m.steeringRestored = true
 	queuedText := strings.Join(queued, "\n\n")
 	current := m.editor.Value()
 	if strings.TrimSpace(current) != "" {

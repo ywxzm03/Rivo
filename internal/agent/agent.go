@@ -840,14 +840,8 @@ func (a *Agent) commitMessages(messages []llm.Message) error {
 }
 
 func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) error {
-	_, err := a.commitMessagesWithStatus(messages, notify)
-	return err
-}
-
-// commitMessagesWithStatus 返回宿主是否已成功接受消息，通知失败不能撤销已提交记录
-func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (bool, error) {
 	if len(messages) == 0 {
-		return true, nil
+		return nil
 	}
 	ids, err := a.persistMessages(messages)
 	if err != nil {
@@ -855,15 +849,15 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 			for i, message := range messages {
 				if i < len(ids) && ids[i] != "" {
 					if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-						return false, errors.Join(err, eventErr)
+						return errors.Join(err, eventErr)
 					}
 				}
 			}
 		}
-		return false, err
+		return err
 	}
 	if !notify {
-		return true, nil
+		return nil
 	}
 	for i, message := range messages {
 		var id string
@@ -871,10 +865,10 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 			id = ids[i]
 		}
 		if err := a.emit(llm.MessageEndEvent{Message: message, SourceID: id}); err != nil {
-			return true, err
+			return err
 		}
 	}
-	return true, nil
+	return nil
 }
 
 func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {

@@ -156,6 +156,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		if m.busy {
 			m.restoreQueuedSteering()
+			m.canceling = true
 			m.status = "Cancelling…"
 			if m.handlers.Cancel != nil {
 				m.handlers.Cancel()
@@ -273,11 +274,11 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 	if m.busy && input != "/exit" {
-		if strings.HasPrefix(m.status, "Cancelling") {
+		if m.canceling {
 			m.notice("Wait for the current operation to finish before sending input.")
 			return nil
 		}
-		if strings.HasPrefix(m.status, "Compacting context") {
+		if m.compacting {
 			m.notice("Cannot submit input while context compaction is running.")
 			return nil
 		}
