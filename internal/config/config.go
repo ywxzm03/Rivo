@@ -13,6 +13,7 @@ import (
 
 // APIOpenAIResponses 是 models.json 中 provider 支持的唯一协议标识
 const APIOpenAIResponses = "openai-responses"
+const APIOpenAICompletions = "openai-completions"
 
 // agentDirEnv 是 agent 配置目录的环境变量覆盖名
 const agentDirEnv = "RIVO_AGENT_DIR"
@@ -28,9 +29,10 @@ type Settings struct {
 type Model struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
+	API           string `json:"api"`
 	ContextWindow int    `json:"contextWindow"`
 	MaxTokens     int    `json:"maxTokens"`
-	// Reasoning 表示模型支持 openai-responses 的 reasoning 输出
+	// Reasoning 表示模型支持 provider reasoning 输出
 	Reasoning bool `json:"reasoning"`
 	// SupportsImages 表示模型接受图片输入，影响 read 工具是否把图片降级为文字说明
 	SupportsImages bool `json:"supportsImages"`
@@ -216,14 +218,14 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 	return err
 }
 
-// validate 校验 provider 条目：协议只支持 openai-responses，baseUrl 与 models 必填；api 缺省补 openai-responses
+// validate 校验 provider 条目：协议支持 OpenAI Responses 和 Chat Completions，baseUrl 与 models 必填；api 缺省补 Responses
 func (m *ModelsFile) validate() error {
 	for i := range m.Providers {
 		if m.Providers[i].Provider.API == "" {
 			m.Providers[i].Provider.API = APIOpenAIResponses
 		}
-		if m.Providers[i].Provider.API != APIOpenAIResponses {
-			return fmt.Errorf("config: provider %q has unsupported api %q (only %q is supported)", m.Providers[i].ID, m.Providers[i].Provider.API, APIOpenAIResponses)
+		if m.Providers[i].Provider.API != APIOpenAIResponses && m.Providers[i].Provider.API != APIOpenAICompletions {
+			return fmt.Errorf("config: provider %q has unsupported api %q", m.Providers[i].ID, m.Providers[i].Provider.API)
 		}
 		if strings.TrimSpace(m.Providers[i].Provider.BaseURL) == "" {
 			return fmt.Errorf("config: provider %q is missing baseUrl", m.Providers[i].ID)
@@ -234,6 +236,9 @@ func (m *ModelsFile) validate() error {
 		for _, model := range m.Providers[i].Provider.Models {
 			if strings.TrimSpace(model.ID) == "" {
 				return fmt.Errorf("config: provider %q has a model without id", m.Providers[i].ID)
+			}
+			if model.API != "" && model.API != APIOpenAIResponses && model.API != APIOpenAICompletions {
+				return fmt.Errorf("config: provider %q model %q has unsupported api %q", m.Providers[i].ID, model.ID, model.API)
 			}
 		}
 	}
