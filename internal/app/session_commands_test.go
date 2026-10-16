@@ -13,6 +13,9 @@ import (
 
 func TestRenameOperationRetriesWithoutDuplicatingMetadata(t *testing.T) {
 	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("first message")); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.session.AppendSessionInfo("Original"); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +94,12 @@ func TestNewSessionInheritsSettingsWithoutOldContext(t *testing.T) {
 	if err := next.session.AppendSessionInfo("New Thread"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(next.session.Path()); !os.IsNotExist(err) {
+		t.Fatal("naming an empty session published it")
+	}
+	if err := next.session.AppendMessage(textMsg("new conversation")); err != nil {
+		t.Fatal(err)
+	}
 	loaded, err := session.Open(next.session.Path(), a.cwd)
 	if err != nil || loaded.BuildContext().Model != next.CurrentModel().ID || loaded.BuildContext().ThinkingLevel != "high" {
 		t.Fatal("inherited settings were not persisted", err)
@@ -121,6 +130,9 @@ func TestNewSessionFailureKeepsOldApp(t *testing.T) {
 
 func TestNewSessionStopsWhenPendingCommitFails(t *testing.T) {
 	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("old conversation")); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.session.AppendSessionInfo("Old Thread"); err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +150,11 @@ func TestNewSessionStopsWhenPendingCommitFails(t *testing.T) {
 	}
 }
 
-func TestNewSessionSetupFailureDoesNotLeaveOldPendingRequest(t *testing.T) {
+func TestNewSessionSetupDoesNotRequireSessionDirectory(t *testing.T) {
 	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("old conversation")); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.session.AppendSessionInfo("Old Thread"); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +173,8 @@ func TestNewSessionSetupFailureDoesNotLeaveOldPendingRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := op.Wait(); result.Err == nil || result.Next != nil || a.pendingRequest != nil || a.session.HasPending() {
-		t.Fatalf("new setup failure leaked into old session: %+v", result)
+	if result := op.Wait(); result.Err != nil || result.Next == nil || a.pendingRequest != nil || a.session.HasPending() {
+		t.Fatalf("new setup required disk persistence: %+v", result)
 	}
 }
 

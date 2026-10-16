@@ -21,6 +21,8 @@ const (
 	OperationNew      OperationKind = "new"
 	OperationReload   OperationKind = "reload"
 	OperationTree     OperationKind = "tree"
+	OperationClear    OperationKind = "clear"
+	OperationDelete   OperationKind = "delete"
 )
 
 type OperationRequest struct {
@@ -32,6 +34,7 @@ type OperationResult struct {
 	Replayed bool
 	Reply    *llm.AssistantMessage
 	Next     *App
+	Exit     bool
 	// EditorText is set after a successful tree rewind so the TUI can restore
 	// the selected user message without persisting a branch marker.
 	EditorText    string
@@ -124,7 +127,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		a.operationMu.Unlock()
 	}()
 	// 1.补写原候选记录，不重跑模型或工具；同一操作重试从已提交边界续接
-	if a.session.HasPending() {
+	if a.session.HasPending() && request.Kind != OperationDelete {
 		messages := a.session.PendingMessages()
 		pendingEdit := a.session.PendingContextEdit()
 		previous := a.pendingRequest
@@ -213,6 +216,11 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		a.Reload()
 	case OperationTree:
 		result.EditorText, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
+	case OperationClear:
+		result.Err = a.clearSession()
+	case OperationDelete:
+		result.Err = a.session.Delete()
+		result.Exit = result.Err == nil
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}
@@ -234,6 +242,15 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 		result.Reply, result.Err = a.coordinator.ContinueQueued(ctx)
 	}
 	return result
+}
+
+// clearSession 移动当前叶子到空根，保留会话文件与运行时设置
+func (a *App) clearSession() error {
+	if err := a.session.ResetLeaf(); err != nil {
+		return err
+	}
+	a.coordinator.resetRecovery()
+	return nil
 }
 
 // rewindTree moves the in-memory leaf to the selected user parent and restores

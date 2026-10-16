@@ -114,7 +114,14 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		} else {
 			r.pendingSkillInput = nil
 		}
+		if result.Exit && result.Err == nil {
+			r.mu.Unlock()
+			return tui.OperationDoneMsg{ID: req.ID, Quit: true}
+		}
 		reset := result.Next != nil || r.resetNeeded || result.Replayed || req.Kind == "tree"
+		if req.Kind == "clear" && result.Err == nil {
+			reset = true
+		}
 		if result.Next != nil {
 			r.app = result.Next
 			r.namespace = result.Next.SessionID()
@@ -131,6 +138,9 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		if reset {
 			r.replaceMessagesLocked(r.app.ContextView())
 			r.resetNeeded = false
+			if req.Kind == "clear" {
+				r.resetProjectionLocked()
+			}
 		}
 		var tail *tui.MessageTail
 		if req.Kind == "run" && !reset {
@@ -189,7 +199,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 				notice = "Reloaded context files and skills"
 			}
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}
 	}
 }
 
@@ -413,6 +423,21 @@ func (r *Runtime) replaceMessagesLocked(view compaction.ContextView) {
 	r.messages = messages
 	r.messageIndex = nil
 	r.activeToolAnchorID, r.currentAssistantID = "", ""
+}
+
+// resetProjectionLocked 清除 clear 后不再属于当前上下文的显示 bookkeeping
+func (r *Runtime) resetProjectionLocked() {
+	r.lastAssistantIndex = 0
+	r.hasToolGroup = false
+	r.operationLastAssistant, r.operationHadToolGroup = 0, false
+	r.operationStart = 0
+	r.operationEntries = nil
+	r.userID = ""
+	r.assistantTurn = 0
+	r.currentAssistantID, r.activeToolAnchorID = "", ""
+	r.toolStarted = nil
+	r.turnStarted, r.turnRetrying = time.Time{}, false
+	r.compactionNotice = nil
 }
 
 func (r *Runtime) partialAssistantLocked() *tui.Message {

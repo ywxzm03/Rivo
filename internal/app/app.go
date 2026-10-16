@@ -175,7 +175,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		Skills:       loader.Skills(),
 	}))
 	ag := agent.NewAgent(
-		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel},
+		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel, SessionID: sm.ID()},
 		llm.Context{
 			Tools: tools,
 		},

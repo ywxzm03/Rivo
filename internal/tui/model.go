@@ -115,7 +115,7 @@ type Snapshot struct {
 	Steering     []string
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload
+// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload/clear/delete
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -154,16 +154,18 @@ type MessageTail struct {
 }
 
 type OperationDoneMsg struct {
-	Tail           *MessageTail
-	ID             uint64
-	RetainMessages bool
-	Changes        []Message
-	Snapshot       *Snapshot
-	Err            error
-	Notice         string
-	EditorValue    string
-	RestoreEditor  bool
-	ResetSessionUI bool
+	Tail            *MessageTail
+	ID              uint64
+	RetainMessages  bool
+	Changes         []Message
+	Snapshot        *Snapshot
+	Err             error
+	Notice          string
+	EditorValue     string
+	RestoreEditor   bool
+	ResetSessionUI  bool
+	ResetTranscript bool
+	Quit            bool
 }
 type flushMsg struct{}
 
@@ -325,6 +327,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy, m.flushPending, m.status = false, false, ""
+		if msg.Quit && msg.Err == nil {
+			m.closing = true
+			return m, tea.Quit
+		}
 		if msg.ResetSessionUI {
 			m.resetSessionUI()
 		}
@@ -334,6 +340,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.applySnapshot(*msg.Snapshot)
 			}
+		}
+		if msg.ResetTranscript {
+			m.viewport.GotoBottom()
+			m.cache = make(map[string]cachedMessage)
+			m.markdownPreview = make(map[string]string)
 		}
 		if msg.Tail != nil {
 			m.replaceTail(*msg.Tail)

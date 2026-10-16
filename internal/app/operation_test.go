@@ -68,8 +68,10 @@ func TestOperationOwnershipCancellationAndJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	if _, err := a.Start(context.Background(), OperationRequest{Kind: OperationThinking, Value: "off"}); err == nil {
-		t.Fatal("accepted concurrent mutation")
+	for _, kind := range []OperationKind{OperationThinking, OperationClear, OperationDelete} {
+		if _, err := a.Start(context.Background(), OperationRequest{Kind: kind, Value: "off"}); err == nil {
+			t.Fatalf("accepted concurrent %s operation", kind)
+		}
 	}
 	op.Cancel()
 	<-canceled
@@ -125,6 +127,83 @@ func TestAppSteeringRunsWithinTheActiveOperation(t *testing.T) {
 	}
 	if len(users) != 2 || users[0] != "initial" || users[1] != "steer" {
 		t.Fatalf("user messages = %v", users)
+	}
+}
+
+func TestClearOperationMovesLeafWithoutChangingFileOrSettings(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.SetThinkingLevel(llm.ThinkingLevelHigh); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.AppendMessage(textMsg("old conversation")); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.AppendSessionInfo("Current thread"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(a.session.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := a.CurrentModel()
+	thinking := a.CurrentThinkingLevel()
+
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationClear})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := op.Wait(); result.Err != nil || result.Exit {
+		t.Fatalf("clear result = %+v", result)
+	}
+	if a.session.LeafID() != "" || len(a.ContextView().Messages()) != 0 || len(a.agent.AgentContext.Messages) != 0 {
+		t.Fatal("clear retained the active context")
+	}
+	if a.CurrentModel().Provider != model.Provider || a.CurrentModel().ID != model.ID || a.CurrentThinkingLevel() != thinking {
+		t.Fatal("clear changed runtime settings")
+	}
+	if a.SessionName() != "Current thread" {
+		t.Fatal("clear changed session name")
+	}
+	after, err := os.ReadFile(a.session.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("clear changed the session file")
+	}
+	if len(a.Tree().Entries) == 0 {
+		t.Fatal("clear discarded the session tree")
+	}
+
+	if err := a.session.AppendMessage(textMsg("new root")); err != nil {
+		t.Fatal(err)
+	}
+	entries := a.Tree().Entries
+	if entries[len(entries)-1].ParentID != "" {
+		t.Fatalf("new message parent = %q, want empty root", entries[len(entries)-1].ParentID)
+	}
+}
+
+func TestDeleteOperationRemovesFilesAndRequestsExit(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("delete me")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.session.Path()+".draft", []byte("draft"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationDelete})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := op.Wait()
+	if result.Err != nil || !result.Exit {
+		t.Fatalf("delete result = %+v", result)
+	}
+	for _, path := range []string{a.session.Path(), a.session.Path() + ".draft"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists, err = %v", path, err)
+		}
 	}
 }
 

@@ -32,6 +32,16 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	}
 }
 
+func TestNewInjectsSessionIDIntoAgentConfig(t *testing.T) {
+	a, err := NewWithSessionDir(configWithBuiltin(openai.ProviderID, openai.DefaultModel), t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := a.agent.AgentConfig.SessionID, a.SessionID(); got != want || got == "" {
+		t.Fatalf("agent SessionID = %q, app SessionID = %q", got, want)
+	}
+}
+
 func TestNewAcceptsDeepSeekDefaultModel(t *testing.T) {
 	a, err := New(configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
 	if err != nil {

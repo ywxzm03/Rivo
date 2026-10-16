@@ -70,6 +70,23 @@ func writeManualSkill(t *testing.T, path, body string) {
 	}
 }
 
+func seedPersistedSession(t *testing.T, r *Runtime, dir string) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := session.New(cwd, dir)
+	if err := sm.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "seed"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(sm.Path(), r.cfg, r.HandleEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Attach(a)
+}
+
 func completeSkillResponse(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprint(w, "data: "+`{"type":"response.completed","response":{"id":"response-1","status":"completed","output":[{"id":"message-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Finished","annotations":[]}]}]}}`+"\n\n")
@@ -142,6 +159,7 @@ func TestSkillFailuresDoNotStartModelOrWriteMessages(t *testing.T) {
 
 func TestResourceBoundariesRefreshSkillMetadata(t *testing.T) {
 	r, path, dir := newSkillRuntime(t, func(w http.ResponseWriter, _ *http.Request) { completeSkillResponse(w) })
+	seedPersistedSession(t, r, dir)
 	if done := r.request(tui.Request{Kind: "rename", Value: "Old session"})().(tui.OperationDoneMsg); done.Err != nil {
 		t.Fatal(done.Err)
 	}
@@ -246,6 +264,7 @@ func TestSkillCommitRetryReusesExpandedInputAfterFileChanges(t *testing.T) {
 		}
 		completeSkillResponse(w)
 	})
+	seedPersistedSession(t, r, dir)
 	if done := r.request(tui.Request{Kind: "rename", Value: "Retry test"})().(tui.OperationDoneMsg); done.Err != nil {
 		t.Fatal(done.Err)
 	}
@@ -279,8 +298,10 @@ func TestSkillCommitRetryReusesExpandedInputAfterFileChanges(t *testing.T) {
 	var users int
 	for _, message := range r.app.ContextView().Messages() {
 		if user, ok := message.(llm.UserMessage); ok {
-			users++
-			if !strings.Contains(textContent(user.Content), "Original instructions") {
+			if skillInvocation(textContent(user.Content)) != nil {
+				users++
+			}
+			if skillInvocation(textContent(user.Content)) != nil && !strings.Contains(textContent(user.Content), "Original instructions") {
 				t.Fatal("retry replaced the original skill snapshot")
 			}
 		}

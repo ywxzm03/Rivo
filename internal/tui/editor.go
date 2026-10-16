@@ -21,6 +21,8 @@ var commands = []slashCommand{
 	{"rename", "<new Name> — Rename the current session"},
 	{"new", "Start a new session"},
 	{"reload", "Reload context files and skills"},
+	{"clear", "Clear the current conversation context"},
+	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
 	{"exit", "Exit Rivo"},
 }
@@ -367,7 +369,7 @@ func (m *Model) submit() tea.Cmd {
 			return nil
 		}
 		return m.dispatch("rename", arg)
-	case "/new", "/reload":
+	case "/new", "/reload", "/clear", "/delete":
 		if arg != "" {
 			m.notice("Usage: " + name)
 			return nil
