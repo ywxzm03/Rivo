@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
@@ -14,11 +16,19 @@ func TestSessionCommandsPublishNameAndReplaceRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := app.New(cfg, nil)
+	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cwd, err := os.Getwd()
+	dir, err := session.DefaultDir(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := session.New(cwd, dir)
+	if err := sm.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "seed"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.Open(sm.Path(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

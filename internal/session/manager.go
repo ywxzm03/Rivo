@@ -14,7 +14,7 @@ import (
 )
 
 // SessionManager 管理一个树形 JSONL 会话：entry 按文件序追加，leaf 指向当前分支位置，
-// 设置先写入隐藏草稿，命名或首条对话消息发布 JSONL；持久化成功后才推进内存
+// 设置先留在内存，首条对话消息发布 JSONL；持久化成功后才推进内存
 type SessionManager struct {
 	header      Header
 	entries     []Entry
@@ -49,7 +49,7 @@ func dirName(cwd string) string {
 	return "--" + replacer.Replace(trimmed) + "--"
 }
 
-// New 在 dir 下创建新会话；header 只在内存，正式发布延迟到命名或首条对话消息
+// New 在 dir 下创建新会话；header 只在内存，正式发布延迟到首条对话消息
 func New(cwd, dir string) *SessionManager {
 	header := Header{
 		Type:      TypeSession,
@@ -309,7 +309,7 @@ func (m *SessionManager) RetryPending() error {
 	return nil
 }
 
-// persist 先编码整个批次，首次发布用完整临时文件，后续追加在失败时回退长度
+// persist 先编码整个批次，首次发布直接创建正式文件，后续追加在失败时回退长度
 func (m *SessionManager) persist(entries []Entry) error {
 	if !m.flushed {
 		all := append(append([]Entry(nil), m.entries...), entries...)
@@ -323,35 +323,34 @@ func (m *SessionManager) persist(entries []Entry) error {
 				return fmt.Errorf("session: failed to encode entry: %w", err)
 			}
 		}
+		if !shouldPublish(all) {
+			return nil
+		}
 		if err := os.MkdirAll(m.dir, 0o755); err != nil {
 			return fmt.Errorf("session: failed to create session directory: %w", err)
 		}
-		f, err := os.CreateTemp(m.dir, ".rivo-session-*")
+		f, err := os.OpenFile(m.sessionFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
-			return err
+			return fmt.Errorf("session: failed to create session file: %w", err)
 		}
-		defer os.Remove(f.Name())
-		if _, err := f.Write(data.Bytes()); err != nil {
-			_ = f.Close()
-			return err
+		removeOnFailure := true
+		defer func() {
+			if removeOnFailure {
+				_ = f.Close()
+				_ = os.Remove(m.sessionFile)
+			}
+		}()
+		n, writeErr := f.Write(data.Bytes())
+		if writeErr == nil && n != data.Len() {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			return fmt.Errorf("session: failed to write session file: %w", writeErr)
 		}
 		if err := f.Close(); err != nil {
-			return err
+			return fmt.Errorf("session: failed to close session file: %w", err)
 		}
-		draft := m.sessionFile + ".draft"
-		if !shouldPublish(all) {
-			return os.Rename(f.Name(), draft)
-		}
-		// 同目录重命名发布完整文件，不依赖文件系统支持硬链接
-		if _, err := os.Lstat(m.sessionFile); err == nil {
-			return fmt.Errorf("session: failed to publish session file: %w", os.ErrExist)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("session: failed to inspect session path: %w", err)
-		}
-		if err := os.Rename(f.Name(), m.sessionFile); err != nil {
-			return fmt.Errorf("session: failed to publish session file: %w", err)
-		}
-		_ = os.Remove(draft)
+		removeOnFailure = false
 		m.flushed = true
 		return nil
 	}
@@ -422,12 +421,9 @@ func entryTypeName(e Entry) string {
 	}
 }
 
-// shouldPublish 命名或产生首条对话后发布正式会话，其余设置留在草稿
+// shouldPublish 产生首条对话后发布正式会话，其余设置只留在内存
 func shouldPublish(entries []Entry) bool {
 	for _, e := range entries {
-		if info, ok := e.(*SessionInfoEntry); ok && info.Name != "" {
-			return true
-		}
 		me, ok := e.(*MessageEntry)
 		if !ok {
 			continue
