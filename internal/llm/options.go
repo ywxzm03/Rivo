@@ -18,4 +18,6 @@ type Options struct {
 	MaxTokens int
 	// ThinkingLevel 是本次请求的思考等级；空串表示未指定，沿用模型默认的 reasoning effort
 	ThinkingLevel ThinkingLevel
+	// SessionID 是当前持久化会话的 UUID，provider 可用于缓存路由
+	SessionID string
 }

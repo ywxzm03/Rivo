@@ -22,6 +22,12 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 		Model: model.ID,
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
 	}
+	if model.Provider == "openai" && opts.SessionID != "" {
+		params.PromptCacheKey = param.NewOpt(opts.SessionID)
+	}
+	if model.Provider == "openai" && opts.SessionID != "" && supportsPromptCacheOptions(model) {
+		params.PromptCacheOptions = responses.ResponseNewParamsPromptCacheOptions{Ttl: "30m"}
+	}
 	if opts.MaxTokens > 0 {
 		params.MaxOutputTokens = param.NewOpt(int64(opts.MaxTokens))
 	}
@@ -62,6 +68,7 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 var reservedParamKeys = map[string]bool{
 	"model": true, "input": true, "stream": true, "max_output_tokens": true,
 	"tools": true, "tool_choice": true, "reasoning": true, "include": true,
+	"prompt_cache_key": true, "prompt_cache_options": true, "prompt_cache_retention": true,
 }
 
 // thinkingLevels 是 pi 的扩展思考等级体系，顺序从低到高
