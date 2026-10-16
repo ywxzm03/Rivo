@@ -394,18 +394,21 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				cancel()
 				return nil, err
 			}
-			if a.HasSteering() {
-				if err := a.emit(llm.TurnStartEvent{}); err != nil {
+			pending, ok := a.takeSteering()
+			if !ok {
+				if err := a.emitAgentEnd(firstMessageIndex); err != nil {
 					cancel()
 					return nil, err
 				}
-				continue
+				return final, nil
 			}
-			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+			if err := a.emit(llm.TurnStartEvent{}); err != nil {
+				a.restoreSteering(pending)
 				cancel()
 				return nil, err
 			}
-			return final, nil
+			initialSteering = &pending
+			continue
 		}
 
 		// 4.执行工具批次，结束当前 turn 后开始下一轮模型调用
@@ -836,12 +839,12 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 				for i, message := range messages {
 					if i < len(ids) && ids[i] != "" {
 						if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-							return len(ids) == len(messages), errors.Join(err, eventErr)
+							return acceptedMessageIDs(ids, len(messages)), errors.Join(err, eventErr)
 						}
 					}
 				}
 			}
-			return len(ids) == len(messages), err
+			return acceptedMessageIDs(ids, len(messages)), err
 		}
 	}
 	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
@@ -858,6 +861,18 @@ func (a *Agent) commitMessagesWithStatus(messages []llm.Message, notify bool) (b
 		}
 	}
 	return true, nil
+}
+
+func acceptedMessageIDs(ids []string, count int) bool {
+	if len(ids) != count {
+		return false
+	}
+	for _, id := range ids {
+		if id == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // assistantToolCalls 保留模型返回的工具调用顺序

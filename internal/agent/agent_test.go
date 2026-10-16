@@ -230,6 +230,24 @@ func TestAgentSteeringAcknowledgesHostPendingCommit(t *testing.T) {
 	}
 }
 
+func TestAgentSteeringRestoresWhenHostRejectsWithoutEntryID(t *testing.T) {
+	sentinel := errors.New("pending submission already exists")
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	agent.CommitMessages = func([]llm.Message) ([]string, error) {
+		return []string{""}, sentinel
+	}
+	if err := agent.Steer("retry me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
+		t.Fatalf("Run() error = %v, want pending submission error", err)
+	}
+	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "retry me" {
+		t.Fatalf("steering queue = %v, want retry me", got)
+	}
+}
+
 func TestAgentSteeringClaimPreventsDequeueDuplicate(t *testing.T) {
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
 	var agent *Agent
