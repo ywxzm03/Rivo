@@ -50,7 +50,8 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	})
 	input := tui.NewInputReader(stdin)
 	defer input.Close()
-	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// all-motion 接收未按键的移动事件，驱动可交互提示的悬浮状态
+	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	runtime.SetProgram(program)
 	_, err = program.Run()
 	runtime.Cancel()
