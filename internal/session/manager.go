@@ -218,6 +218,17 @@ func (e *CommitError) Unwrap() error { return e.Err }
 // Path 返回会话路径；未命名且无对话时正式文件尚不存在
 func (m *SessionManager) Path() string { return m.sessionFile }
 
+// Delete 删除当前会话的正式文件与未发布草稿
+func (m *SessionManager) Delete() error {
+	var errs []error
+	for _, path := range []string{m.sessionFile, m.sessionFile + ".draft"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("session: failed to delete %s: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // ID 返回会话命名空间
 func (m *SessionManager) ID() string { return m.header.ID }
 

@@ -47,3 +47,29 @@ func TestSessionCommandsPublishNameAndReplaceRuntime(t *testing.T) {
 		t.Fatalf("new completion = %+v", done)
 	}
 }
+
+func TestClearAndDeleteSessionCommands(t *testing.T) {
+	setupAdapterEnv(t)
+	cfg, err := app.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(cfg, cwd, "")
+	r.Attach(a)
+	clear := r.request(tui.Request{ID: 1, Kind: "clear"})().(tui.OperationDoneMsg)
+	if clear.Err != nil || clear.Snapshot == nil || len(clear.Snapshot.Messages) != 0 {
+		t.Fatalf("clear completion = %+v", clear)
+	}
+	delete := r.request(tui.Request{ID: 2, Kind: "delete"})().(tui.OperationDoneMsg)
+	if delete.Err != nil || !delete.Quit {
+		t.Fatalf("delete completion = %+v", delete)
+	}
+}
