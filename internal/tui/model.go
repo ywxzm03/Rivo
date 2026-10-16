@@ -513,6 +513,11 @@ func (m *Model) restoreQueuedSteering() int {
 	var queued []string
 	if m.handlers.RestoreSteering != nil {
 		queued = m.handlers.RestoreSteering()
+		if len(queued) == 0 {
+			// A concurrent operation snapshot can lag behind the atomic backend dequeue;
+			// keep the visible mirror available for the next explicit restore action.
+			queued = append([]string(nil), m.state.Steering...)
+		}
 	} else {
 		queued = append([]string(nil), m.state.Steering...)
 	}

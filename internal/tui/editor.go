@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -206,7 +207,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "up":
 		// Some macOS terminals emit Option+Up as a plain Up sequence. If a
 		// steering is visible, prefer the PI dequeue action over history navigation.
-		if m.busy {
+		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy {
 			restored := m.restoreQueuedSteering()
 			if restored > 0 {
 				m.layout()
@@ -233,6 +234,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 	}
 	return cmd
+}
+
+func shouldRestoreSteeringOnPlainUp(goos string) bool {
+	return goos == "darwin"
 }
 
 func (m *Model) quit() tea.Cmd {

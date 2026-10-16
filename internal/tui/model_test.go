@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -280,11 +281,43 @@ func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
 }
 
 func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
+	if !shouldRestoreSteeringOnPlainUp(runtime.GOOS) {
+		t.Skip("plain Up fallback is macOS-specific")
+	}
 	m := testModel(80, 24)
 	m.busy = true
 	m.state.Steering = []string{"queued"}
 	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.editor.Value(); got != "queued" {
+		t.Fatalf("editor = %q, want queued message", got)
+	}
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("steering = %+v, want empty", m.state.Steering)
+	}
+}
+
+func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want bool
+	}{
+		{goos: "darwin", want: true},
+		{goos: "linux", want: false},
+		{goos: "windows", want: false},
+	} {
+		if got := shouldRestoreSteeringOnPlainUp(test.goos); got != test.want {
+			t.Fatalf("shouldRestoreSteeringOnPlainUp(%q) = %v, want %v", test.goos, got, test.want)
+		}
+	}
+}
+
+func TestAltUpRestoresVisibleSteeringWhenBackendIsEmpty(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.state.Steering = []string{"queued"}
+	m.handlers.RestoreSteering = func() []string { return nil }
+	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
 	if got := m.editor.Value(); got != "queued" {
 		t.Fatalf("editor = %q, want queued message", got)
 	}
