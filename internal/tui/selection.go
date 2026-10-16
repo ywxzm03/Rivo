@@ -21,6 +21,8 @@ func (m *Model) clearSelection() {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	m.mousePosition = screenPoint{x: msg.X, y: msg.Y}
+	m.mousePositionSet = true
 	if mouseIsWheel(msg) {
 		if m.selector == nil {
 			var cmd tea.Cmd
@@ -38,6 +40,10 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	switch msg.Action {
 	case tea.MouseActionPress:
 		if msg.Button != tea.MouseButtonLeft {
+			return nil
+		}
+		if bounds, ok := m.jumpPillBounds(); ok && msg.Y == bounds.y && msg.X >= bounds.left && msg.X < bounds.right {
+			m.jumpToBottom()
 			return nil
 		}
 		now := time.Now()
@@ -203,7 +209,7 @@ func paintSelection(lines []string, anchor, focus screenPoint) {
 	if pointBefore(focus, anchor) {
 		anchor, focus = focus, anchor
 	}
-	style := lipgloss.NewStyle().Background(lipgloss.Color("#5b616b"))
+	style := lipgloss.NewStyle().Background(lipgloss.Color(selectionBackground))
 	for y := max(0, anchor.y); y <= min(focus.y, len(lines)-1); y++ {
 		line := ansi.Strip(lines[y])
 		width := ansi.StringWidth(line)

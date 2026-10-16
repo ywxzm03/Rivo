@@ -21,7 +21,7 @@ type markdownRendererKey struct {
 	role  string
 }
 
-// markdownStyle 逐项映射 Pi Markdown/语法高亮 token，不混入 Glamour 默认配色
+// markdownStyle 逐项映射 Claude Code Markdown/语法高亮 token，不混入 Glamour 默认配色
 func markdownStyle(role string) style.StyleConfig {
 	primitive := func(color string) style.StylePrimitive {
 		// Skill 正文统一浅白色，保留各 Markdown 节点的排版和强调样式
@@ -49,12 +49,27 @@ func markdownStyle(role string) style.StyleConfig {
 		bg := userBg
 		text.BackgroundColor = &bg
 	}
-	heading := primitive(yellowColor)
-	heading.Bold, heading.BlockSuffix = &yes, "\n"
+	heading := primitive(textColor)
+	heading.BlockSuffix = "\n"
+	h1 := style.StyleBlock{StylePrimitive: heading}
+	h1.Bold, h1.Italic, h1.Underline = &yes, &yes, &yes
+	h2 := style.StyleBlock{StylePrimitive: heading}
+	h2.Bold = &yes
+	h3 := style.StyleBlock{StylePrimitive: heading}
+	h3.Bold = &yes
+	quoteStyle := primitive(mutedColor)
+	quoteStyle.Italic = &yes
+	codeText := primitive(codeTextColor)
 	return style.StyleConfig{
 		Document:       style.StyleBlock{StylePrimitive: text, Margin: &zero},
 		Heading:        style.StyleBlock{StylePrimitive: heading},
-		BlockQuote:     style.StyleBlock{StylePrimitive: primitive(mutedColor), Indent: &one, IndentToken: &quote},
+		H1:             h1,
+		H2:             h2,
+		H3:             h3,
+		H4:             h3,
+		H5:             h3,
+		H6:             h3,
+		BlockQuote:     style.StyleBlock{StylePrimitive: quoteStyle, Indent: &one, IndentToken: &quote},
 		List:           style.StyleList{LevelIndent: 2},
 		Emph:           style.StylePrimitive{Italic: &yes},
 		Strong:         style.StylePrimitive{Bold: &yes},
@@ -67,14 +82,15 @@ func markdownStyle(role string) style.StyleConfig {
 		ImageText: style.StylePrimitive{Color: &quoteColor, Format: "[image: {{.text}}]"},
 		Image:     primitive(mutedColor),
 		Code:      style.StyleBlock{StylePrimitive: primitive(accentColor)},
-		CodeBlock: style.StyleCodeBlock{StyleBlock: style.StyleBlock{StylePrimitive: primitive(greenColor), Margin: &zero},
+		CodeBlock: style.StyleCodeBlock{StyleBlock: style.StyleBlock{StylePrimitive: codeText, Margin: &zero},
 			Chroma: &style.Chroma{
-				Text: primitive(greenColor), Error: primitive(redColor),
-				Comment: primitive(mutedColor), CommentPreproc: primitive(mutedColor),
-				Keyword: primitive(blueColor), KeywordReserved: primitive(blueColor), KeywordNamespace: primitive(blueColor), KeywordType: primitive(accentColor),
-				Operator: primitive(mutedColor), Punctuation: primitive(mutedColor),
-				Name: primitive(variableColor), NameBuiltin: primitive(yellowColor), NameFunction: primitive(yellowColor), NameClass: primitive(accentColor),
-				LiteralString: primitive(stringColor), LiteralStringEscape: primitive(stringColor), LiteralNumber: primitive(greenColor),
+				Text: primitive(codeTextColor), Error: primitive(redColor),
+				Comment: primitive(syntaxCommentColor), CommentPreproc: primitive(syntaxCommentColor),
+				Keyword: primitive(syntaxKeywordColor), KeywordReserved: primitive(syntaxKeywordColor), KeywordNamespace: primitive(syntaxStorageColor), KeywordType: primitive(syntaxTypeColor),
+				Operator: primitive(syntaxKeywordColor), Punctuation: primitive(codeTextColor),
+				Name: primitive(variableColor), NameBuiltin: primitive(syntaxTypeColor), NameFunction: primitive(syntaxTypeColor), NameClass: primitive(syntaxTypeColor),
+				NameTag: primitive(syntaxTypeColor), NameAttribute: primitive(syntaxTypeColor), NameConstant: primitive(syntaxLiteralColor), NameDecorator: primitive(syntaxTypeColor), NameException: primitive(redColor), NameOther: primitive(variableColor),
+				Literal: primitive(syntaxLiteralColor), LiteralString: primitive(stringColor), LiteralStringEscape: primitive(stringColor), LiteralNumber: primitive(syntaxLiteralColor), LiteralDate: primitive(syntaxLiteralColor),
 				GenericDeleted: primitive(redColor), GenericInserted: primitive(greenColor),
 			}},
 		Table:                 style.StyleTable{CenterSeparator: &center, ColumnSeparator: &column, RowSeparator: &row},

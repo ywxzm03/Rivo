@@ -216,7 +216,8 @@ func main() {
 	}}), scene: *scene}
 	input := tui.NewInputReader(os.Stdin)
 	defer input.Close()
-	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// all-motion 让预览也能验证未按键移动触发的悬浮状态
+	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	driver.send = program.Send
 	_, err := program.Run()
 	if driver.cancel != nil {

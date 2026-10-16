@@ -9,8 +9,15 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+const jumpToBottomLabel = " Jump to bottom ↓ "
+
+type jumpPillBounds struct {
+	left, right, y int
+}
 
 // layout 先为 footer 和输入坞分配高度，再把剩余空间交给消息视口
 func (m *Model) layout() {
@@ -102,11 +109,67 @@ func (m *Model) View() string {
 			lines = append(lines[:min(m.height-1, footerStart)], lines[footerStart:]...)
 		}
 	}
+	m.paintJumpPill(lines)
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], m.width, "")
 	}
 	m.updateCursorPosition()
 	return strings.Join(lines, "\n")
+}
+
+// jumpPillBounds 返回主 transcript 离底时覆盖的 pill 区域
+func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
+	if m.closing || m.selector != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
+		return jumpPillBounds{}, false
+	}
+	if rows := m.completionRows(len(m.completionItems())); rows > 0 {
+		return jumpPillBounds{}, false
+	}
+	width := ansi.StringWidth(jumpToBottomLabel)
+	if width > m.width {
+		return jumpPillBounds{}, false
+	}
+	left := (m.width - width) / 2
+	return jumpPillBounds{left: left, right: left + width, y: m.viewport.Height - 1}, true
+}
+
+func (m *Model) jumpPillVisible() bool {
+	_, ok := m.jumpPillBounds()
+	return ok
+}
+
+func (m *Model) jumpPillHovered() bool {
+	bounds, ok := m.jumpPillBounds()
+	return ok && m.mousePositionSet && m.mousePosition.y == bounds.y && m.mousePosition.x >= bounds.left && m.mousePosition.x < bounds.right
+}
+
+// paintJumpPill 在 transcript 最后一行覆盖 Claude 风格的到底提示
+func (m *Model) paintJumpPill(lines []string) {
+	bounds, ok := m.jumpPillBounds()
+	if !ok || bounds.y < 0 || bounds.y >= len(lines) {
+		return
+	}
+	line := lines[bounds.y]
+	lineWidth := ansi.StringWidth(line)
+	if lineWidth < m.width {
+		line += strings.Repeat(" ", m.width-lineWidth)
+	}
+	background := userBg
+	if m.jumpPillHovered() {
+		background = userBgHover
+	}
+	pill := lipgloss.NewStyle().
+		Background(lipgloss.Color(background)).
+		Foreground(lipgloss.Color(textColor)).
+		Faint(true).
+		Render(jumpToBottomLabel)
+	lines[bounds.y] = ansi.Cut(line, 0, bounds.left) + pill + ansi.Cut(line, bounds.right, m.width)
+}
+
+// jumpToBottom 恢复实时视图并清除可能残留的文本选择
+func (m *Model) jumpToBottom() {
+	m.viewport.GotoBottom()
+	m.clearSelection()
 }
 
 // frameLines builds the terminal rows in their stable top-to-bottom order.
