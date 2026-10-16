@@ -249,10 +249,14 @@ func (m *Model) pendingLines() []string {
 }
 
 func steeringDequeueKeyLabel() string {
-	if runtime.GOOS == "windows" {
-		return "alt+up"
+	return steeringDequeueKeyLabelForOS(runtime.GOOS)
+}
+
+func steeringDequeueKeyLabelForOS(goos string) string {
+	if goos == "darwin" {
+		return "option+up"
 	}
-	return "option+up"
+	return "alt+up"
 }
 
 func splitFrameLines(view string) []string {

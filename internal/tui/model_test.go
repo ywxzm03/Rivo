@@ -307,6 +307,21 @@ func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
 	assertFrame(t, m)
 }
 
+func TestSteeringDequeueKeyLabelByOS(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "darwin", want: "option+up"},
+		{goos: "windows", want: "alt+up"},
+		{goos: "linux", want: "alt+up"},
+	} {
+		if got := steeringDequeueKeyLabelForOS(test.goos); got != test.want {
+			t.Fatalf("steeringDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
+		}
+	}
+}
+
 func TestPendingSteeringViewUsesOnlyTheFirstLine(t *testing.T) {
 	m := testModel(80, 24)
 	m.state.Steering = []string{"first line\nsecond line"}
