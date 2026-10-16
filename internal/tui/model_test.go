@@ -243,6 +243,130 @@ func TestCompletionAndSelectors(t *testing.T) {
 	}
 }
 
+func TestTreeSelectorUsesUserNodesAndRestoresEditor(t *testing.T) {
+	m := testModel(100, 30)
+	m.state.Tree = []TreeNode{
+		{ID: "u1", Text: "first", Depth: 0},
+		{ID: "u2", ParentID: "u1", Prefix: "├─ ", Text: "second line", Depth: 1, Current: true},
+		{ID: "child", ParentID: "u2", Prefix: "│  └─ ", Text: "nested child", Depth: 2},
+		{ID: "u3", ParentID: "u1", Prefix: "└─ ", Text: "third line", Depth: 1},
+		{ID: "child-3", ParentID: "u3", Prefix: "   └─ ", Text: "last child", Depth: 2},
+	}
+	var requests []Request
+	m.handlers.Request = func(request Request) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}
+	m.openSelector("tree", "")
+	if m.selector == nil || m.selector.title != "Conversation tree" || len(m.selector.filtered) != 5 {
+		t.Fatalf("tree selector = %+v", m.selector)
+	}
+	if !strings.Contains(m.selector.filtered[1].label, "├─ second line") {
+		t.Fatalf("tree connector missing: %q", m.selector.filtered[1].label)
+	}
+	view := ansi.Strip(m.selector.view(m.width, m.height-2))
+	if strings.Count(view, "second line") != 1 {
+		t.Fatalf("selected tree text repeated in selector: %q", view)
+	}
+	if got, want := len(strings.Split(view, "\n")), m.selector.height(m.height-2); got != want {
+		t.Fatalf("tree selector height = %d, want %d", got, want)
+	}
+	press(m, tea.KeyUp)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+		t.Fatalf("first sibling up navigation = %q, want root u1", got)
+	}
+	press(m, tea.KeyRight)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+		t.Fatalf("root right navigation = %q, want first child u2", got)
+	}
+	press(m, tea.KeyDown)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+		t.Fatalf("same-level navigation = %q, want sibling u3", got)
+	}
+	press(m, tea.KeyRight)
+	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+		t.Fatalf("last sibling right navigation = %q, want child child-3", got)
+	}
+	press(m, tea.KeyLeft)
+	press(m, tea.KeyDown)
+	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+		t.Fatalf("last sibling down navigation = %q, want child child-3", got)
+	}
+	press(m, tea.KeyLeft)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+		t.Fatalf("left navigation = %q, want parent u3", got)
+	}
+	press(m, tea.KeyUp)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+		t.Fatalf("sibling up navigation = %q, want first child u2", got)
+	}
+	press(m, tea.KeyRight)
+	if got := m.selector.filtered[m.selector.selected].value; got != "child" {
+		t.Fatalf("right child navigation = %q, want child", got)
+	}
+	press(m, tea.KeyLeft)
+	press(m, tea.KeyUp)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+		t.Fatalf("root parent navigation = %q, want root u1", got)
+	}
+	press(m, tea.KeyUp)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+		t.Fatalf("root up navigation = %q, want last child u3", got)
+	}
+	press(m, tea.KeyDown)
+	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+		t.Fatalf("last child down navigation = %q, want nested child child-3", got)
+	}
+	press(m, tea.KeyLeft)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+		t.Fatalf("child parent navigation = %q, want u3", got)
+	}
+	press(m, tea.KeyLeft)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+		t.Fatalf("root left navigation = %q, want root u1", got)
+	}
+	press(m, tea.KeyDown)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+		t.Fatalf("root down navigation = %q, want first child u2", got)
+	}
+	press(m, tea.KeyLeft)
+	press(m, tea.KeyLeft)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+		t.Fatalf("root left navigation = %q, want last child u3", got)
+	}
+	press(m, tea.KeyLeft)
+	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+		t.Fatalf("last child parent navigation = %q, want root u1", got)
+	}
+	press(m, tea.KeyEnter)
+	if len(requests) != 1 || requests[0].Kind != "tree" || requests[0].Value != "u1" || m.selector != nil {
+		t.Fatalf("tree request = %+v selector=%v", requests, m.selector)
+	}
+	m.Update(OperationDoneMsg{Snapshot: &Snapshot{Tree: m.state.Tree}, RestoreEditor: true, EditorValue: "first"})
+	if m.editor.Value() != "first" {
+		t.Fatalf("editor = %q, want selected root text", m.editor.Value())
+	}
+}
+
+func TestTreeSelectorRejectsBusyOperation(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.openSelector("tree", "")
+	if m.selector != nil {
+		t.Fatal("tree selector opened while busy")
+	}
+	if len(m.state.Messages) == 0 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Wait for the current operation") {
+		t.Fatalf("busy notice = %+v", m.state.Messages)
+	}
+	m = testModel(80, 24)
+	m.busy = true
+	typeText(m, "/tree")
+	press(m, tea.KeyEnter)
+	if len(m.state.Messages) == 0 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Wait for the current operation") {
+		t.Fatalf("busy submit notice = %+v", m.state.Messages)
+	}
+}
+
 func TestCancelAndExit(t *testing.T) {
 	m := testModel(80, 24)
 	cancelled := 0

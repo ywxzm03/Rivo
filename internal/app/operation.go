@@ -20,6 +20,7 @@ const (
 	OperationRename   OperationKind = "rename"
 	OperationNew      OperationKind = "new"
 	OperationReload   OperationKind = "reload"
+	OperationTree     OperationKind = "tree"
 )
 
 type OperationRequest struct {
@@ -31,7 +32,11 @@ type OperationResult struct {
 	Replayed bool
 	Reply    *llm.AssistantMessage
 	Next     *App
-	Err      error
+	// EditorText is set after a successful tree rewind so the TUI can restore
+	// the selected user message without persisting a branch marker.
+	EditorText    string
+	RestoreEditor bool
+	Err           error
 }
 
 // Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
@@ -177,10 +182,68 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		result.Next, result.Err = a.newSession()
 	case OperationReload:
 		a.Reload()
+	case OperationTree:
+		result.EditorText, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}
 	return result
+}
+
+// rewindTree moves the in-memory leaf to the selected user parent and restores
+// the model settings projected by that branch. Any setup failure rolls the leaf
+// back so a failed UI operation cannot leave the app on a partial branch.
+func (a *App) rewindTree(entryID string) (string, bool, error) {
+	previousLeaf := a.session.LeafID()
+	rewound, err := a.session.RewindUser(entryID)
+	if err != nil {
+		return "", false, err
+	}
+	if err := a.restoreBranchSettings(); err != nil {
+		if rollbackErr := a.restoreLeaf(previousLeaf); rollbackErr != nil {
+			return "", false, errors.Join(err, rollbackErr)
+		}
+		return "", false, err
+	}
+	return rewound.Text, true, nil
+}
+
+func (a *App) restoreLeaf(leafID string) error {
+	if leafID == "" {
+		return a.session.ResetLeaf()
+	}
+	return a.session.Branch(leafID)
+}
+
+// restoreBranchSettings applies settings found on the newly active path and
+// falls back to the app defaults when the branch has no explicit setting.
+func (a *App) restoreBranchSettings() error {
+	view := a.session.BuildContext()
+	provider, model := view.Provider, view.Model
+	if provider == "" || model == "" {
+		provider, model = a.cfg.ProviderID, a.cfg.ModelID
+	}
+	if provider != "" {
+		if model == "" {
+			spec, err := a.cfg.lookupProvider(provider)
+			if err != nil {
+				return err
+			}
+			model = spec.defaultModel
+		}
+		if err := a.applyModel(provider, model, false); err != nil {
+			return err
+		}
+	}
+	level := a.cfg.ThinkingLevel
+	if view.HasThinkingLevel {
+		level = llm.ThinkingLevel(view.ThinkingLevel)
+	}
+	if level == "" {
+		level = llm.ThinkingLevelOff
+	}
+	a.agent.AgentConfig.ThinkingLevel = level
+	return nil
 }
 
 // restoreCommittedSettings 发布补写成功的设置，不追加第二条设置记录
