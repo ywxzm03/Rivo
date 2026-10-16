@@ -99,6 +99,38 @@ func TestErrorAssistantTriggersFlush(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesSessionFileAndDraft(t *testing.T) {
+	m := New("/project", t.TempDir())
+	if err := m.AppendMessage(userMsg("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.Path()+".draft", []byte("draft"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{m.Path(), m.Path() + ".draft"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists, err = %v", path, err)
+		}
+	}
+	if err := m.Delete(); err != nil {
+		t.Fatalf("deleting missing session = %v", err)
+	}
+}
+
+func TestDeleteReportsStorageFailure(t *testing.T) {
+	m := New("/project", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(m.Path(), "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(m.Path())
+	if err := m.Delete(); err == nil {
+		t.Fatal("deleting a non-empty session path succeeded")
+	}
+}
+
 func TestFlushOpenFailureRetriesAfterBlockerRemoved(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "f")
