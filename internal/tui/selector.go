@@ -257,11 +257,15 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 	case "left":
 		if s.kind == "tree" {
 			s.moveTreeToParent()
+			return nil
 		}
+		return m.updateSelectorInput(msg)
 	case "right":
 		if s.kind == "tree" {
 			s.moveTreeToFirstChild()
+			return nil
 		}
+		return m.updateSelectorInput(msg)
 	case "pgup":
 		s.selected = max(0, s.selected-10)
 	case "pgdown":
@@ -275,16 +279,22 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return tea.Batch(m.editor.Focus(), m.dispatch(s.kind, item.value))
 	default:
-		before := s.input.Value()
-		var cmd tea.Cmd
-		s.input, cmd = s.input.Update(msg)
-		if before != s.input.Value() {
-			s.filter()
-			m.layout()
-		}
-		return cmd
+		return m.updateSelectorInput(msg)
 	}
 	return nil
+}
+
+// updateSelectorInput forwards non-tree selector keys to the search input.
+func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
+	s := m.selector
+	before := s.input.Value()
+	var cmd tea.Cmd
+	s.input, cmd = s.input.Update(msg)
+	if before != s.input.Value() {
+		s.filter()
+		m.layout()
+	}
+	return cmd
 }
 
 // moveTreeSelection skips descendants and moves to the next visible user at

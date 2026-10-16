@@ -93,24 +93,28 @@ func (m *SessionManager) RewindUser(entryID string) (RewindResult, error) {
 }
 
 func treeMessageText(message llm.Message) string {
-	var parts []string
 	switch message := message.(type) {
 	case llm.UserMessage:
-		for _, content := range message.Content {
-			if text, ok := content.(llm.TextContent); ok {
-				parts = append(parts, text.Text)
-			}
-		}
+		return treeContentText(message.Content)
 	case llm.AssistantMessage:
-		for _, content := range message.Content {
-			if text, ok := content.(llm.TextContent); ok {
-				parts = append(parts, text.Text)
-			}
-		}
+		return treeContentText(message.Content)
 	case llm.ToolResultMessage:
-		for _, content := range message.Content {
-			if text, ok := content.(llm.TextContent); ok {
-				parts = append(parts, text.Text)
+		return treeContentText(message.Content)
+	}
+	return ""
+}
+
+func treeContentText(contents []llm.Content) string {
+	var parts []string
+	for _, content := range contents {
+		switch content := content.(type) {
+		case llm.TextContent:
+			parts = append(parts, content.Text)
+		case llm.ImageContent:
+			if content.MIMEType == "" {
+				parts = append(parts, "[image]")
+			} else {
+				parts = append(parts, "[image: "+content.MIMEType+"]")
 			}
 		}
 	}

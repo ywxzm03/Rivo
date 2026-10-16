@@ -243,6 +243,22 @@ func TestCompletionAndSelectors(t *testing.T) {
 	}
 }
 
+func TestNonTreeSelectorForwardsHorizontalCursorKeys(t *testing.T) {
+	m := testModel(80, 24)
+	m.openSelector("model", "")
+	typeText(m, "abc")
+	press(m, tea.KeyLeft)
+	typeText(m, "X")
+	if got, want := m.selector.input.Value(), "abXc"; got != want {
+		t.Fatalf("left cursor movement = %q, want %q", got, want)
+	}
+	press(m, tea.KeyRight)
+	typeText(m, "Y")
+	if got, want := m.selector.input.Value(), "abXcY"; got != want {
+		t.Fatalf("right cursor movement = %q, want %q", got, want)
+	}
+}
+
 func TestTreeSelectorUsesUserNodesAndRestoresEditor(t *testing.T) {
 	m := testModel(100, 30)
 	m.state.Tree = []TreeNode{

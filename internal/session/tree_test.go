@@ -75,3 +75,23 @@ func TestTreeSnapshotAndRewindUser(t *testing.T) {
 		t.Fatalf("root rewind = %+v, leaf = %q, err = %v", rewound, m.LeafID(), err)
 	}
 }
+
+func TestTreeMessageTextPreservesImageOnlyUser(t *testing.T) {
+	m := New("/project", t.TempDir())
+	message := llm.UserMessage{Content: []llm.Content{llm.ImageContent{MIMEType: "image/png"}}}
+	if err := m.AppendMessage(message); err != nil {
+		t.Fatal(err)
+	}
+	entryID := m.entries[0].base().ID
+	want := "[image: image/png]"
+	if got := m.Tree().Entries[0].Text; got != want {
+		t.Fatalf("tree text = %q, want %q", got, want)
+	}
+	rewound, err := m.RewindUser(entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewound.Text != want {
+		t.Fatalf("rewind text = %q, want %q", rewound.Text, want)
+	}
+}
