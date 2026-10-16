@@ -15,7 +15,6 @@ const (
 	userBgHover         = "#464646" // hovered jump pill
 	greenColor          = "#4eba65" // success / inserted
 	redColor            = "#ff6b80" // error / deleted
-	yellowColor         = "#ffc107" // warning
 	blueColor           = "#b1b9f9" // mdLink
 	variableColor       = "#ffffff" // syntaxVariable / syntaxProperty
 	stringColor         = "#e6db74" // syntaxString / syntaxRegexp
