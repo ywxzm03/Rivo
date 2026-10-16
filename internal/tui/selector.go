@@ -15,6 +15,8 @@ import (
 
 type choice struct {
 	value, label, detail, description string
+	parentID                          string
+	depth                             int
 	current                           bool
 }
 
@@ -28,7 +30,11 @@ type selector struct {
 
 func (m *Model) openSelector(kind, query string) tea.Cmd {
 	if m.busy {
-		m.notice("An operation is running. Press Escape to interrupt.")
+		if kind == "tree" {
+			m.notice("Wait for the current operation to finish before opening the tree.")
+		} else {
+			m.notice("An operation is running. Press Escape to interrupt.")
+		}
 		return nil
 	}
 	s := &selector{kind: kind}
@@ -67,6 +73,11 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 		s.title = "Resume session"
 		for _, session := range m.state.Sessions {
 			s.items = append(s.items, choice{value: session.Path, label: session.Summary, description: session.Modified, detail: session.Path})
+		}
+	case "tree":
+		s.title = "Conversation tree"
+		for _, node := range m.state.Tree {
+			s.items = append(s.items, choice{value: node.ID, label: node.Prefix + node.Text, detail: node.Text, parentID: node.ParentID, depth: node.Depth, current: node.Current})
 		}
 	}
 	s.input = textinput.New()
@@ -128,10 +139,7 @@ func (s *selector) filter() {
 
 func (s *selector) height(budget int) int {
 	budget = max(1, budget)
-	base := 12
-	if budget < 20 {
-		base = 6
-	}
+	base := s.baseHeight(budget)
 	rows := len(s.filtered)
 	if rows == 0 {
 		rows = 1
@@ -139,14 +147,21 @@ func (s *selector) height(budget int) int {
 	return min(budget, base+min(10, rows))
 }
 
+func (s *selector) baseHeight(budget int) int {
+	if budget < 20 {
+		return 6
+	}
+	if s.kind == "tree" {
+		return 9
+	}
+	return 12
+}
+
 // view 小窗口省略空白与详情，优先保留标题、搜索框和边框
 func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
-	base := 12
-	if compact {
-		base = 6
-	}
+	base := s.baseHeight(budget)
 	count := 0
 	if height > base {
 		count = min(10, min(height-base, len(s.filtered)))
@@ -204,7 +219,7 @@ func (s *selector) view(width, budget int) string {
 		position = fmt.Sprintf("  (%d/%d)", s.selected+1, len(s.filtered))
 	}
 	lines = append(lines, colored(mutedColor, position))
-	if !compact {
+	if !compact && s.kind != "tree" {
 		detail := ""
 		if len(s.filtered) > 0 {
 			detail = s.filtered[s.selected].detail
@@ -228,9 +243,29 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return m.editor.Focus()
 	case "up", "ctrl+p":
-		s.selected = max(0, s.selected-1)
+		if s.kind == "tree" {
+			s.moveTreeSelection(-1)
+		} else {
+			s.selected = max(0, s.selected-1)
+		}
 	case "down", "ctrl+n":
-		s.selected = min(max(0, len(s.filtered)-1), s.selected+1)
+		if s.kind == "tree" {
+			s.moveTreeSelection(1)
+		} else {
+			s.selected = min(max(0, len(s.filtered)-1), s.selected+1)
+		}
+	case "left":
+		if s.kind == "tree" {
+			s.moveTreeToParent()
+			return nil
+		}
+		return m.updateSelectorInput(msg)
+	case "right":
+		if s.kind == "tree" {
+			s.moveTreeToFirstChild()
+			return nil
+		}
+		return m.updateSelectorInput(msg)
 	case "pgup":
 		s.selected = max(0, s.selected-10)
 	case "pgdown":
@@ -244,14 +279,97 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return tea.Batch(m.editor.Focus(), m.dispatch(s.kind, item.value))
 	default:
-		before := s.input.Value()
-		var cmd tea.Cmd
-		s.input, cmd = s.input.Update(msg)
-		if before != s.input.Value() {
-			s.filter()
-			m.layout()
-		}
-		return cmd
+		return m.updateSelectorInput(msg)
 	}
 	return nil
+}
+
+// updateSelectorInput forwards non-tree selector keys to the search input.
+func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
+	s := m.selector
+	before := s.input.Value()
+	var cmd tea.Cmd
+	s.input, cmd = s.input.Update(msg)
+	if before != s.input.Value() {
+		s.filter()
+		m.layout()
+	}
+	return cmd
+}
+
+// moveTreeSelection skips descendants and moves to the next visible user at
+// the same depth, keeping one arrow press within the current tree level.
+func (s *selector) moveTreeSelection(direction int) {
+	if len(s.filtered) == 0 || direction == 0 {
+		return
+	}
+	current := s.filtered[s.selected]
+	for index := s.selected + direction; index >= 0 && index < len(s.filtered); index += direction {
+		item := s.filtered[index]
+		if item.depth == current.depth && item.parentID == current.parentID {
+			s.selected = index
+			return
+		}
+	}
+	if direction > 0 {
+		// The last sibling continues into its first child when no sibling remains.
+		s.moveTreeToFirstChild()
+		return
+	}
+	if current.depth == 0 {
+		// A root has no parent, so moving upward wraps to its last second-level child.
+		s.moveTreeToLastChild()
+		return
+	}
+	// The first non-root sibling moves back to its visible parent.
+	s.moveTreeToParent()
+}
+
+// moveTreeToParent returns to the visible user parent of the selected node.
+func (s *selector) moveTreeToParent() {
+	if len(s.filtered) == 0 {
+		return
+	}
+	parentID := s.filtered[s.selected].parentID
+	if parentID == "" {
+		s.moveTreeToLastChild()
+		return
+	}
+	for index, item := range s.filtered {
+		if item.value == parentID {
+			s.selected = index
+			return
+		}
+	}
+}
+
+// moveTreeToFirstChild enters the first visible child of the selected node.
+func (s *selector) moveTreeToFirstChild() {
+	if len(s.filtered) == 0 {
+		return
+	}
+	parentID := s.filtered[s.selected].value
+	depth := s.filtered[s.selected].depth
+	for index, item := range s.filtered {
+		if item.parentID == parentID && item.depth == depth+1 {
+			s.selected = index
+			return
+		}
+	}
+}
+
+// moveTreeToLastChild enters the last visible child of the selected node.
+func (s *selector) moveTreeToLastChild() {
+	if len(s.filtered) == 0 {
+		return
+	}
+	parentID := s.filtered[s.selected].value
+	depth := s.filtered[s.selected].depth
+	for index := len(s.filtered) - 1; index >= 0; index-- {
+		item := s.filtered[index]
+		if item.parentID == parentID && item.depth == depth+1 {
+			s.selected = index
+			return
+		}
+	}
 }

@@ -182,6 +182,98 @@ func TestApplyModelSynchronizesCoordinatorModel(t *testing.T) {
 	}
 }
 
+func TestTreeOperationRewindsUserAndRestoresBranchSettings(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	for _, message := range []llm.Message{textMsg("first"), assistantTreeMsg("answer")} {
+		if err := a.session.AppendMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.session.AppendModelChange(deepseek.ProviderID, "deepseek-v4-pro"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.AppendThinkingLevelChange(string(llm.ThinkingLevelHigh)); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []llm.Message{textMsg("second"), assistantTreeMsg("follow-up")} {
+		if err := a.session.AppendMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userID := a.session.Tree().Entries[4].ID
+	beforeData, err := os.ReadFile(a.session.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationTree, Value: userID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := op.Wait()
+	if result.Err != nil || !result.RestoreEditor || result.EditorText != "second" {
+		t.Fatalf("tree result = %+v", result)
+	}
+	if got := a.session.LeafID(); got != a.session.Tree().Entries[3].ID {
+		t.Fatalf("leaf = %q, want parent setting %q", got, a.session.Tree().Entries[3].ID)
+	}
+	if a.CurrentModel().ID != "deepseek-v4-pro" || a.CurrentThinkingLevel() != llm.ThinkingLevelHigh {
+		t.Fatalf("branch settings = %s/%s %q", a.CurrentModel().Provider, a.CurrentModel().ID, a.CurrentThinkingLevel())
+	}
+	if got := len(a.ContextView().Messages()); got != 2 {
+		t.Fatalf("context messages = %d, want first user and assistant parent", got)
+	}
+	afterData, err := os.ReadFile(a.session.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterData) != string(beforeData) {
+		t.Fatalf("tree rewind changed persisted session: before=%d bytes after=%d", len(beforeData), len(afterData))
+	}
+}
+
+func TestTreeOperationRejectsNonUserAndBusySession(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	for _, message := range []llm.Message{textMsg("first"), assistantTreeMsg("answer")} {
+		if err := a.session.AppendMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assistantID := a.session.Tree().Entries[1].ID
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationTree, Value: assistantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := op.Wait(); result.Err == nil || a.session.LeafID() != assistantID {
+		t.Fatalf("assistant tree result = %+v, leaf = %q", result, a.session.LeafID())
+	}
+
+	started, release := make(chan struct{}), make(chan struct{})
+	a = operationApp(t, func(ctx context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		events := make(chan llm.AssistantMessageEvent)
+		close(started)
+		<-release
+		close(events)
+		return events, nil
+	}, nil)
+	// The stream stub above only exists to hold the operation; Start itself is
+	// the boundary under test, so the concurrent tree request must be rejected.
+	run, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "busy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if _, err := a.Start(context.Background(), OperationRequest{Kind: OperationTree, Value: "missing"}); err == nil {
+		t.Fatal("tree operation accepted while run was active")
+	}
+	close(release)
+	run.Wait()
+}
+
+func assistantTreeMsg(text string) llm.Message {
+	return llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: text}}, Provider: deepseek.ProviderID, Model: deepseek.DefaultModel}
+}
+
 type trackedTool struct {
 	started chan struct{}
 	release chan struct{}

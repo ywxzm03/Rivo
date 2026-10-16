@@ -219,6 +219,9 @@ func (a *App) Compact(ctx context.Context, instructions string) error {
 // ContextView 返回带来源的已提交会话投影
 func (a *App) ContextView() compaction.ContextView { return a.session.BuildContext() }
 
+// Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器。
+func (a *App) Tree() session.TreeSnapshot { return a.session.Tree() }
+
 // SessionID 返回显示身份使用的会话命名空间
 func (a *App) SessionID() string { return a.session.ID() }
 

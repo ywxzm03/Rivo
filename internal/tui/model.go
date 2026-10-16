@@ -28,6 +28,14 @@ type SessionOption struct {
 	Path, Summary, Modified string
 }
 
+// TreeNode 是 TUI 的 user-only 树投影；连接线由运行适配器预先计算。
+type TreeNode struct {
+	ID, Text, Prefix string
+	ParentID         string
+	Depth            int
+	Current          bool
+}
+
 // SkillOption 是命令补全使用的技能元数据，不向 UI 暴露文件读取职责
 type SkillOption struct {
 	Name, Description string
@@ -101,11 +109,12 @@ type Snapshot struct {
 	CurrentModel ModelOption
 	Models       []ModelOption
 	Sessions     []SessionOption
+	Tree         []TreeNode
 	Messages     []Message
 	Skills       []SkillOption
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/compact/rename/new/reload
+// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -141,6 +150,8 @@ type OperationDoneMsg struct {
 	Snapshot       *Snapshot
 	Err            error
 	Notice         string
+	EditorValue    string
+	RestoreEditor  bool
 	ResetSessionUI bool
 }
 type flushMsg struct{}
@@ -302,6 +313,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, change := range msg.Changes {
 			m.upsertMessage(change)
 		}
+		if msg.RestoreEditor {
+			m.editor.SetValue(msg.EditorValue)
+			m.editor.CursorEnd()
+			m.completion, m.completionHidden = 0, true
+		}
 		if msg.Err != nil {
 			m.notice("Error: " + msg.Err.Error())
 		} else if msg.Notice != "" {
@@ -376,6 +392,7 @@ func (m *Model) applySnapshot(s Snapshot) {
 		}
 	}
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
+	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
@@ -408,7 +425,11 @@ func (m *Model) currentModel() ModelOption {
 // dispatch 先锁定 UI 操作状态，再让适配器异步执行
 func (m *Model) dispatch(kind, value string) tea.Cmd {
 	if m.busy {
-		m.notice("An operation is running. Press Escape to interrupt.")
+		if kind == "tree" {
+			m.notice("Wait for the current operation to finish before changing the tree.")
+		} else {
+			m.notice("An operation is running. Press Escape to interrupt.")
+		}
 		return nil
 	}
 	if m.handlers.Request == nil {
@@ -486,6 +507,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state = s
 	m.state.Messages = messages
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
+	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Skills = append([]SkillOption(nil), s.Skills...)
 	m.completion = 0

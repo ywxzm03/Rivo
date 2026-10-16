@@ -101,7 +101,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		} else {
 			r.pendingSkillInput = nil
 		}
-		reset := result.Next != nil || r.resetNeeded || result.Replayed
+		reset := result.Next != nil || r.resetNeeded || result.Replayed || req.Kind == "tree"
 		if result.Next != nil {
 			r.app = result.Next
 			r.namespace = result.Next.SessionID()
@@ -176,7 +176,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 				notice = "Reloaded context files and skills"
 			}
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, ResetSessionUI: req.Kind == "new" && result.Next != nil}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil}
 	}
 }
 
@@ -465,7 +465,7 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Messages: messages, SessionName: r.app.SessionName(), Skills: skills}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影

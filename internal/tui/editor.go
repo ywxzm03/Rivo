@@ -14,6 +14,7 @@ const timeDoublePress = 500 * time.Millisecond
 type slashCommand struct{ name, description string }
 
 var commands = []slashCommand{
+	{"tree", "Select a user message to rewind the conversation"},
 	{"model", "<provider/model> — Select model (opens selector UI)"},
 	{"thinking", "<level> — Set thinking level"},
 	{"resume", "Resume a previous session"},
@@ -246,7 +247,11 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 	if m.busy && input != "/exit" {
-		m.notice("An operation is running. Press Escape to interrupt.")
+		if input == "/tree" || strings.HasPrefix(input, "/tree ") {
+			m.notice("Wait for the current operation to finish before opening the tree.")
+		} else {
+			m.notice("An operation is running. Press Escape to interrupt.")
+		}
 		return nil
 	}
 	m.history = append(m.history, input)
@@ -284,6 +289,8 @@ func (m *Model) submit() tea.Cmd {
 			}
 		}
 		return m.openSelector("model", arg)
+	case "/tree":
+		return m.openSelector("tree", arg)
 	case "/thinking":
 		if arg == "" {
 			return m.openSelector("thinking", "")
