@@ -15,7 +15,7 @@ const timeDoublePress = 500 * time.Millisecond
 type slashCommand struct{ name, description string }
 
 var commands = []slashCommand{
-	{"tree", "Select a user message to rewind the conversation"},
+	{"tree", "Select a user message to restore conversation and/or code"},
 	{"model", "<provider/model> — Select model (opens selector UI)"},
 	{"thinking", "<level> — Set thinking level"},
 	{"resume", "Resume a previous session"},

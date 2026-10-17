@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -28,6 +30,10 @@ type SessionManager struct {
 	repairOffset *int64
 	// needsNewline 表示会话文件末尾缺少换行（加载残行文件后为 true），追加前先补写
 	needsNewline bool
+	// fileHistoryRecords 保留 JSONL 中不参与树结构的文件历史记录
+	fileHistoryRecords []filehistory.Record
+	fileHistory        *filehistory.Store
+	persistMu          sync.Mutex
 }
 
 // DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/agent/sessions/--<编码后的cwd>--/
@@ -81,17 +87,18 @@ func Open(path, cwd string) (*SessionManager, error) {
 		_ = os.Remove(path)
 		return m, nil
 	}
-	header, entries, err := parseFile(data)
+	header, entries, records, err := parseFileWithRecords(data)
 	if err != nil {
 		return nil, err
 	}
 	m := &SessionManager{
-		header:       *header,
-		byID:         make(map[string]Entry, len(entries)),
-		dir:          filepath.Dir(path),
-		sessionFile:  path,
-		flushed:      true,
-		needsNewline: !bytes.HasSuffix(data, []byte("\n")),
+		header:             *header,
+		byID:               make(map[string]Entry, len(entries)),
+		dir:                filepath.Dir(path),
+		sessionFile:        path,
+		flushed:            true,
+		needsNewline:       !bytes.HasSuffix(data, []byte("\n")),
+		fileHistoryRecords: records,
 	}
 	// 1.按文件序建索引：重复 ID 后者覆盖前者，leaf 取最后一个 entry
 	for _, e := range entries {
@@ -232,6 +239,40 @@ func (m *SessionManager) Delete() error {
 // ID 返回会话命名空间
 func (m *SessionManager) ID() string { return m.header.ID }
 
+// AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来。
+func (m *SessionManager) AttachFileHistory(root string) {
+	// 会话树本身保留历史分支；当前进程中的 context rewind 再显式裁剪运行态追踪。
+	m.fileHistory = filehistory.New(root, m.ID(), m.fileHistoryRecords, nil, m.appendFileHistoryRecord)
+}
+
+// FileHistory 返回当前 session 的文件历史；未装配时返回 nil。
+func (m *SessionManager) FileHistory() *filehistory.Store { return m.fileHistory }
+
+// MakeFileHistorySnapshot 在 user entry 成功持久化后建立 turn 起点快照。
+func (m *SessionManager) MakeFileHistorySnapshot(messageID string) error {
+	if m.fileHistory == nil {
+		return nil
+	}
+	return m.fileHistory.MakeSnapshot(messageID)
+}
+
+// PruneFileHistoryToActiveBranch 丢弃当前上下文回滚后不再活跃的运行态追踪。
+func (m *SessionManager) PruneFileHistoryToActiveBranch() {
+	if m.fileHistory != nil {
+		m.fileHistory.PruneActiveBranch(m.activeUserIDs())
+	}
+}
+
+func (m *SessionManager) activeUserIDs() map[string]bool {
+	ids := make(map[string]bool)
+	for _, entry := range m.activePath() {
+		if message, ok := entry.(*MessageEntry); ok && messageRole(message.Message) == "user" {
+			ids[entry.base().ID] = true
+		}
+	}
+	return ids
+}
+
 // HasPending 表示存在尚未成功落盘的候选记录
 func (m *SessionManager) HasPending() bool { return len(m.pending) > 0 }
 
@@ -322,6 +363,8 @@ func (m *SessionManager) RetryPending() error {
 
 // persist 先编码整个批次，首次发布直接创建正式文件，后续追加在失败时回退长度
 func (m *SessionManager) persist(entries []Entry) error {
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
 	if !m.flushed {
 		all := append(append([]Entry(nil), m.entries...), entries...)
 		var data bytes.Buffer
@@ -407,6 +450,62 @@ func (m *SessionManager) persist(entries []Entry) error {
 		return errors.Join(err, rollbackErr)
 	}
 	m.needsNewline = false
+	return nil
+}
+
+// appendFileHistoryRecord 追加 metadata，不改变 entries、leaf 或树父链。
+func (m *SessionManager) appendFileHistoryRecord(record filehistory.Record) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
+	if !m.flushed {
+		return errors.New("session: file history cannot be written before session publish")
+	}
+	if m.repairOffset != nil {
+		if err := os.Truncate(m.sessionFile, *m.repairOffset); err != nil {
+			return &CommitError{Err: err}
+		}
+		m.repairOffset = nil
+	}
+	if m.needsNewline {
+		data = append([]byte{'\n'}, data...)
+	}
+	f, err := os.OpenFile(m.sessionFile, os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	n, writeErr := f.Write(data)
+	if writeErr == nil && n != len(data) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr != nil {
+		rollbackErr := f.Truncate(info.Size())
+		if rollbackErr != nil {
+			offset := info.Size()
+			m.repairOffset = &offset
+		}
+		_ = f.Close()
+		return errors.Join(writeErr, rollbackErr)
+	}
+	if err := f.Close(); err != nil {
+		rollbackErr := os.Truncate(m.sessionFile, info.Size())
+		if rollbackErr != nil {
+			offset := info.Size()
+			m.repairOffset = &offset
+		}
+		return errors.Join(err, rollbackErr)
+	}
+	m.needsNewline = false
+	m.fileHistoryRecords = append(m.fileHistoryRecords, record)
 	return nil
 }
 

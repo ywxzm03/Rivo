@@ -20,7 +20,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Edit struct{}
+type Edit struct{ History FileHistoryTracker }
 
 type EditDetails struct {
 	Diff             string
@@ -92,15 +92,16 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 	// 2.在同文件队列中读取并校验全部替换，确保失败时尚未写盘
 	return withFileMutationQueue(ctx, absPath, func() (llm.ToolResult, error) {
-		return executeEdit(ctx, path, absPath, edits)
+		return e.executeEdit(ctx, path, absPath, edits)
 	})
 }
 
 // executeEdit 读取目标文件、应用替换并返回变更详情
-func executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (llm.ToolResult, error) {
+func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (llm.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
+	trackFileEdit(ctx, e.History, absPath)
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)

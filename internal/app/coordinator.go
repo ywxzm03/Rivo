@@ -128,7 +128,18 @@ func (c *Coordinator) preparePrompt() error {
 
 // CommitMessages 是核心推进上下文前的持久化边界
 func (c *Coordinator) CommitMessages(messages []llm.Message) ([]string, error) {
-	return c.m.AppendMessages(messages)
+	ids, err := c.m.AppendMessages(messages)
+	if err != nil {
+		return ids, err
+	}
+	for index, message := range messages {
+		if _, ok := message.(llm.UserMessage); !ok || index >= len(ids) || ids[index] == "" {
+			continue
+		}
+		// 发送给模型前建立 turn 起点；文件历史失败只记录降级状态，不阻止模型运行
+		_ = c.m.MakeFileHistorySnapshot(ids[index])
+	}
+	return ids, nil
 }
 
 // Handle 只转发运行通知；带 SourceID 的 message_end 已经成功落盘

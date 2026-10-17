@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -20,8 +21,15 @@ type entryLine struct {
 // parseFile 解析会话文件内容，返回 header 与按文件序的 entry 列表；
 // 空行与解码失败的行跳过，首个有效行必须是合法的当前版本 header
 func parseFile(data []byte) (*Header, []Entry, error) {
+	header, entries, _, err := parseFileWithRecords(data)
+	return header, entries, err
+}
+
+// parseFileWithRecords 分离树 entry 与不参与树结构的 metadata record。
+func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, error) {
 	var header *Header
 	var entries []Entry
+	var records []filehistory.Record
 	for _, rawLine := range bytes.Split(data, []byte("\n")) {
 		line := bytes.TrimSpace(rawLine)
 		if len(line) == 0 {
@@ -34,12 +42,19 @@ func parseFile(data []byte) (*Header, []Entry, error) {
 		if header == nil {
 			h, err := decodeHeader(line, probe.Type)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			header = h
 			continue
 		}
 		if probe.Type == TypeSession {
+			continue
+		}
+		if probe.Type == TypeFileHistorySnapshot || probe.Type == TypeFileHistoryDelta {
+			record, err := filehistory.DecodeRecord(probe.Type, line)
+			if err == nil {
+				records = append(records, record)
+			}
 			continue
 		}
 		entry, err := decodeEntry(probe.Type, string(line))
@@ -57,9 +72,9 @@ func parseFile(data []byte) (*Header, []Entry, error) {
 		entries = append(entries, entry)
 	}
 	if header == nil {
-		return nil, nil, errors.New("session: missing session header")
+		return nil, nil, nil, errors.New("session: missing session header")
 	}
-	return header, entries, nil
+	return header, entries, records, nil
 }
 
 // decodeHeader 校验并解码 header：类型必须是 session、版本必须是当前版本、id 非空

@@ -13,6 +13,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 )
 
 // ModelOption 是可供选择的模型及核心已解析的思考等级，不含凭据
@@ -120,6 +122,7 @@ type Request struct {
 	Kind, Value string
 	AfterID     string
 	ID          uint64
+	RestoreMode filehistory.RestoreMode
 }
 
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update

@@ -142,8 +142,13 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	if err != nil {
 		return nil, err
 	}
+	agentDir, err := config.Dir()
+	if err != nil {
+		return nil, err
+	}
+	sm.AttachFileHistory(agentDir)
 
-	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{}, &tool.Edit{}}
+	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}}
 	if runtime.GOOS == "windows" {
 		tools = append(tools, &tool.PowerShell{})
 	}
@@ -159,10 +164,6 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
-	}
-	agentDir, err := config.Dir()
-	if err != nil {
-		return nil, err
 	}
 	loader := prompt.NewLoader(cwd, agentDir)
 	loader.Reload()

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
@@ -99,7 +100,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		r.turnRetrying = false
 	}
 	r.mu.Unlock()
-	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value})
+	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value, RestoreMode: filehistory.RestoreMode(req.RestoreMode)})
 	if err != nil {
 		return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
 	}
@@ -118,7 +119,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.mu.Unlock()
 			return tui.OperationDoneMsg{ID: req.ID, Quit: true}
 		}
-		reset := result.Next != nil || r.resetNeeded || result.Replayed || req.Kind == "tree"
+		reset := result.Next != nil || r.resetNeeded || result.Replayed || (req.Kind == "tree" && result.ContextRewound)
 		if req.Kind == "clear" && result.Err == nil {
 			reset = true
 		}
@@ -197,6 +198,10 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 				notice = "New session started"
 			case "reload":
 				notice = "Reloaded context files and skills"
+			case "tree":
+				if result.FileRestore != nil {
+					notice = fmt.Sprintf("Restored code: %d changed, %d skipped", len(result.FileRestore.FilesChanged), len(result.FileRestore.FilesSkipped))
+				}
 			}
 		}
 		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
@@ -26,8 +27,9 @@ const (
 )
 
 type OperationRequest struct {
-	Kind  OperationKind
-	Value string
+	Kind        OperationKind
+	Value       string
+	RestoreMode filehistory.RestoreMode
 }
 
 type OperationResult struct {
@@ -37,9 +39,11 @@ type OperationResult struct {
 	Exit     bool
 	// EditorText is set after a successful tree rewind so the TUI can restore
 	// the selected user message without persisting a branch marker.
-	EditorText    string
-	RestoreEditor bool
-	Err           error
+	EditorText     string
+	RestoreEditor  bool
+	ContextRewound bool
+	FileRestore    *filehistory.RestoreResult
+	Err            error
 }
 
 // Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
@@ -214,7 +218,9 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	case OperationReload:
 		a.Reload()
 	case OperationTree:
-		result.EditorText, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
+		treeResult, err := a.rewindTreeWithMode(request.Value, request.RestoreMode)
+		result = treeResult
+		result.Err = err
 	case OperationClear:
 		result.Err = a.clearSession()
 	case OperationDelete:
@@ -285,6 +291,36 @@ func (a *App) rewindTree(entryID string) (string, bool, error) {
 		return "", false, err
 	}
 	return rewound.Text, true, nil
+}
+
+// rewindTreeWithMode 把代码恢复放在上下文回滚之前，保证组合操作失败时不移动上下文。
+func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (OperationResult, error) {
+	if mode == "" {
+		mode = filehistory.RestoreContext
+	}
+	result := OperationResult{}
+	if mode == filehistory.RestoreCode || mode == filehistory.RestoreCodeAndContext {
+		if a.session.FileHistory() == nil {
+			return result, errors.New("app: file history is unavailable")
+		}
+		restored, err := a.session.FileHistory().Restore(entryID)
+		result.FileRestore = &restored
+		if err != nil {
+			return result, err
+		}
+	}
+	if mode == filehistory.RestoreCode {
+		return result, nil
+	}
+	text, restoreEditor, err := a.rewindTree(entryID)
+	if err != nil {
+		return result, err
+	}
+	a.session.PruneFileHistoryToActiveBranch()
+	result.EditorText = text
+	result.RestoreEditor = restoreEditor
+	result.ContextRewound = true
+	return result, nil
 }
 
 func (a *App) restoreLeaf(leafID string) error {

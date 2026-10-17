@@ -11,6 +11,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sahilm/fuzzy"
+
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 )
 
 type choice struct {
@@ -22,10 +24,11 @@ type choice struct {
 
 // selector 在输入坞内展示，不创建覆盖消息区的全屏 overlay
 type selector struct {
-	kind, title     string
-	input           textinput.Model
-	items, filtered []choice
-	selected        int
+	kind, title       string
+	treeRestoreTarget string
+	input             textinput.Model
+	items, filtered   []choice
+	selected          int
 }
 
 func (m *Model) openSelector(kind, query string) tea.Cmd {
@@ -94,6 +97,24 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 			}
 		}
 	}
+	m.selector = s
+	m.editor.Blur()
+	m.layout()
+	return s.input.Focus()
+}
+
+func (m *Model) openTreeRestoreSelector(target string) tea.Cmd {
+	s := &selector{kind: "tree_restore", title: "Restore conversation tree", treeRestoreTarget: target}
+	s.items = []choice{
+		{value: string(filehistory.RestoreContext), label: "Restore conversation", detail: "Move the conversation tree only"},
+		{value: string(filehistory.RestoreCode), label: "Restore code", detail: "Restore tracked Write/Edit changes only"},
+		{value: string(filehistory.RestoreCodeAndContext), label: "Restore code and conversation", detail: "Restore tracked code, then move the conversation tree"},
+	}
+	s.input = textinput.New()
+	s.input.Prompt = "> "
+	s.input.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
+	s.input.PromptStyle = s.input.TextStyle
+	s.filter()
 	m.selector = s
 	m.editor.Blur()
 	m.layout()
@@ -275,13 +296,33 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		item := s.filtered[s.selected]
+		if s.kind == "tree" {
+			return m.openTreeRestoreSelector(item.value)
+		}
 		m.selector = nil
 		m.layout()
+		if s.kind == "tree_restore" {
+			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, filehistory.RestoreMode(item.value)))
+		}
 		return tea.Batch(m.editor.Focus(), m.dispatch(s.kind, item.value))
 	default:
 		return m.updateSelectorInput(msg)
 	}
 	return nil
+}
+
+func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode) tea.Cmd {
+	if m.busy {
+		m.notice("Wait for the current operation to finish before restoring the tree.")
+		return nil
+	}
+	if m.handlers.Request == nil {
+		return nil
+	}
+	m.busy, m.status = true, "Working"
+	m.canceling, m.compacting = false, false
+	m.operationID++
+	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
 }
 
 // updateSelectorInput forwards non-tree selector keys to the search input.
