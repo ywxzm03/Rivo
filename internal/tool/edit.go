@@ -101,7 +101,6 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
-	trackFileEdit(ctx, e.History, absPath)
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
@@ -119,7 +118,9 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
-	// 3.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
+	// 3.记录已通过替换校验的文件，失败的 edit 不应污染当前 turn 的快照
+	trackFileEdit(ctx, e.History, absPath)
+	// 4.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {

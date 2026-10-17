@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -66,6 +67,128 @@ func TestFileHistoryMetadataDoesNotAdvanceTreeLeaf(t *testing.T) {
 	loaded.AttachFileHistory(t.TempDir())
 	if len(loaded.FileHistory().Snapshots()) != 1 {
 		t.Fatalf("loaded snapshots = %d, want 1", len(loaded.FileHistory().Snapshots()))
+	}
+}
+
+func TestFileHistoryPruneKeepsRewindTarget(t *testing.T) {
+	m := New("/project", t.TempDir())
+	m.AttachFileHistory(t.TempDir())
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	first := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}}); err != nil {
+		t.Fatal(err)
+	}
+	second := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RewindUser(second); err != nil {
+		t.Fatal(err)
+	}
+	m.PruneFileHistoryToActiveBranch(second)
+	var found bool
+	for _, snapshot := range m.FileHistory().Snapshots() {
+		found = found || snapshot.MessageID == second
+	}
+	if !found {
+		t.Fatalf("snapshots = %+v, want rewind target %q retained", m.FileHistory().Snapshots(), second)
+	}
+}
+
+func TestFileHistoryBranchPrunesInactiveSnapshots(t *testing.T) {
+	m := New("/project", t.TempDir())
+	m.AttachFileHistory(t.TempDir())
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	first := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}}); err != nil {
+		t.Fatal(err)
+	}
+	second := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Branch(first); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := m.FileHistory().Snapshots()
+	if len(snapshots) != 1 || snapshots[0].MessageID != first {
+		t.Fatalf("snapshots after branch = %+v, want only %q", snapshots, first)
+	}
+}
+
+func TestAttachFileHistoryPrunesInactivePersistedBranch(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+	m := New("/project", dir)
+	m.AttachFileHistory(root)
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	first := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}}); err != nil {
+		t.Fatal(err)
+	}
+	second := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Branch(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "third"}}}); err != nil {
+		t.Fatal(err)
+	}
+	third := m.LeafID()
+	if err := m.MakeFileHistorySnapshot(third); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Open(m.Path(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.AttachFileHistory(root)
+	var ids []string
+	for _, snapshot := range loaded.FileHistory().Snapshots() {
+		ids = append(ids, snapshot.MessageID)
+	}
+	if contains(ids, second) {
+		t.Fatalf("loaded snapshots = %v, want inactive branch %q pruned", ids, second)
+	}
+	if !contains(ids, first) || !contains(ids, third) {
+		t.Fatalf("loaded snapshots = %v, want active branch %q and %q", ids, first, third)
+	}
+}
+
+func TestOpenRejectsMalformedFileHistoryRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	header, err := json.Marshal(Header{Type: TypeSession, Version: CurrentVersion, ID: "s1", Timestamp: "t", Cwd: "/project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append(header, '\n')
+	data = append(data, []byte(`{"type":"file-history-snapshot","snapshot":{}}`+"\n")...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, "/project"); err == nil || !strings.Contains(err.Error(), "invalid file history record") {
+		t.Fatalf("Open() error = %v, want invalid file history record", err)
 	}
 }
 

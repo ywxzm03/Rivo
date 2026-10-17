@@ -136,3 +136,64 @@ func TestTreeCodeAndContextRestoreDoesNotMoveContextOnFileFailure(t *testing.T) 
 		t.Fatalf("context moved after code failure: result=%+v leaf=%q", result, a.session.LeafID())
 	}
 }
+
+func TestTreeRestoreRejectsUnknownMode(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "target"}}}); err != nil {
+		t.Fatal(err)
+	}
+	target := a.session.LeafID()
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationTree, Value: target, RestoreMode: filehistory.RestoreMode("unknown")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := op.Wait()
+	if result.Err == nil || a.session.LeafID() != target {
+		t.Fatalf("unknown mode result = %+v, leaf = %q", result, a.session.LeafID())
+	}
+}
+
+func TestTreeCombinedRestoreReportsCodeWhenContextRestoreFails(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.AppendModelChange("deepseek", "missing-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "target"}}}); err != nil {
+		t.Fatal(err)
+	}
+	target := a.session.LeafID()
+	file := filepath.Join(t.TempDir(), "tracked.txt")
+	if err := os.WriteFile(file, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.MakeFileHistorySnapshot(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.session.FileHistory().TrackEdit(context.Background(), target, file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationTree, Value: target, RestoreMode: filehistory.RestoreCodeAndContext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := op.Wait()
+	if result.Err == nil || result.ContextRewound || result.FileRestore == nil {
+		t.Fatalf("combined restore result = %+v, want code success and context failure", result)
+	}
+	if a.session.LeafID() != target {
+		t.Fatalf("leaf = %q, want original target %q", a.session.LeafID(), target)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "before" || len(result.FileRestore.FilesChanged) != 1 {
+		t.Fatalf("file restore = %+v, content = %q", result.FileRestore, content)
+	}
+}

@@ -152,6 +152,7 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.currentUserID = ""
 	firstMessageIndex := len(a.AgentContext.Messages)
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
 		return nil, err
@@ -286,6 +287,9 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				sourceID = ids[0]
 				a.currentUserID = sourceID
 				ctx = llm.WithCurrentUserMessageID(ctx, sourceID)
+			} else {
+				a.currentUserID = ""
+				ctx = llm.WithCurrentUserMessageID(ctx, "")
 			}
 			if err := a.emit(llm.MessageEndEvent{Message: userMessage, SourceID: sourceID}); err != nil {
 				return nil, err

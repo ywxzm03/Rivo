@@ -212,7 +212,7 @@ func (m *SessionManager) AppendContextEdit(targetID string, replacement *Replace
 }
 
 // Branch 只移动内存 leaf 到指定 entry，下一次追加形成新分支，不改写文件
-func (m *SessionManager) Branch(entryID string) error {
+func (m *SessionManager) Branch(entryID string, keepIDs ...string) error {
 	if m.HasPending() {
 		return &CommitError{Err: errors.New("session: retry pending submission before branching")}
 	}
@@ -220,6 +220,7 @@ func (m *SessionManager) Branch(entryID string) error {
 		return fmt.Errorf("session: entry %s not found", entryID)
 	}
 	m.leafID = entryID
+	m.PruneFileHistoryToActiveBranch(keepIDs...)
 	return nil
 }
 
@@ -248,8 +249,8 @@ func (m *SessionManager) ID() string { return m.header.ID }
 
 // AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来。
 func (m *SessionManager) AttachFileHistory(root string) {
-	// 会话树本身保留历史分支；当前进程中的 context rewind 再显式裁剪运行态追踪。
-	m.fileHistory = filehistory.New(root, m.ID(), m.fileHistoryRecords, nil, m.appendFileHistoryRecord)
+	// 恢复会话时只让当前活跃路径参与新快照，避免旧分支的文件集合污染当前 turn。
+	m.fileHistory = filehistory.New(root, m.ID(), m.fileHistoryRecords, m.activeUserIDs(), m.appendFileHistoryRecord)
 }
 
 // FileHistory 返回当前 session 的文件历史；未装配时返回 nil。
@@ -264,17 +265,22 @@ func (m *SessionManager) MakeFileHistorySnapshot(messageID string) error {
 }
 
 // PruneFileHistoryToActiveBranch 丢弃当前上下文回滚后不再活跃的运行态追踪。
-func (m *SessionManager) PruneFileHistoryToActiveBranch() {
+func (m *SessionManager) PruneFileHistoryToActiveBranch(keepIDs ...string) {
 	if m.fileHistory != nil {
-		m.fileHistory.PruneActiveBranch(m.activeUserIDs())
+		m.fileHistory.PruneActiveBranch(m.activeUserIDs(keepIDs...))
 	}
 }
 
-func (m *SessionManager) activeUserIDs() map[string]bool {
+func (m *SessionManager) activeUserIDs(keepIDs ...string) map[string]bool {
 	ids := make(map[string]bool)
 	for _, entry := range m.activePath() {
 		if message, ok := entry.(*MessageEntry); ok && messageRole(message.Message) == "user" {
 			ids[entry.base().ID] = true
+		}
+	}
+	for _, id := range keepIDs {
+		if id != "" {
+			ids[id] = true
 		}
 	}
 	return ids

@@ -190,22 +190,38 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			result.Err = nil
 		}
 		var notice string
-		if result.Err == nil {
-			switch req.Kind {
-			case "rename":
+		switch req.Kind {
+		case "rename":
+			if result.Err == nil {
 				notice = "Session renamed: " + snapshot.SessionName
-			case "new":
+			}
+		case "new":
+			if result.Err == nil {
 				notice = "New session started"
-			case "reload":
+			}
+		case "reload":
+			if result.Err == nil {
 				notice = "Reloaded context files and skills"
-			case "tree":
-				if result.FileRestore != nil {
-					notice = fmt.Sprintf("Restored code: %d changed, %d skipped", len(result.FileRestore.FilesChanged), len(result.FileRestore.FilesSkipped))
+			}
+		case "tree":
+			if result.FileRestore != nil {
+				summary := fileRestoreSummary(result.FileRestore)
+				if result.Err != nil {
+					result.Err = fmt.Errorf("%w (%s)", result.Err, summary)
+				} else {
+					notice = "Restored code: " + strings.TrimPrefix(summary, "code restore: ")
 				}
 			}
 		}
 		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}
 	}
+}
+
+func fileRestoreSummary(result *filehistory.RestoreResult) string {
+	if result == nil {
+		return ""
+	}
+	return fmt.Sprintf("code restore: %d changed, %d skipped, %d failed", len(result.FilesChanged), len(result.FilesSkipped), len(result.FilesFailed))
 }
 
 func (r *Runtime) cancelCurrent() {

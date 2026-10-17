@@ -30,7 +30,7 @@ func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, 
 	var header *Header
 	var entries []Entry
 	var records []filehistory.Record
-	for _, rawLine := range bytes.Split(data, []byte("\n")) {
+	for lineNumber, rawLine := range bytes.Split(data, []byte("\n")) {
 		line := bytes.TrimSpace(rawLine)
 		if len(line) == 0 {
 			continue
@@ -52,9 +52,10 @@ func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, 
 		}
 		if probe.Type == TypeFileHistorySnapshot || probe.Type == TypeFileHistoryDelta {
 			record, err := filehistory.DecodeRecord(probe.Type, line)
-			if err == nil {
-				records = append(records, record)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("session: invalid file history record on line %d: %w", lineNumber+1, err)
 			}
+			records = append(records, record)
 			continue
 		}
 		entry, err := decodeEntry(probe.Type, string(line))

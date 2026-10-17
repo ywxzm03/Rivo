@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/filehistory"
@@ -285,7 +286,7 @@ func (a *App) rewindTree(entryID string) (string, bool, error) {
 		return "", false, err
 	}
 	if err := a.restoreBranchSettings(); err != nil {
-		if rollbackErr := a.restoreLeaf(previousLeaf); rollbackErr != nil {
+		if rollbackErr := a.restoreLeaf(previousLeaf, entryID); rollbackErr != nil {
 			return "", false, errors.Join(err, rollbackErr)
 		}
 		return "", false, err
@@ -297,6 +298,9 @@ func (a *App) rewindTree(entryID string) (string, bool, error) {
 func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (OperationResult, error) {
 	if mode == "" {
 		mode = filehistory.RestoreContext
+	}
+	if mode != filehistory.RestoreContext && mode != filehistory.RestoreCode && mode != filehistory.RestoreCodeAndContext {
+		return OperationResult{}, fmt.Errorf("app: unknown tree restore mode %q", mode)
 	}
 	result := OperationResult{}
 	if mode == filehistory.RestoreCode || mode == filehistory.RestoreCodeAndContext {
@@ -316,18 +320,18 @@ func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (
 	if err != nil {
 		return result, err
 	}
-	a.session.PruneFileHistoryToActiveBranch()
+	a.session.PruneFileHistoryToActiveBranch(entryID)
 	result.EditorText = text
 	result.RestoreEditor = restoreEditor
 	result.ContextRewound = true
 	return result, nil
 }
 
-func (a *App) restoreLeaf(leafID string) error {
+func (a *App) restoreLeaf(leafID string, keepIDs ...string) error {
 	if leafID == "" {
-		return a.session.ResetLeaf()
+		return a.session.ResetLeaf(keepIDs...)
 	}
-	return a.session.Branch(leafID)
+	return a.session.Branch(leafID, keepIDs...)
 }
 
 // restoreBranchSettings applies settings found on the newly active path and

@@ -88,6 +88,9 @@ func DecodeRecord(typ string, data []byte) (Record, error) {
 		if record.Snapshot.MessageID == "" {
 			record.Snapshot.MessageID = record.MessageID
 		}
+		if record.Snapshot.MessageID == "" {
+			return nil, errors.New("filehistory: snapshot record missing message id")
+		}
 		return record, nil
 	case TypeDelta:
 		var record DeltaRecord
@@ -96,6 +99,12 @@ func DecodeRecord(typ string, data []byte) (Record, error) {
 		}
 		if record.Type == "" {
 			record.Type = TypeDelta
+		}
+		if record.SnapshotMessageID == "" {
+			return nil, errors.New("filehistory: delta record missing snapshot message id")
+		}
+		if record.TrackingPath == "" {
+			return nil, errors.New("filehistory: delta record missing tracking path")
 		}
 		return record, nil
 	default:
@@ -156,26 +165,32 @@ func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
 	if _, tracked := latest.TrackedFileBackups[path]; tracked {
 		return nil
 	}
-	backup, err := s.createBackup(path, 1)
+	backup, created, err := s.createBackup(path, 1)
 	if err != nil {
 		return err
+	}
+	record := DeltaRecord{
+		Type:              TypeDelta,
+		MessageID:         messageID,
+		SnapshotMessageID: latest.MessageID,
+		TrackingPath:      path,
+		Backup:            backup,
+		Timestamp:         time.Now().UTC(),
+	}
+	if s.appendRecord != nil {
+		if err := s.appendRecord(record); err != nil {
+			if created {
+				s.removeBackup(backup)
+			}
+			return err
+		}
 	}
 	if latest.TrackedFileBackups == nil {
 		latest.TrackedFileBackups = make(map[string]Backup)
 	}
 	latest.TrackedFileBackups[path] = backup
 	s.trackedFiles[path] = struct{}{}
-	if s.appendRecord != nil {
-		err = s.appendRecord(DeltaRecord{
-			Type:              TypeDelta,
-			MessageID:         messageID,
-			SnapshotMessageID: latest.MessageID,
-			TrackingPath:      path,
-			Backup:            backup,
-			Timestamp:         time.Now().UTC(),
-		})
-	}
-	return err
+	return nil
 }
 
 // MakeSnapshot 在 user turn 开始前记录所有已追踪文件的状态。
@@ -185,6 +200,7 @@ func (s *Store) MakeSnapshot(messageID string) error {
 	if messageID == "" {
 		return errors.New("filehistory: empty snapshot message id")
 	}
+	previousSnapshots := cloneSnapshots(s.snapshots)
 	filtered := s.snapshots[:0]
 	for _, snapshot := range s.snapshots {
 		if snapshot.MessageID != messageID || !snapshot.PreCheckpoint {
@@ -197,6 +213,7 @@ func (s *Store) MakeSnapshot(messageID string) error {
 		previous = s.snapshots[len(s.snapshots)-1]
 	}
 	backups := make(map[string]Backup, len(s.trackedFiles))
+	createdBackups := make([]Backup, 0)
 	var errs []error
 	paths := make([]string, 0, len(s.trackedFiles))
 	for path := range s.trackedFiles {
@@ -231,13 +248,16 @@ func (s *Store) MakeSnapshot(messageID string) error {
 				continue
 			}
 		}
-		backup, backupErr := s.createBackup(path, version)
+		backup, created, backupErr := s.createBackup(path, version)
 		if backupErr != nil {
 			if hasOld {
 				backups[path] = old
 			}
 			errs = append(errs, backupErr)
 			continue
+		}
+		if created {
+			createdBackups = append(createdBackups, backup)
 		}
 		backups[path] = backup
 	}
@@ -254,6 +274,10 @@ func (s *Store) MakeSnapshot(messageID string) error {
 	if s.appendRecord != nil {
 		if err := s.appendRecord(SnapshotRecord{Type: TypeSnapshot, MessageID: messageID, Snapshot: snapshot, PreCheckpoint: true}); err != nil {
 			errs = append(errs, err)
+			s.snapshots = previousSnapshots
+			for _, backup := range createdBackups {
+				s.removeBackup(backup)
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -280,6 +304,7 @@ func (s *Store) Restore(messageID string) (RestoreResult, error) {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	plans := make([]restorePlan, 0, len(paths))
 	var errs []error
 	for _, path := range paths {
 		backup, ok := target.TrackedFileBackups[path]
@@ -291,16 +316,28 @@ func (s *Store) Restore(messageID string) (RestoreResult, error) {
 			errs = append(errs, fmt.Errorf("missing backup for %s", path))
 			continue
 		}
-		changed, err := s.restoreFile(path, backup)
+		plan, err := s.prepareRestore(path, backup)
 		if err != nil {
 			result.FilesFailed = append(result.FilesFailed, path)
 			errs = append(errs, err)
 			continue
 		}
+		plans = append(plans, plan)
+	}
+	if len(errs) > 0 {
+		return result, errors.Join(errs...)
+	}
+	for _, plan := range plans {
+		changed, err := s.applyRestore(plan)
+		if err != nil {
+			result.FilesFailed = append(result.FilesFailed, plan.path)
+			errs = append(errs, err)
+			continue
+		}
 		if changed {
-			result.FilesChanged = append(result.FilesChanged, path)
+			result.FilesChanged = append(result.FilesChanged, plan.path)
 		} else {
-			result.FilesSkipped = append(result.FilesSkipped, path)
+			result.FilesSkipped = append(result.FilesSkipped, plan.path)
 		}
 	}
 	return result, errors.Join(errs...)
@@ -393,22 +430,22 @@ func (s *Store) firstBackup(path string) (Backup, bool) {
 	return Backup{}, false
 }
 
-func (s *Store) createBackup(path string, version int) (Backup, error) {
+func (s *Store) createBackup(path string, version int) (Backup, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Backup{Version: version, BackupTime: time.Now().UTC()}, nil
+		return Backup{Version: version, BackupTime: time.Now().UTC()}, false, nil
 	}
 	if err != nil {
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return Backup{}, fmt.Errorf("filehistory: refusing to back up non-regular path %s", path)
+		return Backup{}, false, fmt.Errorf("filehistory: refusing to back up non-regular path %s", path)
 	}
 	if err := validateLinkCount(info); err != nil {
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	if err := os.MkdirAll(s.backupDir(), 0o700); err != nil {
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	name := backupName(path, version)
 	destination := filepath.Join(s.backupDir(), name)
@@ -418,40 +455,47 @@ func (s *Store) createBackup(path string, version int) (Backup, error) {
 	}
 	temporary, err := os.CreateTemp(s.backupDir(), ".rivo-file-history-*")
 	if err != nil {
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
 	if err := temporary.Chmod(info.Mode().Perm()); err != nil {
 		_ = temporary.Close()
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	source, err := os.Open(path)
 	if err != nil {
 		_ = temporary.Close()
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	_, copyErr := io.Copy(temporary, source)
 	closeSourceErr := source.Close()
 	closeTemporaryErr := temporary.Close()
 	if copyErr != nil {
-		return Backup{}, copyErr
+		return Backup{}, false, copyErr
 	}
 	if closeSourceErr != nil {
-		return Backup{}, closeSourceErr
+		return Backup{}, false, closeSourceErr
 	}
 	if closeTemporaryErr != nil {
-		return Backup{}, closeTemporaryErr
+		return Backup{}, false, closeTemporaryErr
 	}
 	if err := os.Rename(temporaryName, destination); err != nil {
 		if _, statErr := os.Stat(destination); statErr == nil {
 			nameCopy := name
-			return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, nil
+			return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, false, nil
 		}
-		return Backup{}, err
+		return Backup{}, false, err
 	}
 	nameCopy := name
-	return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, nil
+	return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, true, nil
+}
+
+func (s *Store) removeBackup(backup Backup) {
+	if backup.BackupFileName == nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(s.backupDir(), *backup.BackupFileName))
 }
 
 func (s *Store) backupMatchesFile(path string, backup Backup) (bool, error) {
@@ -487,50 +531,58 @@ func (s *Store) backupMatchesFile(path string, backup Backup) (bool, error) {
 	return bytes.Equal(current, stored), nil
 }
 
-func (s *Store) restoreFile(path string, backup Backup) (bool, error) {
+type restorePlan struct {
+	path    string
+	remove  bool
+	data    []byte
+	mode    os.FileMode
+	changed bool
+}
+
+func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) {
+	plan := restorePlan{path: path}
 	if err := validatePath(path, true); err != nil {
-		return false, err
+		return plan, err
 	}
 	if backup.BackupFileName == nil {
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return plan, nil
 		}
 		if err != nil {
-			return false, err
+			return plan, err
 		}
 		if info.IsDir() {
-			return false, fmt.Errorf("filehistory: refusing to remove directory %s", path)
+			return plan, fmt.Errorf("filehistory: refusing to remove directory %s", path)
 		}
-		if err := os.Remove(path); err != nil {
-			return false, err
-		}
-		return true, nil
+		plan.remove = true
+		plan.changed = true
+		return plan, nil
 	}
 	backupPath := filepath.Join(s.backupDir(), *backup.BackupFileName)
 	backupInfo, err := os.Lstat(backupPath)
 	if err != nil {
-		return false, err
+		return plan, err
 	}
 	if backupInfo.Mode()&os.ModeSymlink != 0 || !backupInfo.Mode().IsRegular() {
-		return false, fmt.Errorf("filehistory: backup is not a regular file: %s", backupPath)
+		return plan, fmt.Errorf("filehistory: backup is not a regular file: %s", backupPath)
 	}
 	if err := validateLinkCount(backupInfo); err != nil {
-		return false, err
+		return plan, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, err
+		return plan, err
 	}
 	if err := validatePath(path, true); err != nil {
-		return false, err
+		return plan, err
 	}
 	if backup.RealParentDir != "" {
 		parentDir, err := filepath.EvalSymlinks(filepath.Dir(path))
 		if err != nil {
-			return false, err
+			return plan, err
 		}
 		if filepath.Clean(parentDir) != filepath.Clean(backup.RealParentDir) {
-			return false, fmt.Errorf("filehistory: refusing changed parent directory for %s", path)
+			return plan, fmt.Errorf("filehistory: refusing changed parent directory for %s", path)
 		}
 	}
 	mode := os.FileMode(backup.Mode & uint32(os.ModePerm))
@@ -540,24 +592,47 @@ func (s *Store) restoreFile(path string, backup Backup) (bool, error) {
 	currentInfo, currentInfoErr := os.Lstat(path)
 	current, currentErr := os.ReadFile(path)
 	stored, storedErr := os.ReadFile(backupPath)
+	if storedErr != nil {
+		return plan, storedErr
+	}
 	modeMatches := currentInfoErr == nil && currentInfo.Mode().Perm() == mode
-	if currentErr == nil && storedErr == nil && modeMatches && bytes.Equal(current, stored) {
+	plan.data = stored
+	plan.mode = mode
+	plan.changed = !(currentErr == nil && modeMatches && bytes.Equal(current, stored))
+	return plan, nil
+}
+
+func (s *Store) applyRestore(plan restorePlan) (bool, error) {
+	if !plan.changed {
 		return false, nil
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if plan.remove {
+		if err := os.Remove(plan.path); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	file, err := os.OpenFile(plan.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, plan.mode)
 	if err != nil {
 		return false, err
 	}
-	source, err := os.Open(backupPath)
+	n, writeErr := file.Write(plan.data)
+	if writeErr == nil && n != len(plan.data) {
+		// File.Write is allowed to return a short write without an error.
+		// Rewriting a backup must never silently truncate the restored file.
+		writeErr = io.ErrShortWrite
+	}
+	chmodErr := file.Chmod(plan.mode)
+	closeErr := file.Close()
+	return true, errors.Join(writeErr, chmodErr, closeErr)
+}
+
+func (s *Store) restoreFile(path string, backup Backup) (bool, error) {
+	plan, err := s.prepareRestore(path, backup)
 	if err != nil {
-		_ = file.Close()
 		return false, err
 	}
-	_, copyErr := io.Copy(file, source)
-	closeSourceErr := source.Close()
-	chmodErr := file.Chmod(mode)
-	closeFileErr := file.Close()
-	return true, errors.Join(copyErr, closeSourceErr, chmodErr, closeFileErr)
+	return s.applyRestore(plan)
 }
 
 func (s *Store) backupDir() string { return filepath.Join(s.root, "file-history", s.sessionID) }
@@ -629,4 +704,15 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		copy.TrackedFileBackups[path] = backup
 	}
 	return copy
+}
+
+func cloneSnapshots(snapshots []Snapshot) []Snapshot {
+	if snapshots == nil {
+		return nil
+	}
+	out := make([]Snapshot, len(snapshots))
+	for index, snapshot := range snapshots {
+		out[index] = cloneSnapshot(snapshot)
+	}
+	return out
 }
