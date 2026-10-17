@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/atotto/clipboard"
+	textclipboard "github.com/atotto/clipboard"
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
@@ -38,13 +38,13 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	runtime.Attach(a)
 	output := newSerializedOutput(stdout)
 	model := tui.New(runtime.Snapshot(), tui.Handlers{
-		Request:         runtime.Request,
-		Cancel:          runtime.Cancel,
-		EnqueueSteering: runtime.EnqueueSteering,
-		RestoreSteering: runtime.RestoreSteering,
-		ReadClipboard:   clipboard.ReadAll,
+		Request:           runtime.Request,
+		Cancel:            runtime.Cancel,
+		EnqueueSteering:   runtime.EnqueueSteering,
+		RestoreSteering:   runtime.RestoreSteering,
+		ReadClipboardData: readClipboardData,
 		WriteClipboard: func(text string) error {
-			if err := clipboard.WriteAll(text); err == nil {
+			if err := textclipboard.WriteAll(text); err == nil {
 				return nil
 			}
 			return writeOSC52(output, text)

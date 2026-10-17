@@ -22,6 +22,9 @@ func TestNewRegistersBuiltinModels(t *testing.T) {
 		if m.Provider != ProviderID {
 			t.Errorf("%s Provider = %q, want %q", m.ID, m.Provider, ProviderID)
 		}
+		if !m.SupportsImages {
+			t.Errorf("%s SupportsImages = false, want true", m.ID)
+		}
 	}
 	if !found {
 		t.Errorf("Models() lacks default model %q", DefaultModel)

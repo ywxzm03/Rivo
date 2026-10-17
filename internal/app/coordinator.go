@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
@@ -79,6 +80,11 @@ func (c *Coordinator) resetRecovery() {
 
 // EnqueueSteering 在压缩状态锁内接受一条 steering，压缩开始后拒绝新输入
 func (c *Coordinator) EnqueueSteering(input string) error {
+	return c.EnqueueSteeringMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// EnqueueSteeringMessage 接受带图片的 steering 输入
+func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.compacting {
@@ -87,7 +93,13 @@ func (c *Coordinator) EnqueueSteering(input string) error {
 	if c.Agent == nil {
 		return errors.New("app: steering runner is unavailable")
 	}
-	return c.Agent.Steer(input)
+	if runner, ok := c.Agent.(interface{ SteerMessage(llm.UserMessage) error }); ok {
+		return runner.SteerMessage(input)
+	}
+	if userMessageHasImages(input) {
+		return errors.New("app: runner does not support structured image steering")
+	}
+	return c.Agent.Steer(userMessageText(input))
 }
 
 // SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
@@ -181,6 +193,11 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 
 // Run 驱动一次运行；本轮以可恢复的溢出收场时，省略失败尝试、压缩后重试一次
 func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
+	return c.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// RunMessage 驱动一次包含文本和图片的运行
+func (c *Coordinator) RunMessage(ctx context.Context, input llm.UserMessage) (*llm.AssistantMessage, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	c.resetRecovery()
@@ -188,8 +205,27 @@ func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMess
 	if err := c.preparePrompt(); err != nil {
 		return nil, err
 	}
-	reply, runErr := c.Agent.Run(ctx, input)
+	if runner, ok := c.Agent.(interface {
+		RunMessage(context.Context, llm.UserMessage) (*llm.AssistantMessage, error)
+	}); ok {
+		reply, runErr := runner.RunMessage(ctx, input)
+		return c.finishRun(ctx, reply, runErr)
+	}
+	if userMessageHasImages(input) {
+		return nil, errors.New("app: runner does not support structured image input")
+	}
+	reply, runErr := c.Agent.Run(ctx, userMessageText(input))
 	return c.finishRun(ctx, reply, runErr)
+}
+
+func userMessageText(message llm.UserMessage) string {
+	var parts []string
+	for _, content := range message.Content {
+		if text, ok := content.(llm.TextContent); ok {
+			parts = append(parts, text.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // Continue 续接当前会话并完成一次溢出恢复，供同一操作消费晚到的 steering

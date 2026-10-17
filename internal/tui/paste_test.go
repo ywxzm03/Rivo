@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestPasteFoldLargePaste(t *testing.T) {
@@ -17,6 +19,114 @@ func TestPasteFoldLargePaste(t *testing.T) {
 	}
 	if stored := m.pastes[1]; stored != body {
 		t.Fatalf("paste content not stored verbatim: %d runes vs %d", len([]rune(stored)), len([]rune(body)))
+	}
+}
+
+func TestClipboardImagePasteBuildsStructuredUserMessage(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	var request Request
+	m.handlers = Handlers{Request: func(value Request) tea.Cmd {
+		request = value
+		return nil
+	}}
+	typeText(m, "describe ")
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	if request.Message == nil {
+		t.Fatal("image submission did not build a structured message")
+	}
+	if len(request.Message.Content) != 2 {
+		t.Fatalf("content = %#v, want text and image", request.Message.Content)
+	}
+	if text, ok := request.Message.Content[0].(llm.TextContent); !ok || text.Text != "describe " {
+		t.Fatalf("content[0] = %#v, want text", request.Message.Content[0])
+	}
+	if image, ok := request.Message.Content[1].(llm.ImageContent); !ok || image.MIMEType != "image/png" {
+		t.Fatalf("content[1] = %#v, want image", request.Message.Content[1])
+	}
+}
+
+func TestImageOnlyPasteIsVisibleAndRequiresVisionModel(t *testing.T) {
+	m := testModel(80, 24)
+	called := false
+	m.handlers = Handlers{Request: func(Request) tea.Cmd {
+		called = true
+		return nil
+	}}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	if !strings.Contains(m.editor.Value(), "[Image #1]") {
+		t.Fatalf("image placeholder missing: %q", m.editor.Value())
+	}
+	press(m, tea.KeyEnter)
+	if called {
+		t.Fatal("non-vision model accepted image input")
+	}
+	if m.editor.Value() != "[Image #1]" {
+		t.Fatalf("rejected image draft was cleared: %q", m.editor.Value())
+	}
+}
+
+func TestImageHistoryRestoresAttachment(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	m.busy = false
+	press(m, tea.KeyUp)
+	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
+		t.Fatalf("history did not restore image draft: value=%q images=%d", m.editor.Value(), len(m.images))
+	}
+}
+
+func TestImageHistoryIgnoresLiteralImageMarkers(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
+	typeText(m, "literal [Image #1] then ")
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	m.busy = false
+	press(m, tea.KeyUp)
+	message, ok := m.buildUserMessage()
+	if !ok || !messageHasImages(message) || len(m.images) != 1 {
+		t.Fatalf("history image restore = message=%#v images=%d", message, len(m.images))
+	}
+	if _, ok := m.images[2]; !ok {
+		t.Fatalf("restored image map = %#v, want actual image marker #2", m.images)
+	}
+	if _, ok := message.Content[len(message.Content)-1].(llm.ImageContent); !ok {
+		t.Fatalf("restored content = %#v, want image after literal marker", message.Content)
+	}
+}
+
+func TestBackspaceDeletesLastImageMarker(t *testing.T) {
+	m := testModel(80, 24)
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{
+		{Data: "one", MIMEType: "image/png"},
+		{Data: "two", MIMEType: "image/png"},
+	}}})
+	press(m, tea.KeyBackspace)
+	if got := m.editor.Value(); got != "[Image #1]" {
+		t.Fatalf("editor after deleting last image = %q", got)
+	}
+	if len(m.images) != 1 {
+		t.Fatalf("images after deleting last image = %d, want 1", len(m.images))
+	}
+}
+
+func TestSteeringImageEnqueueFailureRestoresAttachment(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.busy = true
+	m.handlers = Handlers{EnqueueSteeringMessage: func(llm.UserMessage) error {
+		return errors.New("queue unavailable")
+	}}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
+		t.Fatalf("failed steering restore = value=%q images=%d", m.editor.Value(), len(m.images))
 	}
 }
 
@@ -167,7 +277,7 @@ func TestDeleteNoRenumber(t *testing.T) {
 
 func TestClipboardPasteFolds(t *testing.T) {
 	m := testModel(80, 24)
-	m.Update(clipboardReadMsg{text: strings.Repeat("y", 1001)})
+	m.Update(clipboardReadMsg{data: ClipboardData{Text: strings.Repeat("y", 1001)}})
 	if got := m.editor.Value(); !strings.Contains(got, "[paste #1 1001 chars]") {
 		t.Fatalf("clipboard paste should fold: %q", got)
 	}

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -275,6 +276,30 @@ func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	}
 	if !agent.AcknowledgeSteering("pending") || agent.HasSteering() {
 		t.Fatal("retried pending steering was not acknowledged")
+	}
+}
+
+func TestAgentRunMessagePersistsImageContent(t *testing.T) {
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	var committed []llm.Message
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+		committed = append(committed, messages...)
+		return []string{"user"}, nil
+	}
+	message := llm.UserMessage{Content: []llm.Content{
+		llm.TextContent{Text: "describe"},
+		llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
+	}}
+	if _, err := agent.RunMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if len(committed) == 0 {
+		t.Fatal("RunMessage did not commit a user message")
+	}
+	user, ok := committed[0].(llm.UserMessage)
+	if !ok || !reflect.DeepEqual(user, message) {
+		t.Fatalf("committed message = %#v, want %#v", committed[0], message)
 	}
 }
 

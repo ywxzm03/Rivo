@@ -245,6 +245,14 @@ func (a *App) TakeSteering() []string {
 	return a.agent.TakeSteering()
 }
 
+// TakeSteeringMessages 原子清空结构化 steering
+func (a *App) TakeSteeringMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeSteeringMessages()
+}
+
 // Skills 返回当前已发现技能的副本，显式命令由 TUI 适配器消费
 func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
 
@@ -260,6 +268,22 @@ func (a *App) SteeringMessages() []string {
 		return nil
 	}
 	return a.agent.SteeringMessages()
+}
+
+// SteeringUserMessages 返回结构化 steering 快照
+func (a *App) SteeringUserMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.SteeringUserMessages()
+}
+
+// SteeringRevision 返回等待消费队列的单调版本
+func (a *App) SteeringRevision() uint64 {
+	if a == nil || a.agent == nil {
+		return 0
+	}
+	return a.agent.SteeringRevision()
 }
 
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
