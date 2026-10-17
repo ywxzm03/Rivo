@@ -301,7 +301,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	if result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 {
 		usage = &result.Usage
 	}
-	if err := c.m.AppendCompaction(result.Summary, result.FirstKeptSourceID, tokensBefore, llm.CurrentSystemMessage(proj.Messages()), usage); err != nil {
+	if err := c.m.AppendCompactionWithDetails(result.Summary, result.FirstKeptSourceID, tokensBefore, llm.CurrentSystemMessage(proj.Messages()), usage, &result.FileLists); err != nil {
 		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}

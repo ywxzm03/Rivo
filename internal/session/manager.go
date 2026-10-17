@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	compact "github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -155,12 +156,18 @@ func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usa
 	})
 }
 
-// AppendCompaction 追加压缩点；firstKeptEntryID 为空时存自身 ID 表示零保留
+// AppendCompaction 追加不带文件列表的压缩点；firstKeptEntryID 为空时存自身 ID 表示零保留
 func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage) error {
+	return m.AppendCompactionWithDetails(summary, firstKeptEntryID, tokensBefore, systemMessage, usage, nil)
+}
+
+// AppendCompactionWithDetails 追加带结构化文件列表的压缩点
+func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *compact.FileLists) error {
 	e := &CompactionEntry{
 		Summary:          summary,
 		FirstKeptEntryID: firstKeptEntryID,
 		TokensBefore:     tokensBefore,
+		Details:          cloneFileLists(details),
 		SystemMessage:    systemMessage,
 	}
 	if usage != nil {
