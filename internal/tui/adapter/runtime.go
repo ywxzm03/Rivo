@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
@@ -46,6 +47,7 @@ type Runtime struct {
 	toolStarted            map[string]time.Time
 	turnStarted            time.Time
 	turnRetrying           bool
+	warningSeq             uint64
 	// compactionNotice 只供手动压缩完成时投影到 TUI，不进入会话上下文
 	compactionNotice    *tui.Message
 	compactionNoticeSeq uint64
@@ -99,7 +101,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		r.turnRetrying = false
 	}
 	r.mu.Unlock()
-	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value})
+	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value, RestoreMode: filehistory.RestoreMode(req.RestoreMode)})
 	if err != nil {
 		return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
 	}
@@ -118,7 +120,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.mu.Unlock()
 			return tui.OperationDoneMsg{ID: req.ID, Quit: true}
 		}
-		reset := result.Next != nil || r.resetNeeded || result.Replayed || req.Kind == "tree"
+		reset := result.Next != nil || r.resetNeeded || result.Replayed || (req.Kind == "tree" && result.ContextRewound)
 		if req.Kind == "clear" && result.Err == nil {
 			reset = true
 		}
@@ -189,18 +191,38 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			result.Err = nil
 		}
 		var notice string
-		if result.Err == nil {
-			switch req.Kind {
-			case "rename":
+		switch req.Kind {
+		case "rename":
+			if result.Err == nil {
 				notice = "Session renamed: " + snapshot.SessionName
-			case "new":
+			}
+		case "new":
+			if result.Err == nil {
 				notice = "New session started"
-			case "reload":
+			}
+		case "reload":
+			if result.Err == nil {
 				notice = "Reloaded context files and skills"
+			}
+		case "tree":
+			if result.FileRestore != nil {
+				summary := fileRestoreSummary(result.FileRestore)
+				if result.Err != nil {
+					result.Err = fmt.Errorf("%w (%s)", result.Err, summary)
+				} else {
+					notice = "Restored code: " + strings.TrimPrefix(summary, "code restore: ")
+				}
 			}
 		}
 		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}
 	}
+}
+
+func fileRestoreSummary(result *filehistory.RestoreResult) string {
+	if result == nil {
+		return ""
+	}
+	return fmt.Sprintf("code restore: %d changed, %d skipped, %d failed", len(result.FilesChanged), len(result.FilesSkipped), len(result.FilesFailed))
 }
 
 func (r *Runtime) cancelCurrent() {
@@ -323,6 +345,13 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	case llm.ToolExecutionEndEvent:
 		converted := r.toolEndLocked(event)
 		message = &converted
+	case llm.WarningEvent:
+		r.warningSeq++
+		message = &tui.Message{
+			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
+			Role: "notice",
+			Text: "Warning: " + event.Message,
+		}
 	case llm.CompactionStartEvent:
 		status = "Compacting context…"
 	case llm.CompactionEndEvent:
@@ -564,9 +593,19 @@ func New(cfg app.Config, cwd, branch string) *Runtime {
 
 // Attach 在加载边界绑定 App 并重放会话投影
 func (r *Runtime) Attach(a *app.App) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.app = a
 	r.namespace = a.SessionID()
 	r.replaceMessagesLocked(a.ContextView())
+	for _, warning := range a.Warnings() {
+		r.warningSeq++
+		r.upsertLocked(tui.Message{
+			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
+			Role: "notice",
+			Text: "Warning: " + warning,
+		})
+	}
 }
 
 // RestoreSteering 原子取出运行中尚未消费的 steering，供 TUI 撤回到编辑器

@@ -9,7 +9,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Write struct{}
+type Write struct{ History FileHistoryTracker }
 
 func (w *Write) Name() string { return "write" }
 
@@ -65,6 +65,7 @@ func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResul
 		if err := ctx.Err(); err != nil {
 			return struct{}{}, err
 		}
+		trackFileEdit(ctx, w.History, absPath)
 		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
 			return struct{}{}, err
 		}

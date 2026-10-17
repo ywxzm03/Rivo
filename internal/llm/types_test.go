@@ -88,6 +88,7 @@ func TestAgentEventTypesAndInterfaceMethods(t *testing.T) {
 		{name: "tool execution start", event: ToolExecutionStartEvent{}, want: AgentEventToolExecutionStart},
 		{name: "tool execution update", event: ToolExecutionUpdateEvent{}, want: AgentEventToolExecutionUpdate},
 		{name: "tool execution end", event: ToolExecutionEndEvent{}, want: AgentEventToolExecutionEnd},
+		{name: "warning", event: WarningEvent{}, want: AgentEventWarning},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

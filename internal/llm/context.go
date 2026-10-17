@@ -2,6 +2,19 @@ package llm
 
 import "context"
 
+type userMessageContextKey struct{}
+
+// WithCurrentUserMessageID 把当前 tool turn 关联到已持久化的 user entry。
+func WithCurrentUserMessageID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, userMessageContextKey{}, id)
+}
+
+// CurrentUserMessageID 返回当前 tool turn 关联的 user entry。
+func CurrentUserMessageID(ctx context.Context) string {
+	id, _ := ctx.Value(userMessageContextKey{}).(string)
+	return id
+}
+
 type Tool interface {
 	Name() string
 	Description() string

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -25,6 +26,9 @@ const (
 	TypeCompaction          = "compaction"
 	TypeContextEdit         = "context_edit"
 	TypeSessionInfo         = "session_info"
+	// file-history records are JSONL metadata and do not participate in the tree
+	TypeFileHistorySnapshot = filehistory.TypeSnapshot
+	TypeFileHistoryDelta    = filehistory.TypeDelta
 )
 
 // Header 会话文件首行，只记录元数据，不参与树结构
