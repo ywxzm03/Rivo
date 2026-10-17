@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,6 +195,21 @@ func TestOpenSkipsMalformedFileHistoryRecordAndRecordsWarning(t *testing.T) {
 	warnings := loaded.Warnings()
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "skipped invalid file history record") {
 		t.Fatalf("warnings = %v, want one file history warning", warnings)
+	}
+}
+
+func TestWarningsAreBoundedAndDeduplicated(t *testing.T) {
+	m := New("/project", t.TempDir())
+	for index := 0; index < maxSessionWarnings+10; index++ {
+		m.AddWarning(fmt.Sprintf("warning-%d", index))
+	}
+	m.AddWarning("warning-109")
+	warnings := m.Warnings()
+	if len(warnings) != maxSessionWarnings {
+		t.Fatalf("warnings = %d, want %d", len(warnings), maxSessionWarnings)
+	}
+	if warnings[0] != "warning-10" || warnings[len(warnings)-1] != "warning-109" {
+		t.Fatalf("warning window = %q ... %q, want warning-10 ... warning-109", warnings[0], warnings[len(warnings)-1])
 	}
 }
 

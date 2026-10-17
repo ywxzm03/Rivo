@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -123,6 +124,7 @@ type RestoreResult struct {
 // Store 管理一个 session 的备份文件和运行态快照。
 type Store struct {
 	mu           sync.Mutex
+	ioMu         sync.Mutex
 	root         string
 	sessionID    string
 	snapshots    []Snapshot
@@ -149,6 +151,16 @@ func New(root, sessionID string, records []Record, activeIDs map[string]bool, ap
 
 // TrackEdit 在文件写入前保存当前内容，并把备份增量附加到最近 snapshot。
 func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
+	return s.trackEdit(ctx, messageID, path, nil, 0, false)
+}
+
+// TrackEditContent 使用调用方已经读取的内容生成备份，避免再次读取时出现竞态。
+func (s *Store) TrackEditContent(ctx context.Context, messageID, path string, content []byte, mode os.FileMode) error {
+	data := append([]byte(nil), content...)
+	return s.trackEdit(ctx, messageID, path, data, mode, true)
+}
+
+func (s *Store) trackEdit(ctx context.Context, messageID, path string, content []byte, mode os.FileMode, hasContent bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -156,16 +168,32 @@ func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
 	if err != nil {
 		return err
 	}
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.snapshots) == 0 {
+		s.mu.Unlock()
 		return errors.New("filehistory: no snapshot for current user turn")
 	}
 	latest := &s.snapshots[len(s.snapshots)-1]
+	if latest.MessageID != messageID {
+		latestID := latest.MessageID
+		s.mu.Unlock()
+		return fmt.Errorf("filehistory: snapshot %s does not match user turn %s", latestID, messageID)
+	}
 	if _, tracked := latest.TrackedFileBackups[path]; tracked {
+		s.mu.Unlock()
 		return nil
 	}
-	backup, created, err := s.createBackup(path, 1)
+	s.mu.Unlock()
+
+	var backup Backup
+	var created bool
+	if hasContent {
+		backup, created, err = s.createBackupFromData(path, 1, content, mode)
+	} else {
+		backup, created, err = s.createBackup(path, 1)
+	}
 	if err != nil {
 		return err
 	}
@@ -185,6 +213,21 @@ func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
 			return err
 		}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.snapshots) == 0 || s.snapshots[len(s.snapshots)-1].MessageID != messageID {
+		if created {
+			s.removeBackup(backup)
+		}
+		return fmt.Errorf("filehistory: snapshot for user %s is no longer current", messageID)
+	}
+	latest = &s.snapshots[len(s.snapshots)-1]
+	if _, tracked := latest.TrackedFileBackups[path]; tracked {
+		if created {
+			s.removeBackup(backup)
+		}
+		return nil
+	}
 	if latest.TrackedFileBackups == nil {
 		latest.TrackedFileBackups = make(map[string]Backup)
 	}
@@ -195,28 +238,34 @@ func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
 
 // MakeSnapshot 在 user turn 开始前记录所有已追踪文件的状态。
 func (s *Store) MakeSnapshot(messageID string) error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if messageID == "" {
+		s.mu.Unlock()
 		return errors.New("filehistory: empty snapshot message id")
 	}
 	previousSnapshots := cloneSnapshots(s.snapshots)
-	filtered := s.snapshots[:0]
-	for _, snapshot := range s.snapshots {
+	trackedFiles := make(map[string]struct{}, len(s.trackedFiles))
+	for path := range s.trackedFiles {
+		trackedFiles[path] = struct{}{}
+	}
+	s.mu.Unlock()
+	filtered := make([]Snapshot, 0, len(previousSnapshots))
+	for _, snapshot := range previousSnapshots {
 		if snapshot.MessageID != messageID || !snapshot.PreCheckpoint {
 			filtered = append(filtered, snapshot)
 		}
 	}
-	s.snapshots = filtered
 	previous := Snapshot{}
-	if len(s.snapshots) > 0 {
-		previous = s.snapshots[len(s.snapshots)-1]
+	if len(filtered) > 0 {
+		previous = filtered[len(filtered)-1]
 	}
-	backups := make(map[string]Backup, len(s.trackedFiles))
+	backups := make(map[string]Backup, len(trackedFiles))
 	createdBackups := make([]Backup, 0)
 	var errs []error
-	paths := make([]string, 0, len(s.trackedFiles))
-	for path := range s.trackedFiles {
+	paths := make([]string, 0, len(trackedFiles))
+	for path := range trackedFiles {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
@@ -243,9 +292,14 @@ func (s *Store) MakeSnapshot(messageID string) error {
 			continue
 		}
 		if hasOld && old.BackupFileName != nil {
-			if same, compareErr := s.backupMatchesFile(path, old); compareErr == nil && same {
-				backups[path] = old
-				continue
+			same, compareErr := s.backupMatchesFile(path, old)
+			if compareErr == nil {
+				if same {
+					backups[path] = old
+					continue
+				}
+			} else if !errors.Is(compareErr, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("validate backup %s: %w", path, compareErr))
 			}
 		}
 		backup, created, backupErr := s.createBackup(path, version)
@@ -267,26 +321,53 @@ func (s *Store) MakeSnapshot(messageID string) error {
 		Timestamp:          time.Now().UTC(),
 		PreCheckpoint:      true,
 	}
-	s.snapshots = append(s.snapshots, snapshot)
-	if len(s.snapshots) > MaxSnapshots {
-		s.snapshots = append([]Snapshot(nil), s.snapshots[len(s.snapshots)-MaxSnapshots:]...)
+	snapshots := append(filtered, snapshot)
+	if len(snapshots) > MaxSnapshots {
+		snapshots = append([]Snapshot(nil), snapshots[len(snapshots)-MaxSnapshots:]...)
 	}
 	if s.appendRecord != nil {
 		if err := s.appendRecord(SnapshotRecord{Type: TypeSnapshot, MessageID: messageID, Snapshot: snapshot, PreCheckpoint: true}); err != nil {
 			errs = append(errs, err)
-			s.snapshots = previousSnapshots
 			for _, backup := range createdBackups {
 				s.removeBackup(backup)
 			}
+			return errors.Join(errs...)
 		}
 	}
+	s.mu.Lock()
+	s.snapshots = snapshots
+	s.mu.Unlock()
 	return errors.Join(errs...)
 }
 
 // Restore 把目标 user turn 开始前的文件状态恢复到工作区。
 func (s *Store) Restore(messageID string) (RestoreResult, error) {
+	result, _, err := s.restore(messageID)
+	return result, err
+}
+
+// RestoreWithRollback 恢复代码并返回一次性补偿函数，供组合恢复在上下文失败时撤销代码改动。
+func (s *Store) RestoreWithRollback(messageID string) (RestoreResult, func() error, error) {
+	result, plans, err := s.restore(messageID)
+	if err != nil {
+		return result, nil, err
+	}
+	var once sync.Once
+	var rollbackErr error
+	return result, func() error {
+		once.Do(func() {
+			s.ioMu.Lock()
+			defer s.ioMu.Unlock()
+			rollbackErr = s.rollbackRestore(plans)
+		})
+		return rollbackErr
+	}, nil
+}
+
+func (s *Store) restore(messageID string) (RestoreResult, []restorePlan, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	result := RestoreResult{MessageID: messageID}
 	var target *Snapshot
 	for index := len(s.snapshots) - 1; index >= 0; index-- {
@@ -297,19 +378,22 @@ func (s *Store) Restore(messageID string) (RestoreResult, error) {
 		}
 	}
 	if target == nil {
-		return result, fmt.Errorf("filehistory: snapshot for user %s is unavailable", messageID)
+		s.mu.Unlock()
+		return result, nil, fmt.Errorf("filehistory: snapshot for user %s is unavailable", messageID)
 	}
 	paths := make([]string, 0, len(s.trackedFiles))
 	for path := range s.trackedFiles {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	snapshots := cloneSnapshots(s.snapshots)
+	s.mu.Unlock()
 	plans := make([]restorePlan, 0, len(paths))
 	var errs []error
 	for _, path := range paths {
 		backup, ok := target.TrackedFileBackups[path]
 		if !ok {
-			backup, ok = s.firstBackup(path)
+			backup, ok = firstBackup(snapshots, path)
 		}
 		if !ok {
 			result.FilesFailed = append(result.FilesFailed, path)
@@ -325,14 +409,23 @@ func (s *Store) Restore(messageID string) (RestoreResult, error) {
 		plans = append(plans, plan)
 	}
 	if len(errs) > 0 {
-		return result, errors.Join(errs...)
+		return result, nil, errors.Join(errs...)
 	}
+	applied := make([]restorePlan, 0, len(plans))
 	for _, plan := range plans {
 		changed, err := s.applyRestore(plan)
+		if changed || err != nil {
+			applied = append(applied, plan)
+		}
 		if err != nil {
 			result.FilesFailed = append(result.FilesFailed, plan.path)
-			errs = append(errs, err)
-			continue
+			rollbackErr := s.rollbackRestore(applied)
+			if rollbackErr == nil {
+				result.FilesChanged = nil
+				result.FilesSkipped = nil
+				return result, nil, err
+			}
+			return result, nil, errors.Join(err, rollbackErr)
 		}
 		if changed {
 			result.FilesChanged = append(result.FilesChanged, plan.path)
@@ -340,11 +433,13 @@ func (s *Store) Restore(messageID string) (RestoreResult, error) {
 			result.FilesSkipped = append(result.FilesSkipped, plan.path)
 		}
 	}
-	return result, errors.Join(errs...)
+	return result, applied, errors.Join(errs...)
 }
 
 // PruneActiveBranch 丢弃不在当前 user 活跃路径上的运行态快照。
 func (s *Store) PruneActiveBranch(activeIDs map[string]bool) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.filterActive(activeIDs)
@@ -421,8 +516,8 @@ func (s *Store) filterActive(activeIDs map[string]bool) {
 	}
 }
 
-func (s *Store) firstBackup(path string) (Backup, bool) {
-	for _, snapshot := range s.snapshots {
+func firstBackup(snapshots []Snapshot, path string) (Backup, bool) {
+	for _, snapshot := range snapshots {
 		if backup, ok := snapshot.TrackedFileBackups[path]; ok {
 			return backup, true
 		}
@@ -433,66 +528,142 @@ func (s *Store) firstBackup(path string) (Backup, bool) {
 func (s *Store) createBackup(path string, version int) (Backup, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Backup{Version: version, BackupTime: time.Now().UTC()}, false, nil
+		return Backup{Version: version, BackupTime: time.Now().UTC(), RealParentDir: resolveRealParentDir(path)}, false, nil
 	}
 	if err != nil {
 		return Backup{}, false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return Backup{}, false, fmt.Errorf("filehistory: refusing to back up non-regular path %s", path)
-	}
-	if err := validateLinkCount(info); err != nil {
+	if err := validateBackupSource(info, path); err != nil {
 		return Backup{}, false, err
 	}
-	if err := os.MkdirAll(s.backupDir(), 0o700); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Backup{}, false, err
+	}
+	return s.createBackupFromData(path, version, data, info.Mode().Perm())
+}
+
+func (s *Store) createBackupFromData(path string, version int, data []byte, mode os.FileMode) (Backup, bool, error) {
+	if info, err := os.Lstat(path); err == nil {
+		if err := validateBackupSource(info, path); err != nil {
+			return Backup{}, false, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Backup{}, false, err
+	}
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := s.ensureBackupDir(); err != nil {
 		return Backup{}, false, err
 	}
 	name := backupName(path, version)
 	destination := filepath.Join(s.backupDir(), name)
-	realParentDir := filepath.Dir(path)
-	if resolved, resolveErr := filepath.EvalSymlinks(realParentDir); resolveErr == nil {
-		realParentDir = resolved
-	}
+	realParentDir := resolveRealParentDir(path)
 	temporary, err := os.CreateTemp(s.backupDir(), ".rivo-file-history-*")
 	if err != nil {
 		return Backup{}, false, err
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(info.Mode().Perm()); err != nil {
+	if err := temporary.Chmod(mode.Perm()); err != nil {
 		_ = temporary.Close()
 		return Backup{}, false, err
 	}
-	source, err := os.Open(path)
-	if err != nil {
-		_ = temporary.Close()
-		return Backup{}, false, err
+	n, writeErr := temporary.Write(data)
+	if writeErr == nil && n != len(data) {
+		writeErr = io.ErrShortWrite
 	}
-	_, copyErr := io.Copy(temporary, source)
-	closeSourceErr := source.Close()
 	closeTemporaryErr := temporary.Close()
-	if copyErr != nil {
-		return Backup{}, false, copyErr
-	}
-	if closeSourceErr != nil {
-		return Backup{}, false, closeSourceErr
+	if writeErr != nil {
+		return Backup{}, false, writeErr
 	}
 	if closeTemporaryErr != nil {
 		return Backup{}, false, closeTemporaryErr
 	}
 	if err := os.Rename(temporaryName, destination); err != nil {
-		if _, statErr := os.Stat(destination); statErr == nil {
+		if same, compareErr := s.backupMatchesData(destination, data, mode); compareErr == nil && same {
 			nameCopy := name
-			return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, false, nil
+			return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(mode.Perm()), RealParentDir: realParentDir}, false, nil
+		} else if compareErr != nil {
+			return Backup{}, false, errors.Join(err, compareErr)
 		}
 		return Backup{}, false, err
 	}
 	nameCopy := name
-	return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(info.Mode().Perm()), RealParentDir: realParentDir}, true, nil
+	return Backup{BackupFileName: &nameCopy, Version: version, BackupTime: time.Now().UTC(), Mode: uint32(mode.Perm()), RealParentDir: realParentDir}, true, nil
+}
+
+func validateBackupSource(info os.FileInfo, path string) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("filehistory: refusing to back up non-regular path %s", path)
+	}
+	return validateLinkCount(info)
+}
+
+func resolveRealParentDir(path string) string {
+	parent := filepath.Dir(path)
+	if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+		return resolved
+	}
+	return filepath.Clean(parent)
+}
+
+func (s *Store) ensureBackupDir() error {
+	dir := s.backupDir()
+	if err := s.validateBackupDir(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return s.validateBackupDir()
+}
+
+func (s *Store) validateBackupDir() error {
+	return validateDirectoryChain(s.backupDir(), s.root)
+}
+
+func validateDirectoryChain(path, boundary string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	absBoundary, err := filepath.Abs(boundary)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(absBoundary, absPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("filehistory: backup directory escapes root")
+	}
+	for current := absPath; ; current = filepath.Dir(current) {
+		info, statErr := os.Lstat(current)
+		if statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("filehistory: refusing symlink directory %s", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("filehistory: backup path is not a directory %s", current)
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if current == absBoundary {
+			return nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("filehistory: backup directory is outside root")
+		}
+	}
 }
 
 func (s *Store) removeBackup(backup Backup) {
 	if backup.BackupFileName == nil {
+		return
+	}
+	if err := s.validateBackupDir(); err != nil {
 		return
 	}
 	_ = os.Remove(filepath.Join(s.backupDir(), *backup.BackupFileName))
@@ -510,38 +681,66 @@ func (s *Store) backupMatchesFile(path string, backup Backup) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if err := s.validateBackupDir(); err != nil {
+		return false, err
+	}
 	backupPath := filepath.Join(s.backupDir(), *backup.BackupFileName)
 	info, err := os.Lstat(backupPath)
 	if err != nil {
 		return false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return false, fmt.Errorf("filehistory: backup is not a regular file: %s", backupPath)
-	}
-	if err := validateLinkCount(info); err != nil {
+	if err := validateBackupSource(info, backupPath); err != nil {
 		return false, err
 	}
 	if currentInfo.Mode().Perm() != info.Mode().Perm() {
 		return false, nil
 	}
-	stored, err := os.ReadFile(backupPath)
+	return backupMatchesDataFromInfo(backupPath, info, current)
+}
+
+func (s *Store) backupMatchesData(path string, data []byte, mode os.FileMode) (bool, error) {
+	if err := s.validateBackupDir(); err != nil {
+		return false, err
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(current, stored), nil
+	if err := validateBackupSource(info, path); err != nil {
+		return false, err
+	}
+	if mode.Perm() != 0 && info.Mode().Perm() != mode.Perm() {
+		return false, nil
+	}
+	return backupMatchesDataFromInfo(path, info, data)
+}
+
+func backupMatchesDataFromInfo(path string, _ os.FileInfo, data []byte) (bool, error) {
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(data, stored), nil
 }
 
 type restorePlan struct {
-	path    string
-	remove  bool
-	data    []byte
-	mode    os.FileMode
-	changed bool
+	path          string
+	remove        bool
+	data          []byte
+	mode          os.FileMode
+	realParentDir string
+	changed       bool
+	rollbackData  []byte
+	rollbackMode  os.FileMode
+	rollbackExist bool
 }
 
 func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) {
-	plan := restorePlan{path: path}
+	plan := restorePlan{path: path, realParentDir: backup.RealParentDir}
 	if err := validatePath(path, true); err != nil {
+		return plan, err
+	}
+	if err := validateRestoreParent(path, backup.RealParentDir); err != nil {
 		return plan, err
 	}
 	if backup.BackupFileName == nil {
@@ -555,6 +754,13 @@ func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) 
 		if info.IsDir() {
 			return plan, fmt.Errorf("filehistory: refusing to remove directory %s", path)
 		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return plan, err
+		}
+		plan.rollbackData = data
+		plan.rollbackMode = info.Mode().Perm()
+		plan.rollbackExist = true
 		plan.remove = true
 		plan.changed = true
 		return plan, nil
@@ -570,21 +776,6 @@ func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) 
 	if err := validateLinkCount(backupInfo); err != nil {
 		return plan, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return plan, err
-	}
-	if err := validatePath(path, true); err != nil {
-		return plan, err
-	}
-	if backup.RealParentDir != "" {
-		parentDir, err := filepath.EvalSymlinks(filepath.Dir(path))
-		if err != nil {
-			return plan, err
-		}
-		if filepath.Clean(parentDir) != filepath.Clean(backup.RealParentDir) {
-			return plan, fmt.Errorf("filehistory: refusing changed parent directory for %s", path)
-		}
-	}
 	mode := os.FileMode(backup.Mode & uint32(os.ModePerm))
 	if mode == 0 {
 		mode = backupInfo.Mode().Perm()
@@ -594,6 +785,16 @@ func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) 
 	stored, storedErr := os.ReadFile(backupPath)
 	if storedErr != nil {
 		return plan, storedErr
+	}
+	if currentInfoErr == nil {
+		if currentErr != nil {
+			return plan, currentErr
+		}
+		plan.rollbackData = current
+		plan.rollbackMode = currentInfo.Mode().Perm()
+		plan.rollbackExist = true
+	} else if !errors.Is(currentInfoErr, os.ErrNotExist) {
+		return plan, currentInfoErr
 	}
 	modeMatches := currentInfoErr == nil && currentInfo.Mode().Perm() == mode
 	plan.data = stored
@@ -605,6 +806,9 @@ func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) 
 func (s *Store) applyRestore(plan restorePlan) (bool, error) {
 	if !plan.changed {
 		return false, nil
+	}
+	if err := ensureRestoreParent(plan.path, plan.realParentDir, !plan.remove); err != nil {
+		return false, err
 	}
 	if plan.remove {
 		if err := os.Remove(plan.path); err != nil {
@@ -625,6 +829,72 @@ func (s *Store) applyRestore(plan restorePlan) (bool, error) {
 	chmodErr := file.Chmod(plan.mode)
 	closeErr := file.Close()
 	return true, errors.Join(writeErr, chmodErr, closeErr)
+}
+
+func (s *Store) rollbackRestore(plans []restorePlan) error {
+	var errs []error
+	for index := len(plans) - 1; index >= 0; index-- {
+		plan := plans[index]
+		if err := ensureRestoreParent(plan.path, plan.realParentDir, plan.rollbackExist); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !plan.rollbackExist {
+			if err := os.Remove(plan.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		file, err := os.OpenFile(plan.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, plan.rollbackMode)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		n, writeErr := file.Write(plan.rollbackData)
+		if writeErr == nil && n != len(plan.rollbackData) {
+			writeErr = io.ErrShortWrite
+		}
+		chmodErr := file.Chmod(plan.rollbackMode)
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func validateRestoreParent(path, expected string) error {
+	parent := filepath.Dir(path)
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err == nil {
+		resolved = filepath.Clean(resolved)
+		if expected != "" {
+			if resolved != filepath.Clean(expected) {
+				return fmt.Errorf("filehistory: refusing changed parent directory for %s", path)
+			}
+		} else if resolved != filepath.Clean(parent) {
+			return fmt.Errorf("filehistory: refusing symlink parent directory for %s", path)
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return validateDirectoryChain(parent, filepath.Dir(parent))
+}
+
+func ensureRestoreParent(path, expected string, create bool) error {
+	if err := validateRestoreParent(path, expected); err != nil {
+		return err
+	}
+	if !create {
+		return nil
+	}
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	return validateRestoreParent(path, expected)
 }
 
 func (s *Store) restoreFile(path string, backup Backup) (bool, error) {

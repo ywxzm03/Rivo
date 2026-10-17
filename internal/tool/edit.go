@@ -105,6 +105,11 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
 	}
+	originalData := append([]byte(nil), data...)
+	info, err := os.Lstat(absPath)
+	if err != nil {
+		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
+	}
 	bom := []byte(nil)
 	if bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}) {
 		bom, data = data[:3], data[3:]
@@ -118,8 +123,8 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
-	// 3.记录已通过替换校验的文件，失败的 edit 不应污染当前 turn 的快照
-	trackFileEdit(ctx, e.History, absPath)
+	// 3.记录已通过替换校验的文件，复用已读取内容避免备份竞态
+	trackFileEditContent(ctx, e.History, absPath, originalData, info.Mode().Perm())
 	// 4.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)

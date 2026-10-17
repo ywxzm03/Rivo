@@ -150,6 +150,104 @@ func TestStoreRejectsSymlinkTarget(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsSymlinkBackupDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	backupRoot := filepath.Join(root, "file-history")
+	if err := os.MkdirAll(backupRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(backupRoot, "session")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "tracked.txt")
+	if err := os.WriteFile(file, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := New(root, "session", nil, nil, nil)
+	if err := store.MakeSnapshot("u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TrackEdit(context.Background(), "u1", file); err == nil {
+		t.Fatal("TrackEdit() succeeded through symlink backup directory")
+	}
+}
+
+func TestTrackEditRejectsMismatchedSnapshotID(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tracked.txt")
+	if err := os.WriteFile(file, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := New(t.TempDir(), "session", nil, nil, nil)
+	if err := store.MakeSnapshot("u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TrackEdit(context.Background(), "u2", file); err == nil {
+		t.Fatal("TrackEdit() accepted a mismatched snapshot ID")
+	}
+	if got := len(store.Snapshots()[0].TrackedFileBackups); got != 0 {
+		t.Fatalf("tracked backups = %d, want zero", got)
+	}
+}
+
+func TestRestoreWithRollbackRestoresOriginalWorkspace(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(t.TempDir(), "tracked.txt")
+	if err := os.WriteFile(file, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := New(root, "session", nil, nil, nil)
+	if err := store.MakeSnapshot("u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TrackEdit(context.Background(), "u1", file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, rollback, err := store.RestoreWithRollback("u1")
+	if err != nil || rollback == nil || len(result.FilesChanged) != 1 {
+		t.Fatalf("RestoreWithRollback() = result %+v, rollback %v, err %v", result, rollback != nil, err)
+	}
+	if content, err := os.ReadFile(file); err != nil || string(content) != "before" {
+		t.Fatalf("restored content = %q, err %v", content, err)
+	}
+	if err := rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(file); err != nil || string(content) != "after" {
+		t.Fatalf("rolled-back content = %q, err %v", content, err)
+	}
+}
+
+func TestTrackEditContentUsesProvidedData(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tracked.txt")
+	if err := os.WriteFile(file, []byte("actual"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := New(t.TempDir(), "session", nil, nil, nil)
+	if err := store.MakeSnapshot("u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TrackEditContent(context.Background(), "u1", file, []byte("captured"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("after"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Restore("u1"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil || string(content) != "captured" {
+		t.Fatalf("restored content = %q, err %v", content, err)
+	}
+}
+
 func TestTrackEditRollsBackStateWhenRecordAppendFails(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(t.TempDir(), "tracked.txt")

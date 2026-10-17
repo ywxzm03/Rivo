@@ -38,6 +38,8 @@ type SessionManager struct {
 	persistMu          sync.Mutex
 }
 
+const maxSessionWarnings = 100
+
 // DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/agent/sessions/--<编码后的cwd>--/
 func DefaultDir(cwd string) (string, error) {
 	home, err := os.UserHomeDir()
@@ -101,7 +103,7 @@ func Open(path, cwd string) (*SessionManager, error) {
 		flushed:            true,
 		needsNewline:       !bytes.HasSuffix(data, []byte("\n")),
 		fileHistoryRecords: records,
-		warnings:           warnings,
+		warnings:           boundedWarnings(warnings),
 	}
 	// 1.按文件序建索引：重复 ID 后者覆盖前者，leaf 取最后一个 entry
 	for _, e := range entries {
@@ -262,8 +264,25 @@ func (m *SessionManager) AddWarning(warning string) {
 		return
 	}
 	m.persistMu.Lock()
+	for _, existing := range m.warnings {
+		if existing == warning {
+			m.persistMu.Unlock()
+			return
+		}
+	}
+	if len(m.warnings) >= maxSessionWarnings {
+		copy(m.warnings, m.warnings[len(m.warnings)-maxSessionWarnings+1:])
+		m.warnings = m.warnings[:maxSessionWarnings-1]
+	}
 	m.warnings = append(m.warnings, warning)
 	m.persistMu.Unlock()
+}
+
+func boundedWarnings(warnings []string) []string {
+	if len(warnings) <= maxSessionWarnings {
+		return append([]string(nil), warnings...)
+	}
+	return append([]string(nil), warnings[len(warnings)-maxSessionWarnings:]...)
 }
 
 // AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来。

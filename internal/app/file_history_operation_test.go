@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/filehistory"
@@ -183,8 +184,8 @@ func TestTreeCombinedRestoreReportsCodeWhenContextRestoreFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := op.Wait()
-	if result.Err == nil || result.ContextRewound || result.FileRestore == nil {
-		t.Fatalf("combined restore result = %+v, want code success and context failure", result)
+	if result.Err == nil || result.ContextRewound || result.FileRestore != nil || !strings.Contains(result.Err.Error(), "code restore was rolled back") {
+		t.Fatalf("combined restore result = %+v, want compensated code restore and context failure", result)
 	}
 	if a.session.LeafID() != target {
 		t.Fatalf("leaf = %q, want original target %q", a.session.LeafID(), target)
@@ -193,7 +194,7 @@ func TestTreeCombinedRestoreReportsCodeWhenContextRestoreFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != "before" || len(result.FileRestore.FilesChanged) != 1 {
-		t.Fatalf("file restore = %+v, content = %q", result.FileRestore, content)
+	if string(content) != "after" {
+		t.Fatalf("content = %q, want original content after compensation", content)
 	}
 }

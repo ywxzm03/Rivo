@@ -303,11 +303,18 @@ func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (
 		return OperationResult{}, fmt.Errorf("app: unknown tree restore mode %q", mode)
 	}
 	result := OperationResult{}
+	var rollbackCode func() error
 	if mode == filehistory.RestoreCode || mode == filehistory.RestoreCodeAndContext {
 		if a.session.FileHistory() == nil {
 			return result, errors.New("app: file history is unavailable")
 		}
-		restored, err := a.session.FileHistory().Restore(entryID)
+		var restored filehistory.RestoreResult
+		var err error
+		if mode == filehistory.RestoreCodeAndContext {
+			restored, rollbackCode, err = a.session.FileHistory().RestoreWithRollback(entryID)
+		} else {
+			restored, err = a.session.FileHistory().Restore(entryID)
+		}
 		result.FileRestore = &restored
 		if err != nil {
 			return result, err
@@ -318,6 +325,13 @@ func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (
 	}
 	text, restoreEditor, err := a.rewindTree(entryID)
 	if err != nil {
+		if rollbackCode != nil {
+			if rollbackErr := rollbackCode(); rollbackErr != nil {
+				return result, errors.Join(err, fmt.Errorf("app: code restore compensation failed: %w", rollbackErr))
+			}
+			result.FileRestore = nil
+			return result, fmt.Errorf("app: context restore failed; code restore was rolled back: %w", err)
+		}
 		return result, err
 	}
 	a.session.PruneFileHistoryToActiveBranch(entryID)
