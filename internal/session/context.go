@@ -118,6 +118,7 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 				Kind:     compact.ContextCompaction,
 				Messages: messages,
 				Summary:  e.Summary,
+				Details:  cloneFileLists(e.Details),
 			})
 		}
 	}

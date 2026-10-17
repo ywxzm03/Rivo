@@ -117,6 +117,44 @@ func TestCompactUsesUpdatePromptWithPreviousSummary(t *testing.T) {
 	}
 }
 
+func TestCompactTracksFileListsAcrossSummaryBoundary(t *testing.T) {
+	streamFn, _ := recordingStreamFn("SUMMARY")
+	view := contextView([]llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "inspect files"}}},
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{Name: "read", Arguments: map[string]any{"path": "z.go"}},
+			llm.ToolCall{Name: "write", Arguments: map[string]any{"path": "a.go"}},
+		}},
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}},
+	})
+	c := &Compactor{StreamFn: streamFn, Config: Config{KeepRecentTokens: 1}}
+	result, err := c.Compact(context.Background(), view, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.FileLists.ReadFiles) != 1 || result.FileLists.ReadFiles[0] != "z.go" || len(result.FileLists.ModifiedFiles) != 1 || result.FileLists.ModifiedFiles[0] != "a.go" {
+		t.Fatalf("file lists = %+v, want read z.go and modified a.go", result.FileLists)
+	}
+	if !strings.Contains(result.Summary, "<modified-files>\na.go\n</modified-files>") {
+		t.Fatalf("summary = %q, want modified file section", result.Summary)
+	}
+}
+
+func TestCompactCarriesPreviousFileLists(t *testing.T) {
+	streamFn, _ := recordingStreamFn("SUMMARY")
+	view := contextViewWithCompaction("old summary", nil, compactFixture())
+	view.Entries[0].Details = &FileLists{ReadFiles: []string{"old.go"}, ModifiedFiles: []string{"changed.go"}}
+	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
+	result, err := c.Compact(context.Background(), view, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.FileLists.ReadFiles, ",") != "old.go" || len(result.FileLists.ModifiedFiles) != 1 || result.FileLists.ModifiedFiles[0] != "changed.go" {
+		t.Fatalf("file lists = %+v, want previous lists", result.FileLists)
+	}
+}
+
 func TestCompactSkipsCompactionSnapshotAndSummary(t *testing.T) {
 	streamFn, seen := recordingStreamFn("MERGED")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}

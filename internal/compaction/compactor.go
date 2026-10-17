@@ -42,6 +42,7 @@ type Compactor struct {
 // Result 一次压缩的产出：FirstKeptSourceID 标记保留区首条 entry
 type Result struct {
 	Summary           string
+	FileLists         FileLists
 	FirstKeptSourceID string
 	KeptMessageCount  int
 	TokensBefore      int
@@ -53,7 +54,7 @@ type Result struct {
 func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions string) (Result, error) {
 	messages := view.Messages()
 	tokensBefore := ContextTokens(messages)
-	start, previousSummary := compactionBoundary(view.Entries)
+	start, previousSummary, previousFiles := compactionBoundary(view.Entries)
 	plan := FindCutPoint(view.Entries, start, c.Config.KeepRecentTokens)
 	if plan.CutIndex <= start {
 		return Result{}, fmt.Errorf("compaction: no compressible history range")
@@ -98,7 +99,7 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 				}
 			}
 		}
-		result.Summary = summary
+		result.Summary, result.FileLists = summaryWithFileLists(summary, previousFiles, history, turnPrefix)
 		result.Usage = usage
 		return result, nil
 	}
@@ -110,13 +111,13 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 	if err != nil {
 		return Result{}, err
 	}
-	result.Summary = summary
+	result.Summary, result.FileLists = summaryWithFileLists(summary, previousFiles, conversation)
 	result.Usage = usage
 	return result, nil
 }
 
 // compactionBoundary 返回最新 compaction 后的 entry 起点和增量摘要基线
-func compactionBoundary(entries []ContextEntry) (int, string) {
+func compactionBoundary(entries []ContextEntry) (int, string, *FileLists) {
 	index := -1
 	for i, entry := range entries {
 		if entry.Kind == ContextCompaction {
@@ -124,9 +125,18 @@ func compactionBoundary(entries []ContextEntry) (int, string) {
 		}
 	}
 	if index < 0 {
-		return 0, ""
+		return 0, "", nil
 	}
-	return index + 1, entries[index].Summary
+	return index + 1, entries[index].Summary, entries[index].Details
+}
+
+func summaryWithFileLists(summary string, previous *FileLists, regions ...[]llm.Message) (string, FileLists) {
+	ops := fileOperationsFromLists(previous)
+	for _, messages := range regions {
+		collectFileOperations(messages, &ops)
+	}
+	lists := computeFileLists(ops)
+	return summary + formatFileOperations(lists), lists
 }
 
 // summarizeRegion 对一段消息生成摘要：turnPrefix 模式用轮次前缀提示词，
