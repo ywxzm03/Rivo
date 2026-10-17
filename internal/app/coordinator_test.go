@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -552,6 +553,43 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 	if !hasCompaction {
 		t.Error("manual compaction not persisted")
+	}
+}
+
+func TestCoordinatorPersistsCompactionFileLists(t *testing.T) {
+	dir := t.TempDir()
+	summaryStreamFn := countingStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}})
+	coord, _, _ := newTestCoordinator(t, dir, summaryStreamFn)
+	coord.Compactor.Config.KeepRecentTokens = 1
+	for _, msg := range []llm.Message{
+		textMsg("inspect files"),
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{Name: "read", Arguments: map[string]any{"path": "README.md"}},
+			llm.ToolCall{Name: "edit", Arguments: map[string]any{"path": "main.go"}},
+		}},
+		textMsg("continue"),
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}},
+	} {
+		if err := coord.m.AppendMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coord.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	view := coord.m.BuildContext()
+	if len(view.Entries) == 0 || view.Entries[0].Details == nil {
+		t.Fatalf("compaction details = %+v, want persisted details", view.Entries)
+	}
+	if !strings.Contains(view.Entries[0].Summary, "<read-files>\nREADME.md\n</read-files>") || !strings.Contains(view.Entries[0].Summary, "<modified-files>\nmain.go\n</modified-files>") {
+		t.Fatalf("summary = %q, want file sections", view.Entries[0].Summary)
+	}
+	reopened, err := session.Open(coord.m.Path(), "/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reopened.BuildContext().Entries[0].Details, view.Entries[0].Details) {
+		t.Fatalf("reopened details = %+v, want %+v", reopened.BuildContext().Entries[0].Details, view.Entries[0].Details)
 	}
 }
 

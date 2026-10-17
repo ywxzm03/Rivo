@@ -16,6 +16,8 @@ type ContextEntry struct {
 	Kind     ContextKind
 	Messages []llm.Message
 	Summary  string
+	// Details 保存压缩点的结构化元数据，不额外生成模型消息
+	Details *FileLists
 }
 
 // ContextView 是当前会话叶子的模型可见视图，也是压缩的唯一输入

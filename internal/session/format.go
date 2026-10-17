@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	compact "github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -95,8 +96,20 @@ type CompactionEntry struct {
 	Summary          string             `json:"summary"`
 	FirstKeptEntryID string             `json:"firstKeptEntryId"`
 	TokensBefore     int                `json:"tokensBefore"`
+	Details          *compact.FileLists `json:"details,omitempty"`
 	SystemMessage    *llm.SystemMessage `json:"systemMessage,omitempty"`
 	Usage            *Usage             `json:"usage,omitempty"`
+}
+
+// cloneFileLists 复制结构化文件元数据，保证会话条目保存稳定快照
+func cloneFileLists(details *compact.FileLists) *compact.FileLists {
+	if details == nil {
+		return nil
+	}
+	return &compact.FileLists{
+		ReadFiles:     append([]string{}, details.ReadFiles...),
+		ModifiedFiles: append([]string{}, details.ModifiedFiles...),
+	}
 }
 
 // Replacement context_edit 的替换内容；nil 表示省略目标 entry
