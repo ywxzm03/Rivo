@@ -40,6 +40,14 @@ func (a *App) ModelFallbackMessage() string {
 	return a.modelFallback
 }
 
+// Warnings 返回会话恢复或运行期间产生的降级警告。
+func (a *App) Warnings() []string {
+	if a.session == nil {
+		return nil
+	}
+	return a.session.Warnings()
+}
+
 // Open 恢复指定会话文件：按投影记录的 Provider/Model 装配运行链，
 // 模型解析失败时回退 env 配置并记录警告，投影无模型记录时直接走 env 配置
 func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {

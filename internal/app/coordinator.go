@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
@@ -137,7 +138,11 @@ func (c *Coordinator) CommitMessages(messages []llm.Message) ([]string, error) {
 			continue
 		}
 		// 发送给模型前建立 turn 起点；文件历史失败只记录降级状态，不阻止模型运行
-		_ = c.m.MakeFileHistorySnapshot(ids[index])
+		if snapshotErr := c.m.MakeFileHistorySnapshot(ids[index]); snapshotErr != nil {
+			warning := fmt.Sprintf("file history snapshot unavailable for %s: %v", ids[index], snapshotErr)
+			c.m.AddWarning(warning)
+			_ = c.emit(llm.WarningEvent{Message: warning})
+		}
 	}
 	return ids, nil
 }

@@ -175,7 +175,7 @@ func TestAttachFileHistoryPrunesInactivePersistedBranch(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsMalformedFileHistoryRecord(t *testing.T) {
+func TestOpenSkipsMalformedFileHistoryRecordAndRecordsWarning(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 	header, err := json.Marshal(Header{Type: TypeSession, Version: CurrentVersion, ID: "s1", Timestamp: "t", Cwd: "/project"})
@@ -187,8 +187,13 @@ func TestOpenRejectsMalformedFileHistoryRecord(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, "/project"); err == nil || !strings.Contains(err.Error(), "invalid file history record") {
-		t.Fatalf("Open() error = %v, want invalid file history record", err)
+	loaded, err := Open(path, "/project")
+	if err != nil {
+		t.Fatalf("Open() error = %v, want malformed metadata to be skipped", err)
+	}
+	warnings := loaded.Warnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "skipped invalid file history record") {
+		t.Fatalf("warnings = %v, want one file history warning", warnings)
 	}
 }
 

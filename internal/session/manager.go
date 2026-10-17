@@ -34,6 +34,7 @@ type SessionManager struct {
 	// fileHistoryRecords 保留 JSONL 中不参与树结构的文件历史记录
 	fileHistoryRecords []filehistory.Record
 	fileHistory        *filehistory.Store
+	warnings           []string
 	persistMu          sync.Mutex
 }
 
@@ -88,7 +89,7 @@ func Open(path, cwd string) (*SessionManager, error) {
 		_ = os.Remove(path)
 		return m, nil
 	}
-	header, entries, records, err := parseFileWithRecords(data)
+	header, entries, records, warnings, err := parseFileWithRecords(data)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +101,7 @@ func Open(path, cwd string) (*SessionManager, error) {
 		flushed:            true,
 		needsNewline:       !bytes.HasSuffix(data, []byte("\n")),
 		fileHistoryRecords: records,
+		warnings:           warnings,
 	}
 	// 1.按文件序建索引：重复 ID 后者覆盖前者，leaf 取最后一个 entry
 	for _, e := range entries {
@@ -246,6 +248,23 @@ func (m *SessionManager) Delete() error {
 
 // ID 返回会话命名空间
 func (m *SessionManager) ID() string { return m.header.ID }
+
+// Warnings 返回加载或运行期间记录的降级警告。
+func (m *SessionManager) Warnings() []string {
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
+	return append([]string(nil), m.warnings...)
+}
+
+// AddWarning 记录一个不阻止会话继续运行的降级警告。
+func (m *SessionManager) AddWarning(warning string) {
+	if warning == "" {
+		return
+	}
+	m.persistMu.Lock()
+	m.warnings = append(m.warnings, warning)
+	m.persistMu.Unlock()
+}
 
 // AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来。
 func (m *SessionManager) AttachFileHistory(root string) {

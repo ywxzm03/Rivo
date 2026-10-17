@@ -47,6 +47,7 @@ type Runtime struct {
 	toolStarted            map[string]time.Time
 	turnStarted            time.Time
 	turnRetrying           bool
+	warningSeq             uint64
 	// compactionNotice 只供手动压缩完成时投影到 TUI，不进入会话上下文
 	compactionNotice    *tui.Message
 	compactionNoticeSeq uint64
@@ -344,6 +345,13 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	case llm.ToolExecutionEndEvent:
 		converted := r.toolEndLocked(event)
 		message = &converted
+	case llm.WarningEvent:
+		r.warningSeq++
+		message = &tui.Message{
+			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
+			Role: "notice",
+			Text: "Warning: " + event.Message,
+		}
 	case llm.CompactionStartEvent:
 		status = "Compacting context…"
 	case llm.CompactionEndEvent:
@@ -585,9 +593,19 @@ func New(cfg app.Config, cwd, branch string) *Runtime {
 
 // Attach 在加载边界绑定 App 并重放会话投影
 func (r *Runtime) Attach(a *app.App) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.app = a
 	r.namespace = a.SessionID()
 	r.replaceMessagesLocked(a.ContextView())
+	for _, warning := range a.Warnings() {
+		r.warningSeq++
+		r.upsertLocked(tui.Message{
+			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
+			Role: "notice",
+			Text: "Warning: " + warning,
+		})
+	}
 }
 
 // RestoreSteering 原子取出运行中尚未消费的 steering，供 TUI 撤回到编辑器

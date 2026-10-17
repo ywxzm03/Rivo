@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestFileRestoreSummaryIncludesFailures(t *testing.T) {
@@ -15,5 +17,15 @@ func TestFileRestoreSummaryIncludesFailures(t *testing.T) {
 	})
 	if !strings.Contains(summary, "1 changed") || !strings.Contains(summary, "1 skipped") || !strings.Contains(summary, "1 failed") {
 		t.Fatalf("summary = %q, want all restore counts", summary)
+	}
+}
+
+func TestRuntimeWarningEventProjectsNotice(t *testing.T) {
+	runtime := New(app.Config{}, "/project", "main")
+	if err := runtime.handleEvent(llm.WarningEvent{Message: "snapshot unavailable"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.messages) != 1 || runtime.messages[0].Role != "notice" || runtime.messages[0].Text != "Warning: snapshot unavailable" {
+		t.Fatalf("messages = %+v, want warning notice", runtime.messages)
 	}
 }

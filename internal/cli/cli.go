@@ -47,6 +47,10 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 // cfg 由调用方加载并应用 CLI 覆盖后传入，本函数不再重复加载
 func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
+		if warning, ok := ev.(llm.WarningEvent); ok {
+			_, err := fmt.Fprintf(stderr, "[warning] %s\n", warning.Message)
+			return err
+		}
 		if update, ok := ev.(llm.MessageUpdateEvent); ok {
 			if text, ok := update.AssistantMessageEvent.(llm.AssistantMessageTextDeltaEvent); ok {
 				_, err := fmt.Fprint(stdout, text.Delta)
@@ -92,6 +96,9 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
+	for _, warning := range a.Warnings() {
+		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
+	}
 
 	// 3.开始交互模式
 	return runREPL(stdin, stdout, stderr, func(ctx context.Context, input string) error {
@@ -117,6 +124,9 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 		a = na
 		if msg := a.ModelFallbackMessage(); msg != "" {
 			fmt.Fprintf(stderr, "Rivo: %s\n", msg)
+		}
+		for _, warning := range a.Warnings() {
+			fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 		}
 		return nil
 	}, func() {
