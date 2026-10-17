@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // 大粘贴折叠阈值，与 Pi v1.0.0 editor.ts 保持一致
@@ -21,6 +22,8 @@ var pasteMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ cha
 
 // pasteTailMarkerRegexp 匹配紧贴文本末尾的完整标记，用于光标整删判断；捕获组 1 是 id
 var pasteTailMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]$`)
+
+var imageMarkerRegexp = regexp.MustCompile(`\[Image #(\d+)\]`)
 
 // handlePaste 处理一次终端粘贴：超阈值折叠为标记，否则原样插入
 func (m *Model) handlePaste(text string) {
@@ -44,6 +47,109 @@ func (m *Model) handlePaste(text string) {
 	m.clearSelection()
 	m.completion, m.completionHidden = 0, false
 	m.layout()
+}
+
+// handleImage 在编辑器中插入图片占位符，并把图片正文留在附件状态中
+func (m *Model) handleImage(image llm.ImageContent) {
+	if image.Data == "" || image.MIMEType == "" {
+		return
+	}
+	m.imageCounter++
+	if m.images == nil {
+		m.images = make(map[int]llm.ImageContent)
+	}
+	m.images[m.imageCounter] = image
+	m.editor.InsertString(imageMarker(m.imageCounter))
+	m.clearSelection()
+	m.completion, m.completionHidden = 0, false
+	m.layout()
+}
+
+func imageMarker(id int) string {
+	return "[Image #" + strconv.Itoa(id) + "]"
+}
+
+// buildUserMessage 展开文本粘贴标记，并按图片占位符位置组装用户消息
+func (m *Model) buildUserMessage() (llm.UserMessage, bool) {
+	value := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
+	if value == "" {
+		return llm.UserMessage{}, false
+	}
+	var content []llm.Content
+	last := 0
+	used := make(map[int]bool)
+	for _, match := range imageMarkerRegexp.FindAllStringSubmatchIndex(value, -1) {
+		if match[0] > last {
+			content = append(content, llm.TextContent{Text: value[last:match[0]]})
+		}
+		id, err := strconv.Atoi(value[match[2]:match[3]])
+		image, ok := m.images[id]
+		if err != nil || !ok || used[id] {
+			content = append(content, llm.TextContent{Text: value[match[0]:match[1]]})
+		} else {
+			content = append(content, image)
+			used[id] = true
+		}
+		last = match[1]
+	}
+	if last < len(value) {
+		content = append(content, llm.TextContent{Text: value[last:]})
+	}
+	if len(content) == 0 {
+		return llm.UserMessage{}, false
+	}
+	return llm.UserMessage{Content: content}, true
+}
+
+func messageHasImages(message llm.UserMessage) bool {
+	for _, content := range message.Content {
+		if _, ok := content.(llm.ImageContent); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) restoreHistoryImages(message llm.UserMessage) {
+	if !messageHasImages(message) {
+		return
+	}
+	if m.images == nil {
+		m.images = make(map[int]llm.ImageContent)
+	}
+	ids := imageMarkerRegexp.FindAllStringSubmatch(m.editor.Value(), -1)
+	index := 0
+	for _, content := range message.Content {
+		image, ok := content.(llm.ImageContent)
+		if !ok || index >= len(ids) {
+			continue
+		}
+		id, err := strconv.Atoi(ids[index][1])
+		if err != nil {
+			continue
+		}
+		m.images[id] = image
+		m.imageCounter = max(m.imageCounter, id)
+		index++
+	}
+}
+
+func (m *Model) editorTextForMessage(message llm.UserMessage) string {
+	var b strings.Builder
+	for _, content := range message.Content {
+		switch content := content.(type) {
+		case llm.TextContent:
+			b.WriteString(content.Text)
+		case llm.ImageContent:
+			m.imageCounter++
+			if m.images == nil {
+				m.images = make(map[int]llm.ImageContent)
+			}
+			m.images[m.imageCounter] = content
+			b.WriteString(imageMarker(m.imageCounter))
+		}
+	}
+	return b.String()
 }
 
 // pasteMarker 返回注册内容对应的折叠标记
@@ -93,10 +199,15 @@ func (m *Model) expandPasteMarkers(text string) string {
 func (m *Model) resetPastes() {
 	m.pastes = nil
 	m.pasteCounter = 0
+	m.images = nil
+	m.imageCounter = 0
 }
 
 // backspaceAtMarker 判断光标是否紧邻标记尾部；是则整块删除标记并移除注册项
 func (m *Model) backspaceAtMarker() bool {
+	if m.backspaceAtImageMarker() {
+		return true
+	}
 	lineIndex := m.editor.Line()
 	lines := strings.Split(m.editor.Value(), "\n")
 	if lineIndex < 0 || lineIndex >= len(lines) {
@@ -128,6 +239,37 @@ func (m *Model) backspaceAtMarker() bool {
 		_ = cmd
 	}
 	delete(m.pastes, id)
+	return true
+}
+
+func (m *Model) backspaceAtImageMarker() bool {
+	lineIndex := m.editor.Line()
+	lines := strings.Split(m.editor.Value(), "\n")
+	if lineIndex < 0 || lineIndex >= len(lines) {
+		return false
+	}
+	info := m.editor.LineInfo()
+	runes := []rune(lines[lineIndex])
+	start := min(max(0, info.StartColumn), len(runes))
+	col := min(start+runeOffsetAtWidth(runes[start:], info.CharOffset), len(runes))
+	prefix := string(runes[:col])
+	loc := imageMarkerRegexp.FindStringSubmatchIndex(prefix)
+	if loc == nil || loc[1] != len(prefix) {
+		return false
+	}
+	id, err := strconv.Atoi(prefix[loc[2]:loc[3]])
+	if err != nil {
+		return false
+	}
+	if _, ok := m.images[id]; !ok {
+		return false
+	}
+	for i := 0; i < len([]rune(prefix[loc[0]:loc[1]])); i++ {
+		var cmd tea.Cmd
+		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		_ = cmd
+	}
+	delete(m.images, id)
 	return true
 }
 

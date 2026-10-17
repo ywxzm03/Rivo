@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -26,8 +27,9 @@ const (
 )
 
 type OperationRequest struct {
-	Kind  OperationKind
-	Value string
+	Kind    OperationKind
+	Value   string
+	Message *llm.UserMessage
 }
 
 type OperationResult struct {
@@ -39,6 +41,7 @@ type OperationResult struct {
 	// the selected user message without persisting a branch marker.
 	EditorText    string
 	RestoreEditor bool
+	EditorMessage *llm.UserMessage
 	Err           error
 }
 
@@ -59,12 +62,17 @@ var ErrSteeringUnavailable = errors.New("app: steering is unavailable")
 
 // EnqueueSteering 接受运行中的一条 steering；压缩或操作收尾期间拒绝输入
 func (a *App) EnqueueSteering(input string) error {
+	return a.EnqueueSteeringMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// EnqueueSteeringMessage 接受运行中的结构化用户输入
+func (a *App) EnqueueSteeringMessage(input llm.UserMessage) error {
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
 	if a.active == nil || a.active.kind != OperationRun || a.active.closing {
 		return ErrSteeringUnavailable
 	}
-	return a.coordinator.EnqueueSteering(input)
+	return a.coordinator.EnqueueSteeringMessage(input)
 }
 
 // Start 接受后立即执行操作，一个 App 同时只接受一个会话修改，不隐式排队
@@ -141,7 +149,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		}
 		result.Replayed = true
 		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.pendingRecovery {
-			resume := previous != nil && *previous == request && request.Kind == OperationRun
+			resume := previous != nil && equalOperationRequest(*previous, request) && request.Kind == OperationRun
 			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
 			if result.Err != nil || resume {
 				if resume {
@@ -151,7 +159,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			}
 		}
 		a.coordinator.resetRecovery()
-		if previous != nil && *previous == request {
+		if previous != nil && equalOperationRequest(*previous, request) {
 			if request.Kind != OperationRun {
 				return result
 			}
@@ -196,7 +204,15 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	// 2.执行本次操作，运行中的核心只通过请求快照与提交边界读取宿主状态
 	switch request.Kind {
 	case OperationRun:
-		result.Reply, result.Err = a.coordinator.Run(ctx, request.Value)
+		if request.Message != nil && userMessageHasImages(*request.Message) && !a.CurrentModel().SupportsImages {
+			result.Err = errors.New("app: current model does not support image input")
+			return result
+		}
+		if request.Message != nil {
+			result.Reply, result.Err = a.coordinator.RunMessage(ctx, *request.Message)
+		} else {
+			result.Reply, result.Err = a.coordinator.Run(ctx, request.Value)
+		}
 		result = a.continueQueuedSteering(ctx, result)
 	case OperationCompact:
 		result.Err = a.coordinator.Compact(ctx, request.Value)
@@ -214,7 +230,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	case OperationReload:
 		a.Reload()
 	case OperationTree:
-		result.EditorText, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
+		result.EditorText, result.EditorMessage, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
 	case OperationClear:
 		result.Err = a.clearSession()
 	case OperationDelete:
@@ -224,6 +240,19 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		result.Err = errors.New("app: unknown operation")
 	}
 	return result
+}
+
+func userMessageHasImages(message llm.UserMessage) bool {
+	for _, content := range message.Content {
+		if _, ok := content.(llm.ImageContent); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func equalOperationRequest(left, right OperationRequest) bool {
+	return reflect.DeepEqual(left, right)
 }
 
 // continueQueuedSteering 在释放操作所有权前消费已接受的 steering，并关闭收尾窗口
@@ -250,12 +279,16 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 func (a *App) acknowledgePendingSteering(messages []llm.Message) {
 	for _, message := range messages {
 		user, ok := message.(llm.UserMessage)
-		if !ok || len(user.Content) != 1 {
+		if !ok {
 			continue
 		}
-		text, ok := user.Content[0].(llm.TextContent)
-		if ok {
-			a.agent.AcknowledgeSteering(text.Text)
+		if a.agent.AcknowledgeSteeringMessage(user) {
+			continue
+		}
+		if len(user.Content) == 1 {
+			if text, ok := user.Content[0].(llm.TextContent); ok {
+				a.agent.AcknowledgeSteering(text.Text)
+			}
 		}
 	}
 }
@@ -272,19 +305,19 @@ func (a *App) clearSession() error {
 // rewindTree moves the in-memory leaf to the selected user parent and restores
 // the model settings projected by that branch. Any setup failure rolls the leaf
 // back so a failed UI operation cannot leave the app on a partial branch.
-func (a *App) rewindTree(entryID string) (string, bool, error) {
+func (a *App) rewindTree(entryID string) (string, *llm.UserMessage, bool, error) {
 	previousLeaf := a.session.LeafID()
 	rewound, err := a.session.RewindUser(entryID)
 	if err != nil {
-		return "", false, err
+		return "", nil, false, err
 	}
 	if err := a.restoreBranchSettings(); err != nil {
 		if rollbackErr := a.restoreLeaf(previousLeaf); rollbackErr != nil {
-			return "", false, errors.Join(err, rollbackErr)
+			return "", nil, false, errors.Join(err, rollbackErr)
 		}
-		return "", false, err
+		return "", nil, false, err
 	}
-	return rewound.Text, true, nil
+	return rewound.Text, rewound.Message, true, nil
 }
 
 func (a *App) restoreLeaf(leafID string) error {

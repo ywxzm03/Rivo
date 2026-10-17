@@ -196,6 +196,9 @@ func sniffImage(data []byte) string {
 	return ""
 }
 
+// SniffImage 暴露图片魔数识别，供剪贴板文件附件复用
+func SniffImage(data []byte) string { return sniffImage(data) }
+
 type imageResult struct {
 	Data           string
 	MIMEType       string
@@ -204,6 +207,32 @@ type imageResult struct {
 	OriginalHeight int
 	Width          int
 	Height         int
+}
+
+// ImageData 是经过统一尺寸和体积限制处理后的内联图片
+type ImageData struct {
+	Data           string
+	MIMEType       string
+	OriginalWidth  int
+	OriginalHeight int
+	Width          int
+	Height         int
+}
+
+// ProcessImage 供用户输入等非 read 工具路径复用图片处理规则
+func ProcessImage(data []byte, mimeType string) (ImageData, error) {
+	result, err := processImage(data, mimeType, defaultImageLimits)
+	if err != nil {
+		return ImageData{}, err
+	}
+	return ImageData{
+		Data:           result.Data,
+		MIMEType:       result.MIMEType,
+		OriginalWidth:  result.OriginalWidth,
+		OriginalHeight: result.OriginalHeight,
+		Width:          result.Width,
+		Height:         result.Height,
+	}, nil
 }
 
 // decodeImage 按格式解码，JPEG 顺带应用 EXIF 方向

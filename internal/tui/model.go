@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // ModelOption 是可供选择的模型及核心已解析的思考等级，不含凭据
@@ -20,6 +22,7 @@ type ModelOption struct {
 	ID, Provider, Name string
 	ContextWindow      int
 	Levels             []string
+	SupportsImages     bool
 }
 
 func (m ModelOption) Key() string { return m.Provider + "/" + m.ID }
@@ -99,6 +102,16 @@ type Message struct {
 	ToolGroup                *ToolGroupView
 	Divider                  *TurnDividerView
 	Skill                    *SkillInvocationView
+	Images                   []ImageView
+}
+
+// ImageView 是消息投影中的图片元数据，不包含图片正文
+type ImageView struct {
+	MIMEType       string
+	OriginalWidth  int
+	OriginalHeight int
+	Width          int
+	Height         int
 }
 
 // Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
@@ -106,13 +119,20 @@ type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
 	SessionName                                      string
 	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
-	CurrentModel ModelOption
-	Models       []ModelOption
-	Sessions     []SessionOption
-	Tree         []TreeNode
-	Messages     []Message
-	Skills       []SkillOption
-	Steering     []string
+	CurrentModel   ModelOption
+	Models         []ModelOption
+	Sessions       []SessionOption
+	Tree           []TreeNode
+	Messages       []Message
+	Skills         []SkillOption
+	Steering       []string
+	SteeringInputs []llm.UserMessage
+}
+
+// ClipboardData 是系统剪贴板的一次读取结果
+type ClipboardData struct {
+	Text   string
+	Images []llm.ImageContent
 }
 
 // Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload/clear/delete
@@ -120,6 +140,7 @@ type Request struct {
 	Kind, Value string
 	AfterID     string
 	ID          uint64
+	Message     *llm.UserMessage
 }
 
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
@@ -127,11 +148,14 @@ type Handlers struct {
 	Request func(Request) tea.Cmd
 	Cancel  func()
 	// EnqueueSteering 同步接受一条 steering，避免撤回与异步入队竞态
-	EnqueueSteering func(string) error
+	EnqueueSteering        func(string) error
+	EnqueueSteeringMessage func(llm.UserMessage) error
 	// RestoreSteering 原子取出后台尚未消费的 steering，供撤回到编辑器
-	RestoreSteering func() []string
-	ReadClipboard   func() (string, error)
-	WriteClipboard  func(string) error
+	RestoreSteering         func() []string
+	RestoreSteeringMessages func() []llm.UserMessage
+	ReadClipboard           func() (string, error)
+	ReadClipboardData       func() (ClipboardData, error)
+	WriteClipboard          func(string) error
 }
 
 // MessageMsg 更新具有同一 ID 的消息；OperationDoneMsg 才结束整个用户操作
@@ -143,11 +167,15 @@ type MessageCommittedMsg struct {
 
 type StatusMsg string
 type SteeringResultMsg struct {
-	ID    uint64
-	Value string
-	Err   error
+	ID      uint64
+	Value   string
+	Message *llm.UserMessage
+	Err     error
 }
-type SteeringStateMsg struct{ Messages []string }
+type SteeringStateMsg struct {
+	Messages []string
+	Inputs   []llm.UserMessage
+}
 type MessageTail struct {
 	AfterID  string
 	Messages []Message
@@ -162,6 +190,7 @@ type OperationDoneMsg struct {
 	Err             error
 	Notice          string
 	EditorValue     string
+	EditorMessage   *llm.UserMessage
 	RestoreEditor   bool
 	ResetSessionUI  bool
 	ResetTranscript bool
@@ -170,6 +199,7 @@ type OperationDoneMsg struct {
 type flushMsg struct{}
 
 type clipboardReadMsg struct {
+	data ClipboardData
 	text string
 	err  error
 }
@@ -203,8 +233,10 @@ type Model struct {
 	completion       int
 	completionHidden bool
 	history          []string
+	historyMessages  []llm.UserMessage
 	historyPos       int
 	draft            string
+	draftMessage     *llm.UserMessage
 	busy, closing    bool
 	steeringRestored bool
 	canceling        bool
@@ -230,6 +262,8 @@ type Model struct {
 	copyNotice       bool
 	pastes           map[int]string
 	pasteCounter     int
+	images           map[int]llm.ImageContent
+	imageCounter     int
 	cursorRow        atomic.Int64
 	cursorColumn     atomic.Int64
 }
@@ -253,7 +287,7 @@ func New(state Snapshot, handlers Handlers) *Model {
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
 	m := &Model{handlers: handlers, editor: ed, viewport: viewport.New(0, 0),
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), markdownPreview: make(map[string]string), clock: time.Now}
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), markdownPreview: make(map[string]string), images: make(map[int]llm.ImageContent), clock: time.Now}
 	m.applySnapshot(state)
 	return m
 }
@@ -327,6 +361,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.busy {
 			m.steeringRestored = false
 			m.state.Steering = append(m.state.Steering, msg.Value)
+			if msg.Message != nil {
+				m.state.SteeringInputs = append(m.state.SteeringInputs, cloneUserMessage(*msg.Message))
+			}
 			if !m.canceling && !m.compacting {
 				m.status = "Working"
 			}
@@ -335,6 +372,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SteeringStateMsg:
 		m.steeringRestored = false
 		m.state.Steering = append([]string(nil), msg.Messages...)
+		m.state.SteeringInputs = cloneUserMessages(msg.Inputs)
 		m.layout()
 	case OperationDoneMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
@@ -375,6 +413,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.RestoreEditor {
 			m.editor.SetValue(msg.EditorValue)
 			m.editor.CursorEnd()
+			m.resetPastes()
+			if msg.EditorMessage != nil {
+				m.restoreHistoryImages(*msg.EditorMessage)
+			}
 			m.completion, m.completionHidden = 0, true
 		}
 		if msg.Err != nil {
@@ -392,8 +434,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case clipboardReadMsg:
-		if msg.err == nil && msg.text != "" {
-			m.handlePaste(msg.text)
+		if msg.err != nil {
+			m.notice("Clipboard paste failed: " + msg.err.Error())
+		} else {
+			for _, image := range msg.data.Images {
+				m.handleImage(image)
+			}
+			text := msg.data.Text
+			if text == "" {
+				text = msg.text
+			}
+			if len(msg.data.Images) == 0 && text != "" {
+				m.handlePaste(text)
+			}
 		}
 	case clipboardWriteMsg:
 		if msg.err != nil {
@@ -455,6 +508,7 @@ func (m *Model) applySnapshot(s Snapshot) {
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Steering = append([]string(nil), s.Steering...)
+	m.state.SteeringInputs = cloneUserMessages(s.SteeringInputs)
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}
@@ -485,6 +539,10 @@ func (m *Model) currentModel() ModelOption {
 
 // dispatch 先锁定 UI 操作状态，再让适配器异步执行
 func (m *Model) dispatch(kind, value string) tea.Cmd {
+	return m.dispatchMessage(kind, value, nil)
+}
+
+func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) tea.Cmd {
 	if m.busy {
 		if kind == "tree" {
 			m.notice("Wait for the current operation to finish before changing the tree.")
@@ -503,12 +561,34 @@ func (m *Model) dispatch(kind, value string) tea.Cmd {
 		m.compacting = true
 	}
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value}))
+	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
 }
 
 // dispatchSteering 把运行中的普通输入交给当前操作，不改变操作 ID 或 busy 状态
 func (m *Model) dispatchSteering(value string) tea.Cmd {
+	return m.dispatchSteeringMessage(value, nil)
+}
+
+func (m *Model) dispatchSteeringMessage(value string, message *llm.UserMessage) tea.Cmd {
 	if !m.busy {
+		return nil
+	}
+	if message != nil && m.handlers.EnqueueSteeringMessage != nil {
+		if err := m.handlers.EnqueueSteeringMessage(*message); err != nil {
+			m.editor.SetValue(value)
+			m.editor.CursorEnd()
+			m.completion, m.completionHidden = 0, true
+			m.notice("Error: " + err.Error())
+			m.layout()
+			return nil
+		}
+		m.steeringRestored = false
+		m.state.Steering = append(m.state.Steering, value)
+		m.state.SteeringInputs = append(m.state.SteeringInputs, *message)
+		if !m.canceling && !m.compacting {
+			m.status = "Working"
+		}
+		m.layout()
 		return nil
 	}
 	if m.handlers.EnqueueSteering != nil {
@@ -531,11 +611,41 @@ func (m *Model) dispatchSteering(value string) tea.Cmd {
 	if m.handlers.Request == nil {
 		return nil
 	}
-	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "steer", Value: value})
+	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "steer", Value: value, Message: message})
 }
 
 // restoreQueuedSteering 按 PI 的顺序把 steering 放回编辑器，并原子清空后台队列
 func (m *Model) restoreQueuedSteering() int {
+	if m.handlers.RestoreSteeringMessages != nil || len(m.state.SteeringInputs) > 0 {
+		var queued []llm.UserMessage
+		if m.handlers.RestoreSteeringMessages != nil {
+			queued = m.handlers.RestoreSteeringMessages()
+		} else {
+			queued = cloneUserMessages(m.state.SteeringInputs)
+		}
+		m.state.Steering = nil
+		m.state.SteeringInputs = nil
+		if len(queued) == 0 {
+			m.layout()
+			return 0
+		}
+		m.steeringRestored = true
+		m.resetPastes()
+		var parts []string
+		for _, message := range queued {
+			parts = append(parts, m.editorTextForMessage(message))
+		}
+		queuedText := strings.Join(parts, "\n\n")
+		current := m.editor.Value()
+		if strings.TrimSpace(current) != "" {
+			queuedText += "\n\n" + current
+		}
+		m.editor.SetValue(queuedText)
+		m.editor.CursorEnd()
+		m.completion, m.completionHidden = 0, true
+		m.layout()
+		return len(queued)
+	}
 	var queued []string
 	if m.handlers.RestoreSteering != nil {
 		queued = m.handlers.RestoreSteering()
@@ -570,7 +680,8 @@ func (m *Model) notice(value string) {
 func (m *Model) resetSessionUI() {
 	m.editor.Reset()
 	m.resetPastes()
-	m.history, m.draft = nil, ""
+	m.history, m.draft, m.draftMessage = nil, "", nil
+	m.historyMessages = nil
 	m.historyPos, m.completion = 0, 0
 	m.completionHidden = true
 	m.selector = nil
@@ -598,7 +709,7 @@ func (m *Model) refreshTranscript() {
 		if m.busy && message.ToolGroup != nil {
 			_, _, animate = groupState(message.ToolGroup)
 		}
-		if animate || cached.revision != message.Revision || cached.message != message || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
+		if animate || cached.revision != message.Revision || !reflect.DeepEqual(cached.message, message) || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
 			cached = cachedMessage{message: message, revision: message.Revision, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
 			m.cache[message.ID] = cached
 		}
@@ -629,6 +740,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Skills = append([]SkillOption(nil), s.Skills...)
 	m.state.Steering = append([]string(nil), s.Steering...)
+	m.state.SteeringInputs = cloneUserMessages(s.SteeringInputs)
 	m.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
@@ -640,6 +752,22 @@ func (m *Model) lastMessageID() string {
 		return m.state.Messages[len(m.state.Messages)-1].ID
 	}
 	return ""
+}
+
+func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
+	message.Content = append([]llm.Content(nil), message.Content...)
+	return message
+}
+
+func cloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]llm.UserMessage, len(messages))
+	for i, message := range messages {
+		out[i] = cloneUserMessage(message)
+	}
+	return out
 }
 
 // replaceTail 只替换当前操作产生的尾部，旧历史的身份与缓存保持不变

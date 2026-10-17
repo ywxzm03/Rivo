@@ -191,7 +191,18 @@ func (m *Model) renderMessage(message Message) string {
 			return strings.Join(parts, "\n\n")
 		}
 		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
-		body := ansi.Strip(m.markdown.render(message.Text, "user", width))
+		bodyText := message.Text
+		for _, image := range message.Images {
+			label := "[image]"
+			if image.MIMEType != "" {
+				label = "[image: " + image.MIMEType + "]"
+			}
+			if bodyText != "" {
+				bodyText += "\n"
+			}
+			bodyText += label
+		}
+		body := ansi.Strip(m.markdown.render(bodyText, "user", width))
 		lines := strings.Split(body, "\n")
 		prefixStyle := lipgloss.NewStyle().Background(lipgloss.Color(userBg)).Foreground(lipgloss.Color(mutedColor))
 		textStyle := lipgloss.NewStyle().Background(lipgloss.Color(userBg)).Foreground(lipgloss.Color(textColor))

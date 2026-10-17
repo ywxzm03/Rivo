@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestPasteFoldLargePaste(t *testing.T) {
@@ -17,6 +18,64 @@ func TestPasteFoldLargePaste(t *testing.T) {
 	}
 	if stored := m.pastes[1]; stored != body {
 		t.Fatalf("paste content not stored verbatim: %d runes vs %d", len([]rune(stored)), len([]rune(body)))
+	}
+}
+
+func TestClipboardImagePasteBuildsStructuredUserMessage(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	var request Request
+	m.handlers = Handlers{Request: func(value Request) tea.Cmd {
+		request = value
+		return nil
+	}}
+	typeText(m, "describe ")
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	if request.Message == nil {
+		t.Fatal("image submission did not build a structured message")
+	}
+	if len(request.Message.Content) != 2 {
+		t.Fatalf("content = %#v, want text and image", request.Message.Content)
+	}
+	if text, ok := request.Message.Content[0].(llm.TextContent); !ok || text.Text != "describe " {
+		t.Fatalf("content[0] = %#v, want text", request.Message.Content[0])
+	}
+	if image, ok := request.Message.Content[1].(llm.ImageContent); !ok || image.MIMEType != "image/png" {
+		t.Fatalf("content[1] = %#v, want image", request.Message.Content[1])
+	}
+}
+
+func TestImageOnlyPasteIsVisibleAndRequiresVisionModel(t *testing.T) {
+	m := testModel(80, 24)
+	called := false
+	m.handlers = Handlers{Request: func(Request) tea.Cmd {
+		called = true
+		return nil
+	}}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	if !strings.Contains(m.editor.Value(), "[Image #1]") {
+		t.Fatalf("image placeholder missing: %q", m.editor.Value())
+	}
+	press(m, tea.KeyEnter)
+	if called {
+		t.Fatal("non-vision model accepted image input")
+	}
+	if m.editor.Value() != "[Image #1]" {
+		t.Fatalf("rejected image draft was cleared: %q", m.editor.Value())
+	}
+}
+
+func TestImageHistoryRestoresAttachment(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	m.busy = false
+	press(m, tea.KeyUp)
+	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
+		t.Fatalf("history did not restore image draft: value=%q images=%d", m.editor.Value(), len(m.images))
 	}
 }
 

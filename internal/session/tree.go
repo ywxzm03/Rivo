@@ -29,6 +29,7 @@ type RewindResult struct {
 	UserID         string
 	ParentID       string
 	Text           string
+	Message        *llm.UserMessage
 }
 
 // LeafID 返回当前内存叶子。未提交或空会话返回空串。
@@ -87,6 +88,11 @@ func (m *SessionManager) RewindUser(entryID string) (RewindResult, error) {
 		UserID:         entryID,
 		ParentID:       parentID,
 		Text:           treeMessageText(message.Message),
+	}
+	if user, ok := message.Message.(llm.UserMessage); ok {
+		copy := user
+		copy.Content = append([]llm.Content(nil), user.Content...)
+		result.Message = &copy
 	}
 	m.leafID = parentID
 	return result, nil

@@ -255,6 +255,12 @@ func (m *Model) browseHistory(direction int) {
 	}
 	if m.historyPos == len(m.history) {
 		m.draft = m.editor.Value()
+		if message, ok := m.buildUserMessage(); ok {
+			copy := cloneUserMessage(message)
+			m.draftMessage = &copy
+		} else {
+			m.draftMessage = nil
+		}
 	}
 	m.historyPos = max(0, min(len(m.history), m.historyPos+direction))
 	value := m.draft
@@ -264,6 +270,11 @@ func (m *Model) browseHistory(direction int) {
 	m.editor.SetValue(value)
 	m.editor.CursorEnd()
 	m.resetPastes()
+	if m.historyPos < len(m.historyMessages) {
+		m.restoreHistoryImages(m.historyMessages[m.historyPos])
+	} else if m.draftMessage != nil {
+		m.restoreHistoryImages(*m.draftMessage)
+	}
 	m.completionHidden = true
 	m.layout()
 }
@@ -271,6 +282,19 @@ func (m *Model) browseHistory(direction int) {
 func (m *Model) submit() tea.Cmd {
 	input := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if input == "" {
+		return nil
+	}
+	message, hasMessage := m.buildUserMessage()
+	hasImages := messageHasImages(message)
+	if !hasMessage {
+		return nil
+	}
+	if hasImages && !m.currentModel().SupportsImages {
+		m.notice("The current model does not support image input.")
+		return nil
+	}
+	if hasImages && strings.HasPrefix(input, "/") {
+		m.notice("Commands cannot include image attachments.")
 		return nil
 	}
 	if m.busy && input != "/exit" {
@@ -294,23 +318,33 @@ func (m *Model) submit() tea.Cmd {
 			return nil
 		}
 		m.history = append(m.history, input)
+		m.historyMessages = append(m.historyMessages, message)
 		m.historyPos = len(m.history)
 		m.draft = ""
+		m.draftMessage = nil
 		m.editor.Reset()
 		m.resetPastes()
 		m.completionHidden = true
 		m.layout()
+		if hasImages {
+			return m.dispatchSteeringMessage(input, &message)
+		}
 		return m.dispatchSteering(input)
 	}
 	m.history = append(m.history, input)
+	m.historyMessages = append(m.historyMessages, message)
 	m.historyPos = len(m.history)
 	m.draft = ""
+	m.draftMessage = nil
 	m.editor.Reset()
 	m.resetPastes()
 	m.completionHidden = true
 	m.layout()
 	if !strings.HasPrefix(input, "/") {
 		m.viewport.GotoBottom()
+		if hasImages {
+			return m.dispatchMessage("run", input, &message)
+		}
 		return m.dispatch("run", input)
 	}
 	name, arg := input, ""
