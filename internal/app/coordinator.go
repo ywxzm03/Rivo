@@ -96,6 +96,9 @@ func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 	if runner, ok := c.Agent.(interface{ SteerMessage(llm.UserMessage) error }); ok {
 		return runner.SteerMessage(input)
 	}
+	if userMessageHasImages(input) {
+		return errors.New("app: runner does not support structured image steering")
+	}
 	return c.Agent.Steer(userMessageText(input))
 }
 
@@ -207,6 +210,9 @@ func (c *Coordinator) RunMessage(ctx context.Context, input llm.UserMessage) (*l
 	}); ok {
 		reply, runErr := runner.RunMessage(ctx, input)
 		return c.finishRun(ctx, reply, runErr)
+	}
+	if userMessageHasImages(input) {
+		return nil, errors.New("app: runner does not support structured image input")
 	}
 	reply, runErr := c.Agent.Run(ctx, userMessageText(input))
 	return c.finishRun(ctx, reply, runErr)

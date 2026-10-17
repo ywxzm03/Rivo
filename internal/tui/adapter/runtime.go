@@ -68,6 +68,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Unlock()
 	if req.Kind == "steer" {
 		var err error
+		var revision uint64
 		if activeApp == nil {
 			err = app.ErrSteeringUnavailable
 		} else {
@@ -76,9 +77,12 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			} else {
 				err = activeApp.EnqueueSteering(req.Value)
 			}
+			if err == nil {
+				revision = activeApp.SteeringRevision()
+			}
 		}
 		return func() tea.Msg {
-			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Err: err}
+			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
 		}
 	}
 	value := req.Value
@@ -406,7 +410,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 		notifications = append(notifications, tui.StatusMsg(status))
 	}
 	if steeringChanged && r.app != nil {
-		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages(), Inputs: r.app.SteeringUserMessages()})
+		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages(), Inputs: r.app.SteeringUserMessages(), Revision: r.app.SteeringRevision()})
 	}
 	send := r.send
 	r.mu.Unlock()
@@ -595,7 +599,7 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	steering := r.app.SteeringMessages()
 	steeringInputs := r.app.SteeringUserMessages()
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影

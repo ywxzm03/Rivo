@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -22,12 +23,21 @@ import (
 const maxClipboardImageBytes = 32 * 1024 * 1024
 
 var clipboardInit struct {
-	sync.Once
-	err error
+	sync.Mutex
+	initialized bool
+	err         error
 }
 
 func initSystemClipboard() error {
-	clipboardInit.Do(func() { clipboardInit.err = systemclipboard.Init() })
+	clipboardInit.Lock()
+	defer clipboardInit.Unlock()
+	if clipboardInit.initialized {
+		return clipboardInit.err
+	}
+	clipboardInit.err = systemclipboard.Init()
+	if clipboardInit.err == nil {
+		clipboardInit.initialized = true
+	}
 	return clipboardInit.err
 }
 
@@ -35,6 +45,7 @@ func initSystemClipboard() error {
 func readClipboardData() (tui.ClipboardData, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var clipboardErr error
 	if err := initSystemClipboard(); err == nil {
 		if data, ok := readClipboardFiles(ctx); ok {
 			return clipboardImages(data)
@@ -46,12 +57,16 @@ func readClipboardData() (tui.ClipboardData, error) {
 			}
 			return clipboardImages([]llm.ImageContent{image})
 		} else if err != nil && !errors.Is(err, systemclipboard.ErrNoData) && !errors.Is(err, systemclipboard.ErrUnsupported) && !errors.Is(err, systemclipboard.ErrUnavailable) {
-			return tui.ClipboardData{}, err
+			clipboardErr = err
 		}
-	} else if png, ok := readWSLClipboardImage(ctx); ok {
+	}
+	if png, ok := readWSLClipboardImage(ctx); ok {
 		if image, err := processClipboardImage(png, "image/png"); err == nil {
 			return clipboardImages([]llm.ImageContent{image})
 		}
+	}
+	if clipboardErr != nil {
+		return tui.ClipboardData{}, clipboardErr
 	}
 	text, err := textclipboard.ReadAll()
 	if err != nil {
@@ -78,8 +93,8 @@ func readClipboardFiles(ctx context.Context) ([]llm.ImageContent, bool) {
 	}
 	var images []llm.ImageContent
 	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
+		data, ok := readClipboardFile(path)
+		if !ok {
 			continue
 		}
 		mimeType := tool.SniffImage(data)
@@ -92,6 +107,26 @@ func readClipboardFiles(ctx context.Context) ([]llm.ImageContent, bool) {
 		}
 	}
 	return images, len(images) > 0
+}
+
+func readClipboardFile(path string) ([]byte, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxClipboardImageBytes {
+		return nil, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxClipboardImageBytes+1))
+	if err != nil {
+		return nil, false
+	}
+	if int64(len(data)) > maxClipboardImageBytes {
+		return nil, false
+	}
+	return data, true
 }
 
 func processClipboardImage(data []byte, mimeType string) (llm.ImageContent, error) {

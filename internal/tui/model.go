@@ -120,14 +120,15 @@ type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
 	SessionName                                      string
 	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
-	CurrentModel   ModelOption
-	Models         []ModelOption
-	Sessions       []SessionOption
-	Tree           []TreeNode
-	Messages       []Message
-	Skills         []SkillOption
-	Steering       []string
-	SteeringInputs []llm.UserMessage
+	CurrentModel     ModelOption
+	Models           []ModelOption
+	Sessions         []SessionOption
+	Tree             []TreeNode
+	Messages         []Message
+	Skills           []SkillOption
+	Steering         []string
+	SteeringInputs   []llm.UserMessage
+	SteeringRevision uint64
 }
 
 // ClipboardData 是系统剪贴板的一次读取结果
@@ -169,14 +170,16 @@ type MessageCommittedMsg struct {
 
 type StatusMsg string
 type SteeringResultMsg struct {
-	ID      uint64
-	Value   string
-	Message *llm.UserMessage
-	Err     error
+	ID       uint64
+	Value    string
+	Message  *llm.UserMessage
+	Revision uint64
+	Err      error
 }
 type SteeringStateMsg struct {
 	Messages []string
 	Inputs   []llm.UserMessage
+	Revision uint64
 }
 type MessageTail struct {
 	AfterID  string
@@ -202,7 +205,6 @@ type flushMsg struct{}
 
 type clipboardReadMsg struct {
 	data ClipboardData
-	text string
 	err  error
 }
 
@@ -213,7 +215,6 @@ type clearCopyNoticeMsg uint64
 type screenPoint struct{ x, y int }
 
 type cachedMessage struct {
-	message  Message
 	revision uint64
 	width    int
 	hidden   bool
@@ -249,6 +250,7 @@ type Model struct {
 	lastCtrlC        time.Time
 	flushPending     bool
 	cache            map[string]cachedMessage
+	steeringRevision uint64
 	markdownPreview  map[string]string
 	markdown         markdownRenderer
 	clock            func() time.Time
@@ -354,7 +356,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Err != nil {
-			if strings.TrimSpace(m.editor.Value()) == "" {
+			if msg.Message != nil && strings.TrimSpace(m.editor.Value()) == "" {
+				m.restoreEditorMessage(msg.Message, msg.Value)
+			} else if strings.TrimSpace(m.editor.Value()) == "" {
 				m.editor.SetValue(msg.Value)
 				m.editor.CursorEnd()
 			}
@@ -362,9 +366,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice("Error: " + msg.Err.Error())
 		} else if m.busy {
 			m.steeringRestored = false
-			m.state.Steering = append(m.state.Steering, msg.Value)
-			if msg.Message != nil {
-				m.state.SteeringInputs = append(m.state.SteeringInputs, cloneUserMessage(*msg.Message))
+			if msg.Revision == 0 || msg.Revision > m.steeringRevision {
+				if msg.Revision > m.steeringRevision {
+					m.steeringRevision = msg.Revision
+				}
+				message := msg.Message
+				if message == nil {
+					value := textUserMessage(msg.Value)
+					message = &value
+				}
+				m.appendSteeringState(msg.Value, message, true)
 			}
 			if !m.canceling && !m.compacting {
 				m.status = "Working"
@@ -372,9 +383,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 	case SteeringStateMsg:
+		if msg.Revision == 0 && m.steeringRevision > 0 {
+			return m, nil
+		}
+		if msg.Revision < m.steeringRevision {
+			return m, nil
+		}
 		m.steeringRestored = false
-		m.state.Steering = append([]string(nil), msg.Messages...)
-		m.state.SteeringInputs = cloneUserMessages(msg.Inputs)
+		m.steeringRevision = msg.Revision
+		m.setSteeringState(msg.Messages, msg.Inputs)
 		m.layout()
 	case OperationDoneMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
@@ -395,6 +412,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyMetadata(*msg.Snapshot)
 				if preserveSteering {
 					m.state.Steering = nil
+					m.state.SteeringInputs = nil
 				}
 			} else {
 				m.applySnapshot(*msg.Snapshot)
@@ -413,12 +431,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.upsertMessage(change)
 		}
 		if msg.RestoreEditor {
-			m.editor.SetValue(msg.EditorValue)
-			m.editor.CursorEnd()
 			m.resetPastes()
+			editorValue := msg.EditorValue
 			if msg.EditorMessage != nil {
-				m.restoreHistoryImages(*msg.EditorMessage)
+				editorValue = m.editorTextForMessage(*msg.EditorMessage)
 			}
+			m.editor.SetValue(editorValue)
+			m.editor.CursorEnd()
 			m.completion, m.completionHidden = 0, true
 		}
 		if msg.Err != nil {
@@ -443,9 +462,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.handleImage(image)
 			}
 			text := msg.data.Text
-			if text == "" {
-				text = msg.text
-			}
 			if len(msg.data.Images) == 0 && text != "" {
 				m.handlePaste(text)
 			}
@@ -509,8 +525,6 @@ func (m *Model) applySnapshot(s Snapshot) {
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
-	m.state.Steering = append([]string(nil), s.Steering...)
-	m.state.SteeringInputs = cloneUserMessages(s.SteeringInputs)
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}
@@ -568,7 +582,8 @@ func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) te
 
 // dispatchSteering 把运行中的普通输入交给当前操作，不改变操作 ID 或 busy 状态
 func (m *Model) dispatchSteering(value string) tea.Cmd {
-	return m.dispatchSteeringMessage(value, nil)
+	message := textUserMessage(value)
+	return m.dispatchSteeringMessage(value, &message)
 }
 
 func (m *Model) dispatchSteeringMessage(value string, message *llm.UserMessage) tea.Cmd {
@@ -577,16 +592,15 @@ func (m *Model) dispatchSteeringMessage(value string, message *llm.UserMessage) 
 	}
 	if message != nil && m.handlers.EnqueueSteeringMessage != nil {
 		if err := m.handlers.EnqueueSteeringMessage(*message); err != nil {
-			m.editor.SetValue(value)
-			m.editor.CursorEnd()
+			m.restoreEditorMessage(message, value)
 			m.completion, m.completionHidden = 0, true
 			m.notice("Error: " + err.Error())
 			m.layout()
 			return nil
 		}
 		m.steeringRestored = false
-		m.state.Steering = append(m.state.Steering, value)
-		m.state.SteeringInputs = append(m.state.SteeringInputs, *message)
+		m.steeringRevision++
+		m.appendSteeringState(value, message, false)
 		if !m.canceling && !m.compacting {
 			m.status = "Working"
 		}
@@ -594,16 +608,22 @@ func (m *Model) dispatchSteeringMessage(value string, message *llm.UserMessage) 
 		return nil
 	}
 	if m.handlers.EnqueueSteering != nil {
+		if message != nil && messageHasImages(*message) {
+			m.restoreEditorMessage(message, value)
+			m.notice("Structured image steering is unavailable.")
+			m.layout()
+			return nil
+		}
 		if err := m.handlers.EnqueueSteering(value); err != nil {
-			m.editor.SetValue(value)
-			m.editor.CursorEnd()
+			m.restoreEditorMessage(message, value)
 			m.completion, m.completionHidden = 0, true
 			m.notice("Error: " + err.Error())
 			m.layout()
 			return nil
 		}
 		m.steeringRestored = false
-		m.state.Steering = append(m.state.Steering, value)
+		m.steeringRevision++
+		m.appendSteeringState(value, message, false)
 		if !m.canceling && !m.compacting {
 			m.status = "Working"
 		}
@@ -616,29 +636,94 @@ func (m *Model) dispatchSteeringMessage(value string, message *llm.UserMessage) 
 	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "steer", Value: value, Message: message})
 }
 
+func textUserMessage(value string) llm.UserMessage {
+	return llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: value}}}
+}
+
+func (m *Model) appendSteeringState(value string, message *llm.UserMessage, deduplicate bool) {
+	if message == nil {
+		text := textUserMessage(value)
+		message = &text
+	}
+	if len(m.state.SteeringInputs) != len(m.state.Steering) {
+		m.state.SteeringInputs = make([]llm.UserMessage, len(m.state.Steering))
+		for i, existing := range m.state.Steering {
+			m.state.SteeringInputs[i] = textUserMessage(existing)
+		}
+	}
+	if deduplicate && len(m.state.Steering) > 0 {
+		last := len(m.state.Steering) - 1
+		if m.state.Steering[last] == value && reflect.DeepEqual(m.state.SteeringInputs[last], *message) {
+			return
+		}
+	}
+	m.state.Steering = append(m.state.Steering, value)
+	m.state.SteeringInputs = append(m.state.SteeringInputs, cloneUserMessage(*message))
+	m.state.SteeringRevision = m.steeringRevision
+}
+
+func (m *Model) setSteeringState(messages []string, inputs []llm.UserMessage) {
+	m.state.Steering = append([]string(nil), messages...)
+	if len(inputs) == len(messages) {
+		m.state.SteeringInputs = cloneUserMessages(inputs)
+		m.state.SteeringRevision = m.steeringRevision
+		return
+	}
+	m.state.SteeringInputs = make([]llm.UserMessage, len(messages))
+	for i, message := range messages {
+		m.state.SteeringInputs[i] = textUserMessage(message)
+	}
+	m.state.SteeringRevision = m.steeringRevision
+}
+
 // restoreQueuedSteering 按 PI 的顺序把 steering 放回编辑器，并原子清空后台队列
 func (m *Model) restoreQueuedSteering() int {
 	if m.handlers.RestoreSteeringMessages != nil || len(m.state.SteeringInputs) > 0 {
 		var queued []llm.UserMessage
+		backendQueue := m.handlers.RestoreSteeringMessages != nil || m.handlers.RestoreSteering != nil
 		if m.handlers.RestoreSteeringMessages != nil {
 			queued = m.handlers.RestoreSteeringMessages()
+		} else if m.handlers.RestoreSteering != nil {
+			for _, value := range m.handlers.RestoreSteering() {
+				queued = append(queued, textUserMessage(value))
+			}
 		} else {
 			queued = cloneUserMessages(m.state.SteeringInputs)
 		}
-		m.state.Steering = nil
-		m.state.SteeringInputs = nil
+		if len(queued) == 0 && !backendQueue {
+			if len(m.state.SteeringInputs) == len(m.state.Steering) && len(m.state.SteeringInputs) > 0 {
+				queued = cloneUserMessages(m.state.SteeringInputs)
+			} else if len(m.state.Steering) > 0 {
+				queued = make([]llm.UserMessage, len(m.state.Steering))
+				for i, value := range m.state.Steering {
+					queued[i] = textUserMessage(value)
+				}
+			}
+		}
 		if len(queued) == 0 {
 			m.layout()
 			return 0
 		}
+		m.state.Steering = nil
+		m.state.SteeringInputs = nil
+		m.steeringRevision++
+		m.state.SteeringRevision = m.steeringRevision
 		m.steeringRestored = true
+		current := m.editor.Value()
+		var currentMessage *llm.UserMessage
+		if message, ok := m.buildUserMessage(); ok {
+			copy := cloneUserMessage(message)
+			currentMessage = &copy
+		}
 		m.resetPastes()
 		var parts []string
 		for _, message := range queued {
 			parts = append(parts, m.editorTextForMessage(message))
 		}
 		queuedText := strings.Join(parts, "\n\n")
-		current := m.editor.Value()
+		if currentMessage != nil {
+			current = m.editorTextForMessage(*currentMessage)
+		}
 		if strings.TrimSpace(current) != "" {
 			queuedText += "\n\n" + current
 		}
@@ -659,6 +744,8 @@ func (m *Model) restoreQueuedSteering() int {
 		m.layout()
 		return 0
 	}
+	m.steeringRevision++
+	m.state.SteeringRevision = m.steeringRevision
 	m.steeringRestored = true
 	queuedText := strings.Join(queued, "\n\n")
 	current := m.editor.Value()
@@ -692,6 +779,10 @@ func (m *Model) resetSessionUI() {
 	m.clearSelection()
 	m.cache = make(map[string]cachedMessage)
 	m.markdownPreview = make(map[string]string)
+	m.steeringRevision = 0
+	m.state.Steering = nil
+	m.state.SteeringInputs = nil
+	m.state.SteeringRevision = 0
 	m.copyNoticeSeq++
 	m.copyNotice = false
 	m.lastCtrlC = time.Time{}
@@ -711,8 +802,8 @@ func (m *Model) refreshTranscript() {
 		if m.busy && message.ToolGroup != nil {
 			_, _, animate = groupState(message.ToolGroup)
 		}
-		if animate || cached.revision != message.Revision || !reflect.DeepEqual(cached.message, message) || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
-			cached = cachedMessage{message: message, revision: message.Revision, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
+		if animate || cached.revision != message.Revision || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
+			cached = cachedMessage{revision: message.Revision, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
 			m.cache[message.ID] = cached
 		}
 		blocks = append(blocks, cached.view)
@@ -735,14 +826,26 @@ func (m *Model) upsertMessage(message Message) {
 // applyMetadata 更新操作结果的设置与目录，不复制未变化的 transcript
 func (m *Model) applyMetadata(s Snapshot) {
 	messages := m.state.Messages
+	steering := append([]string(nil), m.state.Steering...)
+	steeringInputs := cloneUserMessages(m.state.SteeringInputs)
+	steeringRevision := m.steeringRevision
 	m.state = s
 	m.state.Messages = messages
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Skills = append([]SkillOption(nil), s.Skills...)
-	m.state.Steering = append([]string(nil), s.Steering...)
-	m.state.SteeringInputs = cloneUserMessages(s.SteeringInputs)
+	if steeringRevision == 0 || s.SteeringRevision >= steeringRevision {
+		m.state.Steering = append([]string(nil), s.Steering...)
+		m.state.SteeringInputs = cloneUserMessages(s.SteeringInputs)
+		m.state.SteeringRevision = s.SteeringRevision
+		m.steeringRevision = s.SteeringRevision
+	} else {
+		m.state.Steering = steering
+		m.state.SteeringInputs = steeringInputs
+		m.state.SteeringRevision = steeringRevision
+		m.steeringRevision = steeringRevision
+	}
 	m.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)

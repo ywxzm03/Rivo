@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -21,5 +22,18 @@ func TestClipboardImagesPreserveOrder(t *testing.T) {
 	}
 	if len(data.Images) != 2 || data.Images[0].Data != "one" || data.Images[1].Data != "two" {
 		t.Fatalf("images = %#v, want original order", data.Images)
+	}
+}
+
+func TestReadClipboardFileRejectsOversizedFilesBeforeReading(t *testing.T) {
+	path := t.TempDir() + "/large-image"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxClipboardImageBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if data, ok := readClipboardFile(path); ok || data != nil {
+		t.Fatalf("readClipboardFile() = (%d bytes, %v), want rejected", len(data), ok)
 	}
 }

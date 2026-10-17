@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -406,6 +407,34 @@ func TestRetryPendingClearsRequestBeforeSettingsRestore(t *testing.T) {
 	}
 	if a.pendingRequest != nil {
 		t.Fatalf("pendingRequest = %+v, want nil after successful pending retry", a.pendingRequest)
+	}
+}
+
+func TestImagePendingIsRejectedBeforeReplayOnTextOnlyModel(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	if err := a.session.AppendMessage(textMsg("seed")); err != nil {
+		t.Fatal(err)
+	}
+	restore := blockSessionWrites(t, a)
+	err := a.session.AppendMessage(llm.UserMessage{Content: []llm.Content{
+		llm.TextContent{Text: "describe"},
+		llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
+	}})
+	if err == nil {
+		restore()
+		t.Fatal("want pending image commit failure")
+	}
+	restore()
+	if !a.session.HasPending() {
+		t.Fatal("image message was not retained as pending")
+	}
+	a.agent.AgentConfig.Model.SupportsImages = false
+	result := a.executeOperation(context.Background(), OperationRequest{Kind: OperationRun, Value: "next"})
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "pending image input") {
+		t.Fatalf("result = %+v, want pending image capability error", result)
+	}
+	if !a.session.HasPending() {
+		t.Fatal("pending image was replayed before capability check")
 	}
 }
 

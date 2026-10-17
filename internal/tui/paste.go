@@ -24,6 +24,7 @@ var pasteMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ cha
 var pasteTailMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]$`)
 
 var imageMarkerRegexp = regexp.MustCompile(`\[Image #(\d+)\]`)
+var imageMarkerTailRegexp = regexp.MustCompile(`\[Image #(\d+)\]$`)
 
 // handlePaste 处理一次终端粘贴：超阈值折叠为标记，否则原样插入
 func (m *Model) handlePaste(text string) {
@@ -54,12 +55,13 @@ func (m *Model) handleImage(image llm.ImageContent) {
 	if image.Data == "" || image.MIMEType == "" {
 		return
 	}
-	m.imageCounter++
 	if m.images == nil {
 		m.images = make(map[int]llm.ImageContent)
 	}
-	m.images[m.imageCounter] = image
-	m.editor.InsertString(imageMarker(m.imageCounter))
+	reserved := imageMarkerIDs(m.editor.Value())
+	id := m.nextImageID(reserved)
+	m.images[id] = image
+	m.editor.InsertString(imageMarker(id))
 	m.clearSelection()
 	m.completion, m.completionHidden = 0, false
 	m.layout()
@@ -110,46 +112,63 @@ func messageHasImages(message llm.UserMessage) bool {
 	return false
 }
 
-func (m *Model) restoreHistoryImages(message llm.UserMessage) {
-	if !messageHasImages(message) {
-		return
-	}
-	if m.images == nil {
-		m.images = make(map[int]llm.ImageContent)
-	}
-	ids := imageMarkerRegexp.FindAllStringSubmatch(m.editor.Value(), -1)
-	index := 0
-	for _, content := range message.Content {
-		image, ok := content.(llm.ImageContent)
-		if !ok || index >= len(ids) {
-			continue
-		}
-		id, err := strconv.Atoi(ids[index][1])
-		if err != nil {
-			continue
-		}
-		m.images[id] = image
-		m.imageCounter = max(m.imageCounter, id)
-		index++
-	}
-}
-
 func (m *Model) editorTextForMessage(message llm.UserMessage) string {
+	reserved := make(map[int]bool)
+	for _, content := range message.Content {
+		text, ok := content.(llm.TextContent)
+		if ok {
+			for id := range imageMarkerIDs(text.Text) {
+				reserved[id] = true
+			}
+		}
+	}
 	var b strings.Builder
 	for _, content := range message.Content {
 		switch content := content.(type) {
 		case llm.TextContent:
 			b.WriteString(content.Text)
 		case llm.ImageContent:
-			m.imageCounter++
 			if m.images == nil {
 				m.images = make(map[int]llm.ImageContent)
 			}
-			m.images[m.imageCounter] = content
-			b.WriteString(imageMarker(m.imageCounter))
+			id := m.nextImageID(reserved)
+			m.images[id] = content
+			b.WriteString(imageMarker(id))
 		}
 	}
 	return b.String()
+}
+
+func imageMarkerIDs(text string) map[int]bool {
+	ids := make(map[int]bool)
+	for _, match := range imageMarkerRegexp.FindAllStringSubmatch(text, -1) {
+		id, err := strconv.Atoi(match[1])
+		if err == nil {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func (m *Model) nextImageID(reserved map[int]bool) int {
+	for {
+		m.imageCounter++
+		if !reserved[m.imageCounter] {
+			reserved[m.imageCounter] = true
+			return m.imageCounter
+		}
+	}
+}
+
+func (m *Model) restoreEditorMessage(message *llm.UserMessage, fallback string) {
+	m.resetPastes()
+	value := fallback
+	if message != nil {
+		value = m.editorTextForMessage(*message)
+	}
+	m.editor.SetValue(value)
+	m.editor.CursorEnd()
+	m.completion, m.completionHidden = 0, true
 }
 
 // pasteMarker 返回注册内容对应的折叠标记
@@ -253,8 +272,8 @@ func (m *Model) backspaceAtImageMarker() bool {
 	start := min(max(0, info.StartColumn), len(runes))
 	col := min(start+runeOffsetAtWidth(runes[start:], info.CharOffset), len(runes))
 	prefix := string(runes[:col])
-	loc := imageMarkerRegexp.FindStringSubmatchIndex(prefix)
-	if loc == nil || loc[1] != len(prefix) {
+	loc := imageMarkerTailRegexp.FindStringSubmatchIndex(prefix)
+	if loc == nil {
 		return false
 	}
 	id, err := strconv.Atoi(prefix[loc[2]:loc[3]])

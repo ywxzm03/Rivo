@@ -278,6 +278,14 @@ func (a *App) SteeringUserMessages() []llm.UserMessage {
 	return a.agent.SteeringUserMessages()
 }
 
+// SteeringRevision 返回等待消费队列的单调版本
+func (a *App) SteeringRevision() uint64 {
+	if a == nil || a.agent == nil {
+		return 0
+	}
+	return a.agent.SteeringRevision()
+}
+
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
 func (a *App) AutoCompactionEnabled() bool {
 	return a.coordinator != nil && a.coordinator.Compactor != nil

@@ -263,18 +263,15 @@ func (m *Model) browseHistory(direction int) {
 		}
 	}
 	m.historyPos = max(0, min(len(m.history), m.historyPos+direction))
-	value := m.draft
-	if m.historyPos < len(m.history) {
-		value = m.history[m.historyPos]
-	}
-	m.editor.SetValue(value)
-	m.editor.CursorEnd()
 	m.resetPastes()
 	if m.historyPos < len(m.historyMessages) {
-		m.restoreHistoryImages(m.historyMessages[m.historyPos])
+		m.editor.SetValue(m.editorTextForMessage(m.historyMessages[m.historyPos]))
 	} else if m.draftMessage != nil {
-		m.restoreHistoryImages(*m.draftMessage)
+		m.editor.SetValue(m.editorTextForMessage(*m.draftMessage))
+	} else {
+		m.editor.SetValue(m.draft)
 	}
+	m.editor.CursorEnd()
 	m.completionHidden = true
 	m.layout()
 }
@@ -330,6 +327,21 @@ func (m *Model) submit() tea.Cmd {
 			return m.dispatchSteeringMessage(input, &message)
 		}
 		return m.dispatchSteering(input)
+	}
+	if !m.busy && m.handlers.Request == nil {
+		if hasImages {
+			return nil
+		}
+		m.history = append(m.history, input)
+		m.historyMessages = append(m.historyMessages, message)
+		m.historyPos = len(m.history)
+		m.draft = ""
+		m.draftMessage = nil
+		m.editor.Reset()
+		m.resetPastes()
+		m.completionHidden = true
+		m.layout()
+		return nil
 	}
 	m.history = append(m.history, input)
 	m.historyMessages = append(m.historyMessages, message)

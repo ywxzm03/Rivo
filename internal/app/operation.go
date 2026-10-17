@@ -139,6 +139,16 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		}
 		a.operationMu.Unlock()
 	}()
+	if request.Kind == OperationRun && !a.CurrentModel().SupportsImages {
+		if request.Message != nil && userMessageHasImages(*request.Message) {
+			result.Err = errors.New("app: current model does not support image input")
+			return result
+		}
+		if a.session.HasPending() && pendingMessagesHaveImages(a.session.PendingMessages()) {
+			result.Err = errors.New("app: pending image input requires a vision model")
+			return result
+		}
+	}
 	// 1.补写原候选记录，不重跑模型或工具；同一操作重试从已提交边界续接
 	if a.session.HasPending() && request.Kind != OperationDelete {
 		messages := a.session.PendingMessages()
@@ -252,6 +262,15 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 func userMessageHasImages(message llm.UserMessage) bool {
 	for _, content := range message.Content {
 		if _, ok := content.(llm.ImageContent); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func pendingMessagesHaveImages(messages []llm.Message) bool {
+	for _, message := range messages {
+		if user, ok := message.(llm.UserMessage); ok && userMessageHasImages(user) {
 			return true
 		}
 	}

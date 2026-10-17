@@ -22,11 +22,12 @@ type Agent struct {
 	// CommitMessages 在推进核心上下文前整体提交消息，返回稳定来源 ID
 	CommitMessages func([]llm.Message) ([]string, error)
 
-	runGuardOnce  sync.Once
-	runGuard      chan struct{}
-	steeringMu    sync.Mutex
-	steering      []steeringMessage
-	currentUserID string
+	runGuardOnce     sync.Once
+	runGuard         chan struct{}
+	steeringMu       sync.Mutex
+	steering         []steeringMessage
+	steeringRevision uint64
+	currentUserID    string
 }
 
 type steeringMessage struct {
@@ -87,6 +88,7 @@ func (a *Agent) SteerMessage(message llm.UserMessage) error {
 	}
 	a.steeringMu.Lock()
 	a.steering = append(a.steering, steeringMessage{input: textOfUserMessage(message), message: cloneUserMessage(message)})
+	a.steeringRevision++
 	a.steeringMu.Unlock()
 	return nil
 }
@@ -120,6 +122,13 @@ func (a *Agent) SteeringUserMessages() []llm.UserMessage {
 	return messages
 }
 
+// SteeringRevision 返回等待消费队列的单调版本
+func (a *Agent) SteeringRevision() uint64 {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	return a.steeringRevision
+}
+
 // TakeSteering 清空等待消费的 steering，并按 FIFO 返回消息文本
 func (a *Agent) TakeSteering() []string {
 	a.steeringMu.Lock()
@@ -128,7 +137,10 @@ func (a *Agent) TakeSteering() []string {
 	for i, message := range a.steering {
 		messages[i] = message.input
 	}
-	a.steering = nil
+	if len(a.steering) > 0 {
+		a.steering = nil
+		a.steeringRevision++
+	}
 	return messages
 }
 
@@ -140,7 +152,10 @@ func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
 	for i, message := range a.steering {
 		messages[i] = cloneUserMessage(message.message)
 	}
-	a.steering = nil
+	if len(a.steering) > 0 {
+		a.steering = nil
+		a.steeringRevision++
+	}
 	return messages
 }
 
@@ -160,6 +175,7 @@ func (a *Agent) acknowledgeSteering(match func(steeringMessage) bool) bool {
 	for i, message := range a.steering {
 		if message.retryable && match(message) {
 			a.steering = append(a.steering[:i], a.steering[i+1:]...)
+			a.steeringRevision++
 			return true
 		}
 	}
@@ -175,6 +191,7 @@ func (a *Agent) takeSteering() (steeringMessage, bool) {
 	}
 	message := a.steering[0]
 	a.steering = a.steering[1:]
+	a.steeringRevision++
 	return message, true
 }
 
@@ -183,6 +200,7 @@ func (a *Agent) restoreSteering(message steeringMessage) {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
 	a.steering = append([]steeringMessage{message}, a.steering...)
+	a.steeringRevision++
 }
 
 // PreparedRequest 是一次模型请求的配置与上下文快照

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -76,6 +77,56 @@ func TestImageHistoryRestoresAttachment(t *testing.T) {
 	press(m, tea.KeyUp)
 	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
 		t.Fatalf("history did not restore image draft: value=%q images=%d", m.editor.Value(), len(m.images))
+	}
+}
+
+func TestImageHistoryIgnoresLiteralImageMarkers(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
+	typeText(m, "literal [Image #1] then ")
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	m.busy = false
+	press(m, tea.KeyUp)
+	message, ok := m.buildUserMessage()
+	if !ok || !messageHasImages(message) || len(m.images) != 1 {
+		t.Fatalf("history image restore = message=%#v images=%d", message, len(m.images))
+	}
+	if _, ok := m.images[2]; !ok {
+		t.Fatalf("restored image map = %#v, want actual image marker #2", m.images)
+	}
+	if _, ok := message.Content[len(message.Content)-1].(llm.ImageContent); !ok {
+		t.Fatalf("restored content = %#v, want image after literal marker", message.Content)
+	}
+}
+
+func TestBackspaceDeletesLastImageMarker(t *testing.T) {
+	m := testModel(80, 24)
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{
+		{Data: "one", MIMEType: "image/png"},
+		{Data: "two", MIMEType: "image/png"},
+	}}})
+	press(m, tea.KeyBackspace)
+	if got := m.editor.Value(); got != "[Image #1]" {
+		t.Fatalf("editor after deleting last image = %q", got)
+	}
+	if len(m.images) != 1 {
+		t.Fatalf("images after deleting last image = %d, want 1", len(m.images))
+	}
+}
+
+func TestSteeringImageEnqueueFailureRestoresAttachment(t *testing.T) {
+	m := testModel(80, 24)
+	m.state.Models[0].SupportsImages = true
+	m.busy = true
+	m.handlers = Handlers{EnqueueSteeringMessage: func(llm.UserMessage) error {
+		return errors.New("queue unavailable")
+	}}
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	press(m, tea.KeyEnter)
+	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
+		t.Fatalf("failed steering restore = value=%q images=%d", m.editor.Value(), len(m.images))
 	}
 }
 
@@ -226,7 +277,7 @@ func TestDeleteNoRenumber(t *testing.T) {
 
 func TestClipboardPasteFolds(t *testing.T) {
 	m := testModel(80, 24)
-	m.Update(clipboardReadMsg{text: strings.Repeat("y", 1001)})
+	m.Update(clipboardReadMsg{data: ClipboardData{Text: strings.Repeat("y", 1001)}})
 	if got := m.editor.Value(); !strings.Contains(got, "[paste #1 1001 chars]") {
 		t.Fatalf("clipboard paste should fold: %q", got)
 	}
