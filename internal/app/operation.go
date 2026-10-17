@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
@@ -27,9 +29,10 @@ const (
 )
 
 type OperationRequest struct {
-	Kind    OperationKind
-	Value   string
-	Message *llm.UserMessage
+	Kind        OperationKind
+	Value       string
+	Message     *llm.UserMessage
+	RestoreMode filehistory.RestoreMode
 }
 
 type OperationResult struct {
@@ -39,10 +42,12 @@ type OperationResult struct {
 	Exit     bool
 	// EditorText is set after a successful tree rewind so the TUI can restore
 	// the selected user message without persisting a branch marker.
-	EditorText    string
-	RestoreEditor bool
-	EditorMessage *llm.UserMessage
-	Err           error
+	EditorText     string
+	RestoreEditor  bool
+	EditorMessage  *llm.UserMessage
+	ContextRewound bool
+	FileRestore    *filehistory.RestoreResult
+	Err            error
 }
 
 // Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
@@ -230,7 +235,9 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	case OperationReload:
 		a.Reload()
 	case OperationTree:
-		result.EditorText, result.EditorMessage, result.RestoreEditor, result.Err = a.rewindTree(request.Value)
+		treeResult, err := a.rewindTreeWithMode(request.Value, request.RestoreMode)
+		result = treeResult
+		result.Err = err
 	case OperationClear:
 		result.Err = a.clearSession()
 	case OperationDelete:
@@ -312,7 +319,7 @@ func (a *App) rewindTree(entryID string) (string, *llm.UserMessage, bool, error)
 		return "", nil, false, err
 	}
 	if err := a.restoreBranchSettings(); err != nil {
-		if rollbackErr := a.restoreLeaf(previousLeaf); rollbackErr != nil {
+		if rollbackErr := a.restoreLeaf(previousLeaf, entryID); rollbackErr != nil {
 			return "", nil, false, errors.Join(err, rollbackErr)
 		}
 		return "", nil, false, err
@@ -320,11 +327,59 @@ func (a *App) rewindTree(entryID string) (string, *llm.UserMessage, bool, error)
 	return rewound.Text, rewound.Message, true, nil
 }
 
-func (a *App) restoreLeaf(leafID string) error {
-	if leafID == "" {
-		return a.session.ResetLeaf()
+// rewindTreeWithMode 把代码恢复放在上下文回滚之前，保证组合操作失败时不移动上下文。
+func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (OperationResult, error) {
+	if mode == "" {
+		mode = filehistory.RestoreContext
 	}
-	return a.session.Branch(leafID)
+	if mode != filehistory.RestoreContext && mode != filehistory.RestoreCode && mode != filehistory.RestoreCodeAndContext {
+		return OperationResult{}, fmt.Errorf("app: unknown tree restore mode %q", mode)
+	}
+	result := OperationResult{}
+	var rollbackCode func() error
+	if mode == filehistory.RestoreCode || mode == filehistory.RestoreCodeAndContext {
+		if a.session.FileHistory() == nil {
+			return result, errors.New("app: file history is unavailable")
+		}
+		var restored filehistory.RestoreResult
+		var err error
+		if mode == filehistory.RestoreCodeAndContext {
+			restored, rollbackCode, err = a.session.FileHistory().RestoreWithRollback(entryID)
+		} else {
+			restored, err = a.session.FileHistory().Restore(entryID)
+		}
+		result.FileRestore = &restored
+		if err != nil {
+			return result, err
+		}
+	}
+	if mode == filehistory.RestoreCode {
+		return result, nil
+	}
+	text, editorMessage, restoreEditor, err := a.rewindTree(entryID)
+	if err != nil {
+		if rollbackCode != nil {
+			if rollbackErr := rollbackCode(); rollbackErr != nil {
+				return result, errors.Join(err, fmt.Errorf("app: code restore compensation failed: %w", rollbackErr))
+			}
+			result.FileRestore = nil
+			return result, fmt.Errorf("app: context restore failed; code restore was rolled back: %w", err)
+		}
+		return result, err
+	}
+	a.session.PruneFileHistoryToActiveBranch(entryID)
+	result.EditorText = text
+	result.EditorMessage = editorMessage
+	result.RestoreEditor = restoreEditor
+	result.ContextRewound = true
+	return result, nil
+}
+
+func (a *App) restoreLeaf(leafID string, keepIDs ...string) error {
+	if leafID == "" {
+		return a.session.ResetLeaf(keepIDs...)
+	}
+	return a.session.Branch(leafID, keepIDs...)
 }
 
 // restoreBranchSettings applies settings found on the newly active path and

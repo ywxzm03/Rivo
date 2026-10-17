@@ -140,6 +140,7 @@ const (
 	AgentEventToolExecutionEnd    = "tool_execution_end"
 	AgentEventCompactionStart     = "compaction_start"
 	AgentEventCompactionEnd       = "compaction_end"
+	AgentEventWarning             = "warning"
 )
 
 // AgentEvent 的消费者主要是TUI渲染，自动压缩等Agent级事件
@@ -230,6 +231,14 @@ type ToolExecutionEndEvent struct {
 
 func (ToolExecutionEndEvent) Type() string { return AgentEventToolExecutionEnd }
 func (ToolExecutionEndEvent) agentEvent()  {}
+
+// WarningEvent 表示不阻止当前操作、但需要告知用户的降级状态。
+type WarningEvent struct {
+	Message string
+}
+
+func (WarningEvent) Type() string { return AgentEventWarning }
+func (WarningEvent) agentEvent()  {}
 
 // CompactionStartEvent 上下文压缩开始；Reason 取 auto（阈值触发）/ overflow（溢出恢复）/ manual（手动 /compact）
 type CompactionStartEvent struct {

@@ -20,7 +20,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Edit struct{}
+type Edit struct{ History FileHistoryTracker }
 
 type EditDetails struct {
 	Diff             string
@@ -92,16 +92,21 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 	// 2.在同文件队列中读取并校验全部替换，确保失败时尚未写盘
 	return withFileMutationQueue(ctx, absPath, func() (llm.ToolResult, error) {
-		return executeEdit(ctx, path, absPath, edits)
+		return e.executeEdit(ctx, path, absPath, edits)
 	})
 }
 
 // executeEdit 读取目标文件、应用替换并返回变更详情
-func executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (llm.ToolResult, error) {
+func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (llm.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
 	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
+	}
+	originalData := append([]byte(nil), data...)
+	info, err := os.Lstat(absPath)
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
 	}
@@ -118,7 +123,9 @@ func executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (l
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
-	// 3.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
+	// 3.记录已通过替换校验的文件，复用已读取内容避免备份竞态
+	trackFileEditContent(ctx, e.History, absPath, originalData, info.Mode().Perm())
+	// 4.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {

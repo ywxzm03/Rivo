@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -20,26 +21,46 @@ type entryLine struct {
 // parseFile 解析会话文件内容，返回 header 与按文件序的 entry 列表；
 // 空行与解码失败的行跳过，首个有效行必须是合法的当前版本 header
 func parseFile(data []byte) (*Header, []Entry, error) {
+	header, entries, _, _, err := parseFileWithRecords(data)
+	return header, entries, err
+}
+
+// parseFileWithRecords 分离树 entry 与不参与树结构的 metadata record。
+func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, []string, error) {
 	var header *Header
 	var entries []Entry
-	for _, rawLine := range bytes.Split(data, []byte("\n")) {
+	var records []filehistory.Record
+	var warnings []string
+	for lineNumber, rawLine := range bytes.Split(data, []byte("\n")) {
 		line := bytes.TrimSpace(rawLine)
 		if len(line) == 0 {
 			continue
 		}
 		var probe entryLine
 		if err := json.Unmarshal(line, &probe); err != nil {
+			if bytes.Contains(line, []byte("file-history-")) {
+				warnings = append(warnings, fmt.Sprintf("session: skipped malformed file history record on line %d: %v", lineNumber+1, err))
+			}
 			continue
 		}
 		if header == nil {
 			h, err := decodeHeader(line, probe.Type)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, warnings, err
 			}
 			header = h
 			continue
 		}
 		if probe.Type == TypeSession {
+			continue
+		}
+		if probe.Type == TypeFileHistorySnapshot || probe.Type == TypeFileHistoryDelta {
+			record, err := filehistory.DecodeRecord(probe.Type, line)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("session: skipped invalid file history record on line %d: %v", lineNumber+1, err))
+				continue
+			}
+			records = append(records, record)
 			continue
 		}
 		entry, err := decodeEntry(probe.Type, string(line))
@@ -57,9 +78,9 @@ func parseFile(data []byte) (*Header, []Entry, error) {
 		entries = append(entries, entry)
 	}
 	if header == nil {
-		return nil, nil, errors.New("session: missing session header")
+		return nil, nil, nil, warnings, errors.New("session: missing session header")
 	}
-	return header, entries, nil
+	return header, entries, records, warnings, nil
 }
 
 // decodeHeader 校验并解码 header：类型必须是 session、版本必须是当前版本、id 非空

@@ -119,6 +119,51 @@ func TestAgentPassesSessionIDToModelRequest(t *testing.T) {
 	}
 }
 
+func TestAgentClearsCurrentUserIDWhenCommitReturnsNoID(t *testing.T) {
+	var streamCalls int
+	var toolIDs []string
+	tool := &controlledTool{
+		name: "record",
+		mode: llm.ToolExecutionParallel,
+		run: func(ctx context.Context) (llm.ToolResult, error) {
+			toolIDs = append(toolIDs, llm.CurrentUserMessageID(ctx))
+			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "done"}}}, nil
+		},
+	}
+	streamFn := func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		streamCalls++
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		if streamCalls%2 == 1 {
+			ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+				Content:    []llm.Content{llm.ToolCall{ID: "record-call", Name: "record", Arguments: map[string]any{}}},
+				StopReason: llm.StopReasonToolUse,
+			}}
+		} else {
+			ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}}
+		}
+		close(ch)
+		return ch, nil
+	}
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{tool}}, streamFn, nil)
+	commits := 0
+	agent.CommitMessages = func([]llm.Message) ([]string, error) {
+		commits++
+		if commits == 1 {
+			return []string{"u1"}, nil
+		}
+		return nil, nil
+	}
+	if _, err := agent.Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	if len(toolIDs) != 2 || toolIDs[0] != "u1" || toolIDs[1] != "" {
+		t.Fatalf("tool user IDs = %v, want [u1, empty]", toolIDs)
+	}
+}
+
 func TestAgentRunToolLoop(t *testing.T) {
 	calls := 0
 	streamFn := doneStreamFn(&calls,

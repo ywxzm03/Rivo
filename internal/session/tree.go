@@ -54,11 +54,12 @@ func (m *SessionManager) Tree() TreeSnapshot {
 }
 
 // ResetLeaf 把当前 leaf 重置为空树位置；不会写入会话文件。
-func (m *SessionManager) ResetLeaf() error {
+func (m *SessionManager) ResetLeaf(keepIDs ...string) error {
 	if m.HasPending() {
 		return &CommitError{Err: errors.New("session: retry pending submission before branching")}
 	}
 	m.leafID = ""
+	m.PruneFileHistoryToActiveBranch(keepIDs...)
 	return nil
 }
 

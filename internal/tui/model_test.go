@@ -577,7 +577,11 @@ func TestTreeSelectorUsesUserNodesAndRestoresEditor(t *testing.T) {
 		t.Fatalf("last child parent navigation = %q, want root u1", got)
 	}
 	press(m, tea.KeyEnter)
-	if len(requests) != 1 || requests[0].Kind != "tree" || requests[0].Value != "u1" || m.selector != nil {
+	if len(requests) != 0 || m.selector == nil || m.selector.kind != "tree_restore" || m.selector.treeRestoreTarget != "u1" || m.selector.filtered[0].label != "Restore conversation" {
+		t.Fatalf("tree request = %+v selector=%v", requests, m.selector)
+	}
+	press(m, tea.KeyEnter)
+	if len(requests) != 1 || requests[0].Kind != "tree" || requests[0].Value != "u1" || requests[0].RestoreMode != "context" || m.selector != nil {
 		t.Fatalf("tree request = %+v selector=%v", requests, m.selector)
 	}
 	m.Update(OperationDoneMsg{Snapshot: &Snapshot{Tree: m.state.Tree}, RestoreEditor: true, EditorValue: "first"})
@@ -602,6 +606,26 @@ func TestTreeSelectorRejectsBusyOperation(t *testing.T) {
 	press(m, tea.KeyEnter)
 	if len(m.state.Messages) == 0 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Wait for the current operation") {
 		t.Fatalf("busy submit notice = %+v", m.state.Messages)
+	}
+}
+
+func TestTreeRestoreSelectorDispatchesCodeMode(t *testing.T) {
+	m := testModel(100, 30)
+	m.state.Tree = []TreeNode{{ID: "u1", Text: "first", Current: true}}
+	var requests []Request
+	m.handlers.Request = func(request Request) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}
+	m.openSelector("tree", "")
+	press(m, tea.KeyEnter)
+	if m.selector == nil || m.selector.kind != "tree_restore" || len(m.selector.filtered) != 3 || m.selector.filtered[2].label != "Restore code and conversation" {
+		t.Fatalf("restore selector = %+v, want three choices", m.selector)
+	}
+	press(m, tea.KeyDown)
+	press(m, tea.KeyEnter)
+	if len(requests) != 1 || requests[0].Value != "u1" || requests[0].RestoreMode != "code" {
+		t.Fatalf("requests = %+v, want code restore for u1", requests)
 	}
 }
 

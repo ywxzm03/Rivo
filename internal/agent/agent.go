@@ -22,10 +22,11 @@ type Agent struct {
 	// CommitMessages 在推进核心上下文前整体提交消息，返回稳定来源 ID
 	CommitMessages func([]llm.Message) ([]string, error)
 
-	runGuardOnce sync.Once
-	runGuard     chan struct{}
-	steeringMu   sync.Mutex
-	steering     []steeringMessage
+	runGuardOnce  sync.Once
+	runGuard      chan struct{}
+	steeringMu    sync.Mutex
+	steering      []steeringMessage
+	currentUserID string
 }
 
 type steeringMessage struct {
@@ -234,6 +235,7 @@ func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*l
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	a.currentUserID = ""
 	firstMessageIndex := len(a.AgentContext.Messages)
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
 		return nil, err
@@ -246,11 +248,14 @@ func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*l
 	if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
 		return nil, err
 	}
-	if err := a.commitMessages([]llm.Message{userMessage}); err != nil {
+	ids, err := a.commitMessagesWithIDs([]llm.Message{userMessage})
+	if err != nil {
 		return nil, err
 	}
-
-	return a.runLoop(ctx, cancel, firstMessageIndex, nil)
+	if len(ids) > 0 {
+		a.currentUserID = ids[0]
+	}
+	return a.runLoop(llm.WithCurrentUserMessageID(ctx, a.currentUserID), cancel, firstMessageIndex, nil)
 }
 
 // Continue 在不追加用户消息的情况下重入运行循环，供编排层在溢出恢复后重试该轮
@@ -277,6 +282,7 @@ func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, req
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	ctx = llm.WithCurrentUserMessageID(ctx, a.currentUserID)
 	firstMessageIndex := len(a.AgentContext.Messages)
 	var initialSteering *steeringMessage
 	if requireSteering {
@@ -362,6 +368,11 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			var sourceID string
 			if len(ids) > 0 {
 				sourceID = ids[0]
+				a.currentUserID = sourceID
+				ctx = llm.WithCurrentUserMessageID(ctx, sourceID)
+			} else {
+				a.currentUserID = ""
+				ctx = llm.WithCurrentUserMessageID(ctx, "")
 			}
 			if err := a.emit(llm.MessageEndEvent{Message: userMessage, SourceID: sourceID}); err != nil {
 				return nil, err
@@ -919,12 +930,22 @@ func (a *Agent) commitToolResults(results []llm.ToolResultMessage, notify bool) 
 
 // commitMessages 先提交宿主记录，再发布核心上下文和带来源的结束通知
 func (a *Agent) commitMessages(messages []llm.Message) error {
-	return a.commitMessagesWithNotify(messages, true)
+	_, err := a.commitMessagesWithIDs(messages)
+	return err
 }
 
 func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) error {
+	_, err := a.commitMessagesWithNotifyIDs(messages, notify)
+	return err
+}
+
+func (a *Agent) commitMessagesWithIDs(messages []llm.Message) ([]string, error) {
+	return a.commitMessagesWithNotifyIDs(messages, true)
+}
+
+func (a *Agent) commitMessagesWithNotifyIDs(messages []llm.Message, notify bool) ([]string, error) {
 	if len(messages) == 0 {
-		return nil
+		return nil, nil
 	}
 	ids, err := a.persistMessages(messages)
 	if err != nil {
@@ -932,15 +953,15 @@ func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) er
 			for i, message := range messages {
 				if i < len(ids) && ids[i] != "" {
 					if eventErr := a.emit(llm.MessageEndEvent{Message: message, SourceID: ids[i], Pending: true}); eventErr != nil {
-						return errors.Join(err, eventErr)
+						return ids, errors.Join(err, eventErr)
 					}
 				}
 			}
 		}
-		return err
+		return ids, err
 	}
 	if !notify {
-		return nil
+		return ids, nil
 	}
 	for i, message := range messages {
 		var id string
@@ -948,10 +969,10 @@ func (a *Agent) commitMessagesWithNotify(messages []llm.Message, notify bool) er
 			id = ids[i]
 		}
 		if err := a.emit(llm.MessageEndEvent{Message: message, SourceID: id}); err != nil {
-			return err
+			return ids, err
 		}
 	}
-	return nil
+	return ids, nil
 }
 
 func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {
