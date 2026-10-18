@@ -98,6 +98,26 @@ func TestCompactGeneratesSummary(t *testing.T) {
 	}
 }
 
+func TestCompactPricesSummaryUsage(t *testing.T) {
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+			Content: []llm.Content{llm.TextContent{Text: "SUMMARY"}},
+			Usage:   llm.Usage{InputTokens: 1_000_000},
+		}}
+		close(ch)
+		return ch, nil
+	}
+	c := &Compactor{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}, StreamFn: streamFn, Config: singleCallConfig()}
+	result, err := c.Compact(context.Background(), contextView(compactFixture()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.Cost == nil || result.Usage.Cost.Total != 4 {
+		t.Fatalf("summary cost = %+v, want $4", result.Usage.Cost)
+	}
+}
+
 func TestCompactUsesUpdatePromptWithPreviousSummary(t *testing.T) {
 	streamFn, seen := recordingStreamFn("MERGED")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}

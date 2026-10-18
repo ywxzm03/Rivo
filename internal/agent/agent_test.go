@@ -63,6 +63,27 @@ func waitForToolSignal(t *testing.T, signals <-chan string) string {
 	}
 }
 
+func TestAgentPricesAssistantUsageBeforeCommit(t *testing.T) {
+	streamFn := func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+			Content: []llm.Content{llm.TextContent{Text: "done"}},
+			Usage:   llm.Usage{InputTokens: 1_000_000},
+		}}
+		close(ch)
+		return ch, nil
+	}
+	a := NewAgent(llm.AgentConfig{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}}, llm.Context{}, streamFn, nil)
+	a.CommitMessages = func([]llm.Message) ([]string, error) { return nil, nil }
+	reply, err := a.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Usage.Cost == nil || reply.Usage.Cost.Total != 4 {
+		t.Fatalf("reply cost = %+v, want $4", reply.Usage.Cost)
+	}
+}
+
 func assertNoToolSignal(t *testing.T, signals <-chan string) {
 	t.Helper()
 	select {

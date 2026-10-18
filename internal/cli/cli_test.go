@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/cli"
+	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // useTestHome 把 HOME/USERPROFILE/RIVO_AGENT_DIR 都切到临时目录，跨平台隔离真实配置
@@ -34,13 +36,13 @@ func TestRun(t *testing.T) {
 			name:       "long help",
 			args:       []string{"--help"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --cost <path>       Print cost totals for a JSONL session and exit\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "short help",
 			args:       []string{"-h"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --cost <path>       Print cost totals for a JSONL session and exit\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "repl exits",
@@ -58,7 +60,7 @@ func TestRun(t *testing.T) {
 			name:       "help with unknown option",
 			args:       []string{"--help", "--unknown"},
 			wantCode:   0,
-			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
+			wantStdout: "Rivo - AI coding assistant\n\nUsage:\n  Rivo [options] [prompt]\n\nOptions:\n  -h, --help              Show this help\n      --cost <path>       Print cost totals for a JSONL session and exit\n      --continue          Continue the most recent session\n      --resume            Alias of --continue\n      --print, -p         Non-interactive mode: process prompt and exit\n      --provider <name>   Provider for --model (requires --model)\n      --model <pattern>   Model id, provider/model, or substring, with optional :level suffix\n      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max\n\nWith --print, the prompt comes from positional arguments or piped stdin.\n",
 		},
 		{
 			name:       "version is not implemented",
@@ -114,5 +116,39 @@ func TestRunNoModelsAvailable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "no models available") {
 		t.Errorf("Run() stderr = %q, want no-models diagnostic", stderr.String())
+	}
+}
+
+func TestRunCostReadsSessionWithoutRuntimeConfig(t *testing.T) {
+	m := session.New("/project", t.TempDir())
+	if err := m.AppendMessage(llm.AssistantMessage{Usage: llm.Usage{
+		InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30, CacheWriteTokens: 40, TotalTokens: 100,
+		Cost: &llm.Cost{Total: 1.25},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"--cost", m.Path()}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	want := "Cost (USD): $1.250000\n" +
+		"Input tokens: 10\n" +
+		"Output tokens: 20\n" +
+		"Cache read tokens: 30\n" +
+		"Cache write tokens: 40\n" +
+		"Total tokens: 100\n" +
+		"Unknown cost entries: 0\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestRunCostRejectsRuntimeOptions(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"--cost", "session.jsonl", "--print"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Fatalf("Run() = %d, stderr = %q", code, stderr.String())
 	}
 }

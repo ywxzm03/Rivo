@@ -80,13 +80,14 @@ type SessionInfoEntry struct {
 
 // Usage 不依附消息的 token 记录，计入会话用量但不进 LLM 上下文
 type Usage struct {
-	InputTokens        int `json:"inputTokens"`
-	OutputTokens       int `json:"outputTokens"`
-	CacheReadTokens    int `json:"cacheReadTokens"`
-	CacheWriteTokens   int `json:"cacheWriteTokens"`
-	CacheWrite1HTokens int `json:"cacheWrite1hTokens"`
-	ReasoningTokens    int `json:"reasoningTokens"`
-	TotalTokens        int `json:"totalTokens"`
+	InputTokens        int       `json:"inputTokens"`
+	OutputTokens       int       `json:"outputTokens"`
+	CacheReadTokens    int       `json:"cacheReadTokens"`
+	CacheWriteTokens   int       `json:"cacheWriteTokens"`
+	CacheWrite1HTokens int       `json:"cacheWrite1hTokens"`
+	ReasoningTokens    int       `json:"reasoningTokens"`
+	TotalTokens        int       `json:"totalTokens"`
+	Cost               *llm.Cost `json:"cost,omitempty"`
 }
 
 // UsageEntry 记录模型用量（如缓存预热），不参与 LLM 上下文

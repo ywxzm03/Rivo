@@ -37,6 +37,19 @@ func TestNewFallsBackToDefaultBaseURL(t *testing.T) {
 	}
 }
 
+func TestBuiltinModelCatalog(t *testing.T) {
+	models := New(Config{}).Models()
+	want := []string{"deepseek-flash", "deepseek-v4-pro"}
+	if len(models) != len(want) {
+		t.Fatalf("model count = %d, want %d", len(models), len(want))
+	}
+	for i, model := range models {
+		if model.ID != want[i] || model.ContextWindow != 1_000_000 || model.MaxTokens != 384_000 {
+			t.Errorf("model[%d] = %+v, want %s with current limits", i, model, want[i])
+		}
+	}
+}
+
 func TestStreamRejectsUnknownProtocol(t *testing.T) {
 	p := New(Config{})
 	_, err := p.Stream(context.Background(),

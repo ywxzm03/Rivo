@@ -25,7 +25,7 @@ func TestMessageRoundtrip(t *testing.T) {
 			llm.ToolCall{ID: "call_1", Name: "read", Arguments: map[string]any{"path": "a.go"}},
 		},
 		StopReason: llm.StopReasonToolUse,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4, TotalTokens: 20},
+		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4, TotalTokens: 20, Cost: &llm.Cost{Input: 0.1, Output: 0.2, CacheRead: 0.03, CacheWrite: 0.04, Total: 0.37}},
 	}
 	toolResult := llm.ToolResultMessage{
 		ToolCallID: "call_1",
@@ -33,7 +33,7 @@ func TestMessageRoundtrip(t *testing.T) {
 		Content:    []llm.Content{llm.TextContent{Text: "file content"}},
 		Details:    map[string]any{"lines": "1-10"},
 		IsError:    true,
-		Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3, Cost: &llm.Cost{Total: 0.05}},
 	}
 
 	for name, msg := range map[string]llm.Message{"user": user, "assistant": assistant, "toolResult": toolResult} {
@@ -74,7 +74,7 @@ func messagesEqual(a, b llm.Message) bool {
 	case llm.AssistantMessage:
 		b, ok := b.(llm.AssistantMessage)
 		return ok && a.API == b.API && a.Provider == b.Provider && a.Model == b.Model &&
-			a.ResponseID == b.ResponseID && a.StopReason == b.StopReason && a.Usage == b.Usage &&
+			a.ResponseID == b.ResponseID && a.StopReason == b.StopReason && reflect.DeepEqual(a.Usage, b.Usage) &&
 			contentEqual(a.Content, b.Content)
 	case llm.ToolResultMessage:
 		b, ok := b.(llm.ToolResultMessage)
@@ -84,7 +84,7 @@ func messagesEqual(a, b llm.Message) bool {
 		if a.Usage == nil || b.Usage == nil {
 			return a.Usage == nil && b.Usage == nil
 		}
-		return *a.Usage == *b.Usage
+		return reflect.DeepEqual(*a.Usage, *b.Usage)
 	}
 	return false
 }

@@ -500,6 +500,9 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		// 3.提交最终 assistant 消息，并检查是否需要执行工具
 		setAssistantMetadata(final, a.AgentConfig.Model)
+		if final.Usage.Cost == nil {
+			final.Usage.Cost = llm.PriceUsage(a.AgentConfig.Model, final.Usage)
+		}
 		if err := a.commitMessages([]llm.Message{*final}); err != nil {
 			cancel()
 			return nil, err
@@ -703,6 +706,9 @@ func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason,
 	message.StopReason = reason
 	if partial != nil {
 		message.Usage = partial.Usage
+	}
+	if message.Usage.Cost == nil {
+		message.Usage.Cost = llm.PriceUsage(a.AgentConfig.Model, message.Usage)
 	}
 	if reason == llm.StopReasonAborted {
 		// 取消属于用户操作而非故障：固定文案，保留已收到的 partial 内容

@@ -226,6 +226,9 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 		if text == "" {
 			return "", usage, fmt.Errorf("compaction: empty summary")
 		}
+		if usage.Cost == nil {
+			usage.Cost = llm.PriceUsage(c.Model, usage)
+		}
 		return text, usage, nil
 	}
 	return retrySummarize(ctx, c.Retry, produce)

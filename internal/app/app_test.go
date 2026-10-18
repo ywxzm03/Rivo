@@ -118,7 +118,7 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 		t.Errorf("session model = %s/%s, want %s/%s", ctx.Provider, ctx.Model, customModel.Provider, customModel.ID)
 	}
 
-	if err := a.SetModel(deepseek.ProviderID, "deepseek-v4.1-flash"); err != nil {
+	if err := a.SetModel(deepseek.ProviderID, deepseek.DefaultModel); err != nil {
 		t.Fatalf("SetModel(deepseek) error = %v", err)
 	}
 	if !a.AutoCompactionEnabled() || !a.agent.AgentContext.Tools[0].(*tool.Read).SupportsImages {
@@ -127,7 +127,7 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 	if err := a.SetModel(customModel.Provider, "missing"); err == nil {
 		t.Fatal("SetModel(missing) error = nil, want validation error")
 	}
-	if got := a.CurrentModel(); got.Provider != deepseek.ProviderID || got.ID != "deepseek-v4.1-flash" {
+	if got := a.CurrentModel(); got.Provider != deepseek.ProviderID || got.ID != deepseek.DefaultModel {
 		t.Errorf("failed model switch changed current model to %s/%s", got.Provider, got.ID)
 	}
 }

@@ -444,6 +444,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
 				ReasoningTokens:    wire.Usage.ReasoningTokens,
 				TotalTokens:        wire.Usage.TotalTokens,
+				Cost:               cloneCost(wire.Usage.Cost),
 			},
 		}, nil
 	case "toolResult":
@@ -477,6 +478,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
 				ReasoningTokens:    wire.Usage.ReasoningTokens,
 				TotalTokens:        wire.Usage.TotalTokens,
+				Cost:               cloneCost(wire.Usage.Cost),
 			}
 			msg.Usage = &usage
 		}
@@ -521,5 +523,6 @@ func usageWire(u llm.Usage) Usage {
 		CacheWrite1HTokens: u.CacheWrite1HTokens,
 		ReasoningTokens:    u.ReasoningTokens,
 		TotalTokens:        u.TotalTokens,
+		Cost:               cloneCost(u.Cost),
 	}
 }
