@@ -126,6 +126,8 @@ func (a *App) Wait() {
 }
 
 func (a *App) executeOperation(ctx context.Context, request OperationRequest) (result OperationResult) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	defer func() {
 		a.agent.ReplaceMessages(a.session.BuildContext().Messages())
 		var commitErr *session.CommitError

@@ -328,6 +328,24 @@ func responseFromJSON(t *testing.T, s string) responses.Response {
 }
 
 func TestBuildAssistantMessage(t *testing.T) {
+	t.Run("normalizes nested cache write one hour usage", func(t *testing.T) {
+		resp := responseFromJSON(t, `{
+			"id":"resp_usage","created_at":0,"status":"completed",
+			"output":[{"type":"message","id":"m_usage","role":"assistant","status":"completed",
+				"content":[{"type":"output_text","text":"ok"}]}],
+			"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,
+				"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":0,"cache_write_1h_tokens":3}}
+		}`)
+		msg, _, err := BuildAssistantMessage(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := llm.Usage{InputTokens: 6, OutputTokens: 2, CacheReadTokens: 1, CacheWriteTokens: 3, CacheWrite1HTokens: 3, TotalTokens: 12}
+		if msg.Usage != want {
+			t.Fatalf("usage = %+v, want %+v", msg.Usage, want)
+		}
+	})
+
 	t.Run("reasoning summary takes precedence and keeps the original item", func(t *testing.T) {
 		resp := responseFromJSON(t, `{
 			"id":"resp_reasoning","created_at":0,"status":"completed",
@@ -365,7 +383,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 		if msg.StopReason != llm.StopReasonToolUse {
 			t.Errorf("StopReason = %q, want toolUse", msg.StopReason)
 		}
-		if msg.Usage != (llm.Usage{InputTokens: 10, OutputTokens: 5}) {
+		if msg.Usage != (llm.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}) {
 			t.Errorf("Usage = %+v", msg.Usage)
 		}
 		if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "ping" {

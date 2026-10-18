@@ -146,6 +146,9 @@ func containsInt(values []int, value int) bool {
 
 func (m *Model) renderMessage(message Message) string {
 	width := max(1, m.width-2)
+	if message.Role == "context" {
+		return colored(textColor, ansi.Wrap(message.Text, width, ""))
+	}
 	if message.Role == "notice" || message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}

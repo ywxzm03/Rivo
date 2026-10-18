@@ -390,4 +390,20 @@ func TestBuildContextStaleUsage(t *testing.T) {
 			t.Error("UsageStale = true, want false without compaction")
 		}
 	})
+	t.Run("context edit invalidates earlier usage", func(t *testing.T) {
+		m := New("/project", t.TempDir())
+		if err := m.AppendMessage(userMsg("u1")); err != nil {
+			t.Fatal(err)
+		}
+		userID := m.LastEntryID()
+		if err := m.AppendMessage(assistantMsg("a1")); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.AppendContextEdit(userID, &Replacement{Content: []llm.Content{llm.TextContent{Text: "edited"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if !m.BuildContext().UsageStale {
+			t.Error("UsageStale = false, want true after context edit")
+		}
+	})
 }

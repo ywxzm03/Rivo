@@ -17,10 +17,12 @@ import (
 )
 
 type App struct {
-	agent          *agent.Agent
-	session        *session.SessionManager
-	coordinator    *Coordinator
-	operationMu    sync.Mutex
+	agent       *agent.Agent
+	session     *session.SessionManager
+	coordinator *Coordinator
+	operationMu sync.Mutex
+	// stateMu 串行化 operation 对模型配置、Agent 上下文和 session 投影的访问
+	stateMu        sync.RWMutex
 	active         *Operation
 	operationID    uint64
 	pendingRequest *OperationRequest

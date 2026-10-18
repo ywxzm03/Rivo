@@ -39,6 +39,7 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	output := newSerializedOutput(stdout)
 	model := tui.New(runtime.Snapshot(), tui.Handlers{
 		Request:           runtime.Request,
+		Context:           runtime.Context,
 		Cancel:            runtime.Cancel,
 		EnqueueSteering:   runtime.EnqueueSteering,
 		RestoreSteering:   runtime.RestoreSteering,

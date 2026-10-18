@@ -54,6 +54,9 @@ type Result struct {
 func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions string) (Result, error) {
 	messages := view.Messages()
 	tokensBefore := ContextTokens(messages)
+	if view.UsageStale {
+		tokensBefore = EstimateContextTokens(messages)
+	}
 	start, previousSummary, previousFiles := compactionBoundary(view.Entries)
 	plan := FindCutPoint(view.Entries, start, c.Config.KeepRecentTokens)
 	if plan.CutIndex <= start {
@@ -93,10 +96,7 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 				summary, usage = prefixSummary, prefixUsage
 			} else {
 				summary = MergeSummaries(summary, prefixSummary)
-				usage = llm.Usage{
-					InputTokens:  usage.InputTokens + prefixUsage.InputTokens,
-					OutputTokens: usage.OutputTokens + prefixUsage.OutputTokens,
-				}
+				usage = combineUsage(usage, prefixUsage)
 			}
 		}
 		result.Summary, result.FileLists = summaryWithFileLists(summary, previousFiles, history, turnPrefix)
@@ -114,6 +114,22 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 	result.Summary, result.FileLists = summaryWithFileLists(summary, previousFiles, conversation)
 	result.Usage = usage
 	return result, nil
+}
+
+func combineUsage(first, second llm.Usage) llm.Usage {
+	combined := llm.Usage{
+		InputTokens:        first.InputTokens + second.InputTokens,
+		OutputTokens:       first.OutputTokens + second.OutputTokens,
+		CacheReadTokens:    first.CacheReadTokens + second.CacheReadTokens,
+		CacheWriteTokens:   first.CacheWriteTokens + second.CacheWriteTokens,
+		CacheWrite1HTokens: first.CacheWrite1HTokens + second.CacheWrite1HTokens,
+		ReasoningTokens:    first.ReasoningTokens + second.ReasoningTokens,
+		TotalTokens:        first.TotalTokens + second.TotalTokens,
+	}
+	if combined.TotalTokens == 0 {
+		combined.TotalTokens = combined.ContextTokens()
+	}
+	return combined
 }
 
 // compactionBoundary 返回最新 compaction 后的 entry 起点和增量摘要基线

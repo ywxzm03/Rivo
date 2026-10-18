@@ -41,6 +41,7 @@ type ToolResultMessage struct {
 	Content    []Content
 	Details    any
 	IsError    bool
+	Usage      *Usage
 }
 
 func (ToolResultMessage) Role() Role { return RoleToolResult }
@@ -65,8 +66,23 @@ const (
 )
 
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
+	// CacheWrite1HTokens 是 CacheWriteTokens 的细分项，ReasoningTokens 已包含在 OutputTokens 中
+	InputTokens        int
+	OutputTokens       int
+	CacheReadTokens    int
+	CacheWriteTokens   int
+	CacheWrite1HTokens int
+	ReasoningTokens    int
+	TotalTokens        int
+}
+
+// ContextTokens 返回 provider usage 对当前上下文窗口的 token 贡献。
+// provider 未返回 total 时按规范化后的分项回退计算
+func (u Usage) ContextTokens() int {
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
+	return u.InputTokens + u.OutputTokens + u.CacheReadTokens + max(u.CacheWriteTokens, u.CacheWrite1HTokens)
 }
 
 var (

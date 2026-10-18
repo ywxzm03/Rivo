@@ -55,7 +55,7 @@ func TestStreamConvertsTextAndCacheHeaders(t *testing.T) {
 	if done == nil || len(done.Content) != 1 || done.Content[0].(llm.TextContent).Text != "hello" {
 		t.Fatalf("done = %#v", done)
 	}
-	if done.Usage.InputTokens != 10 || done.Usage.OutputTokens != 1 {
+	if done.Usage.InputTokens != 2 || done.Usage.OutputTokens != 1 || done.Usage.CacheReadTokens != 7 || done.Usage.CacheWriteTokens != 1 || done.Usage.TotalTokens != 11 {
 		t.Fatalf("usage = %+v", done.Usage)
 	}
 	if gotHeaders.Get("session_id") != "session-1" || gotHeaders.Get("x-client-request-id") != "session-1" || gotHeaders.Get("x-session-affinity") != "session-1" {
@@ -104,6 +104,34 @@ func TestStreamPreservesLengthWithToolCall(t *testing.T) {
 	}
 }
 
+func TestStreamUsesChoiceUsageFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w,
+			`data: {"id":"choice-usage","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"content":"ok"},"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":4}}}]}`+"\n\n",
+			`data: {"id":"choice-usage","object":"chat.completion.chunk","created":1,"model":"gpt-5.6-sol","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n",
+			"data: [DONE]\n\n",
+		)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL+"/v1")
+	model := llm.Model{ID: "gpt-5.6-sol", Provider: "openai", API: llm.APIOpenAICompletions}
+	events, err := client.Stream(context.Background(), model, llm.Context{}, llm.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var done *llm.AssistantMessage
+	for event := range events {
+		if value, ok := event.(llm.AssistantMessageDoneEvent); ok {
+			done = value.Message
+		}
+	}
+	if done == nil || done.Usage.InputTokens != 6 || done.Usage.CacheReadTokens != 4 || done.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v, want choice fallback", done.Usage)
+	}
+}
+
 func TestStreamStartCancellationPreservesCause(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer server.Close()
@@ -124,5 +152,26 @@ func TestStreamStartCancellationPreservesCause(t *testing.T) {
 	}
 	if !errors.Is(streamErr, context.DeadlineExceeded) {
 		t.Fatalf("stream error = %v, want deadline exceeded", streamErr)
+	}
+}
+
+func TestUsageFromRawRejectsEmptyUsageAndIncludesNestedCacheWrite1H(t *testing.T) {
+	if usage, ok := usageFromRaw(map[string]any{"usage": map[string]any{}}); ok || usage != (llm.Usage{}) {
+		t.Fatalf("empty usage = %+v, %v; want no usage", usage, ok)
+	}
+
+	usage, ok := usageFromRaw(map[string]any{"usage": map[string]any{
+		"prompt_tokens":     10.0,
+		"completion_tokens": 2.0,
+		"prompt_tokens_details": map[string]any{
+			"cache_write_1h_tokens": 3.0,
+		},
+	}})
+	if !ok {
+		t.Fatal("nested cache write usage was rejected")
+	}
+	want := llm.Usage{InputTokens: 7, OutputTokens: 2, CacheWriteTokens: 3, CacheWrite1HTokens: 3, TotalTokens: 12}
+	if usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
 	}
 }

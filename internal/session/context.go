@@ -75,7 +75,14 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 	for i, e := range path {
 		pathIdx[e.base().ID] = i
 	}
-	// lastAssistantStale 记录最后一条 assistant 的 entry 是否早于最近一次压缩，
+	latestInvalidatingIdx := -1
+	for i, e := range path {
+		switch e.(type) {
+		case *CompactionEntry, *ContextEditEntry:
+			latestInvalidatingIdx = i
+		}
+	}
+	// lastAssistantStale 记录最后一条 assistant 的 usage 是否早于最近一次会改变 projection 的 entry，
 	// 与消息在投影中的先后无关（保留尾部的 assistant 在投影里排在摘要之后）
 	lastAssistantStale := false
 	for _, e := range selected {
@@ -97,7 +104,7 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 				Messages: []llm.Message{message},
 			})
 			if _, ok := message.(llm.AssistantMessage); ok {
-				lastAssistantStale = compaction != nil && pathIdx[e.base().ID] < compactionIdx
+				lastAssistantStale = latestInvalidatingIdx >= 0 && pathIdx[e.base().ID] < latestInvalidatingIdx
 			}
 		case *CompactionEntry:
 			// 保留区间内可能残留更早的 compaction，只有最新的这个产出快照与摘要

@@ -25,7 +25,7 @@ func TestMessageRoundtrip(t *testing.T) {
 			llm.ToolCall{ID: "call_1", Name: "read", Arguments: map[string]any{"path": "a.go"}},
 		},
 		StopReason: llm.StopReasonToolUse,
-		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5},
+		Usage:      llm.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheWriteTokens: 3, ReasoningTokens: 4, TotalTokens: 20},
 	}
 	toolResult := llm.ToolResultMessage{
 		ToolCallID: "call_1",
@@ -33,6 +33,7 @@ func TestMessageRoundtrip(t *testing.T) {
 		Content:    []llm.Content{llm.TextContent{Text: "file content"}},
 		Details:    map[string]any{"lines": "1-10"},
 		IsError:    true,
+		Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
 	}
 
 	for name, msg := range map[string]llm.Message{"user": user, "assistant": assistant, "toolResult": toolResult} {
@@ -77,8 +78,13 @@ func messagesEqual(a, b llm.Message) bool {
 			contentEqual(a.Content, b.Content)
 	case llm.ToolResultMessage:
 		b, ok := b.(llm.ToolResultMessage)
-		return ok && a.ToolCallID == b.ToolCallID && a.ToolName == b.ToolName && a.IsError == b.IsError &&
-			contentEqual(a.Content, b.Content)
+		if !ok || a.ToolCallID != b.ToolCallID || a.ToolName != b.ToolName || a.IsError != b.IsError || !contentEqual(a.Content, b.Content) {
+			return false
+		}
+		if a.Usage == nil || b.Usage == nil {
+			return a.Usage == nil && b.Usage == nil
+		}
+		return *a.Usage == *b.Usage
 	}
 	return false
 }

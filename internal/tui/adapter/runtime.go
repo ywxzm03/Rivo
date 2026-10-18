@@ -711,9 +711,23 @@ func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
 
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }
 func (r *Runtime) Request(request tui.Request) tea.Cmd    { return r.request(request) }
-func (r *Runtime) Cancel()                                { r.cancelCurrent() }
-func (r *Runtime) Wait()                                  { r.waitCurrent() }
-func (r *Runtime) Snapshot() tui.Snapshot                 { return r.snapshot() }
+
+// Context 返回只读 context 查询命令；它不创建 App operation，也不触碰 session 持久化。
+func (r *Runtime) Context() tea.Cmd {
+	return func() tea.Msg {
+		r.mu.Lock()
+		activeApp := r.app
+		r.mu.Unlock()
+		if activeApp == nil {
+			return tui.ContextUsageMsg{Err: errors.New("context usage is unavailable")}
+		}
+		usage := activeApp.ContextUsage()
+		return tui.ContextUsageMsg{Tokens: usage.Tokens, ContextWindow: usage.ContextWindow, Available: usage.Available}
+	}
+}
+func (r *Runtime) Cancel()                { r.cancelCurrent() }
+func (r *Runtime) Wait()                  { r.waitCurrent() }
+func (r *Runtime) Snapshot() tui.Snapshot { return r.snapshot() }
 
 func preserveDisplayMetadata(messages, previous []tui.Message) []tui.Message {
 	old := make(map[string]tui.Message, len(previous))

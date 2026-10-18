@@ -701,6 +701,9 @@ func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
 func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason, err error, partial *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	message := a.newAssistantMessage()
 	message.StopReason = reason
+	if partial != nil {
+		message.Usage = partial.Usage
+	}
 	if reason == llm.StopReasonAborted {
 		// 取消属于用户操作而非故障：固定文案，保留已收到的 partial 内容
 		message.ErrorMessage = "Operation aborted"
@@ -925,7 +928,7 @@ func (a *Agent) emitToolEnd(call llm.ToolCall, result llm.ToolResult, isError bo
 
 // toolResultMessage 保留已执行工具的完整结果，提交失败也不重新执行工具
 func toolResultMessage(call llm.ToolCall, result llm.ToolResult, isError bool) llm.ToolResultMessage {
-	return llm.ToolResultMessage{ToolCallID: call.ID, ToolName: call.Name, Content: result.Content, Details: result.Details, IsError: isError}
+	return llm.ToolResultMessage{ToolCallID: call.ID, ToolName: call.Name, Content: result.Content, Details: result.Details, IsError: isError, Usage: result.Usage}
 }
 
 func (a *Agent) commitToolResults(results []llm.ToolResultMessage, notify bool) error {

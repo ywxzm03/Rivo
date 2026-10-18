@@ -57,7 +57,7 @@ func TestRunAbortErrorEventKeepsPartial(t *testing.T) {
 	events, sink := collectEvents()
 	streamFn := func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		events2 := make(chan llm.AssistantMessageEvent, 2)
-		partial := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "partial answer"}}}
+		partial := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "partial answer"}}, Usage: llm.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}}
 		events2 <- llm.AssistantMessageTextDeltaEvent{ContentIndex: 0, Delta: "partial answer", Partial: partial}
 		events2 <- llm.AssistantMessageErrorEvent{Reason: llm.StopReasonAborted, Err: context.Canceled, Partial: partial}
 		close(events2)
@@ -73,6 +73,9 @@ func TestRunAbortErrorEventKeepsPartial(t *testing.T) {
 	}
 	if text, ok := message.Content[0].(llm.TextContent); !ok || text.Text != "partial answer" {
 		t.Fatalf("partial content lost: %+v", message.Content)
+	}
+	if message.Usage.TotalTokens != 12 {
+		t.Fatalf("partial usage lost: %+v", message.Usage)
 	}
 	assertAbortedEventSequence(t, *events)
 }
