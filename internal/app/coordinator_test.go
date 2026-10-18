@@ -104,6 +104,20 @@ func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRejectsImagesForLegacyRunner(t *testing.T) {
+	coord, _, _ := newTestCoordinator(t, t.TempDir(), nil)
+	message := llm.UserMessage{Content: []llm.Content{
+		llm.TextContent{Text: "describe"},
+		llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
+	}}
+	if _, err := coord.RunMessage(context.Background(), message); err == nil {
+		t.Fatal("RunMessage accepted image input through a text-only runner")
+	}
+	if err := coord.EnqueueSteeringMessage(message); err == nil {
+		t.Fatal("EnqueueSteeringMessage accepted image input through a text-only runner")
+	}
+}
+
 func TestCoordinatorContinueQueuedRequiresQueuedRunner(t *testing.T) {
 	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
 	if _, err := coord.ContinueQueued(context.Background()); !errors.Is(err, ErrQueuedRunnerUnavailable) {

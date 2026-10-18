@@ -89,13 +89,18 @@ func (m *Model) scrollWheel(direction int) {
 }
 
 func (m *Model) readClipboard() tea.Cmd {
-	if m.handlers.ReadClipboard == nil {
+	if m.handlers.ReadClipboard == nil && m.handlers.ReadClipboardData == nil {
 		return nil
 	}
-	read := m.handlers.ReadClipboard
+	readData := m.handlers.ReadClipboardData
+	readText := m.handlers.ReadClipboard
 	return func() tea.Msg {
-		text, err := read()
-		return clipboardReadMsg{text: text, err: err}
+		if readData != nil {
+			data, err := readData()
+			return clipboardReadMsg{data: data, err: err}
+		}
+		text, err := readText()
+		return clipboardReadMsg{data: ClipboardData{Text: text}, err: err}
 	}
 }
 

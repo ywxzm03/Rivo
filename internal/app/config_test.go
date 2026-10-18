@@ -223,6 +223,26 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	}
 }
 
+func TestLoadCustomProviderUsesPIImageInputCapability(t *testing.T) {
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{
+		"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie",
+		"models":[{"id":"workbuddy-ai/deepseek-v4.1-flash","input":["text","image"]}]
+	}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec, err := cfg.lookupProvider("magpie")
+	if err != nil {
+		t.Fatalf("lookupProvider() error = %v", err)
+	}
+	if len(spec.models) != 1 || !spec.models[0].SupportsImages {
+		t.Fatalf("model capability = %+v, want SupportsImages=true from input=image", spec.models)
+	}
+}
+
 func TestLoadCustomProviderSelectsChatCompletionsAPI(t *testing.T) {
 	dir := useConfigHome(t)
 	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{"baseUrl":"http://127.0.0.1:3425/v1","api":"openai-completions","apiKey":"openai","models":[{"id":"gpt-5.6-sol","api":"openai-completions"}]}}}`)

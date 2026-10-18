@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -21,16 +22,54 @@ type Agent struct {
 	// CommitMessages 在推进核心上下文前整体提交消息，返回稳定来源 ID
 	CommitMessages func([]llm.Message) ([]string, error)
 
-	runGuardOnce  sync.Once
-	runGuard      chan struct{}
-	steeringMu    sync.Mutex
-	steering      []steeringMessage
-	currentUserID string
+	runGuardOnce     sync.Once
+	runGuard         chan struct{}
+	steeringMu       sync.Mutex
+	steering         []steeringMessage
+	steeringRevision uint64
+	currentUserID    string
 }
 
 type steeringMessage struct {
 	input     string
+	message   llm.UserMessage
 	retryable bool
+}
+
+func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
+	message.Content = append([]llm.Content(nil), message.Content...)
+	return message
+}
+
+func textOfUserMessage(message llm.UserMessage) string {
+	var parts []string
+	for _, content := range message.Content {
+		if text, ok := content.(llm.TextContent); ok {
+			parts = append(parts, text.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func displayUserMessageText(message llm.UserMessage) string {
+	var parts []string
+	for _, content := range message.Content {
+		switch content := content.(type) {
+		case llm.TextContent:
+			parts = append(parts, content.Text)
+		case llm.ImageContent:
+			label := "[image]"
+			if content.MIMEType != "" {
+				label = "[image: " + content.MIMEType + "]"
+			}
+			parts = append(parts, label)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func equalUserMessage(left, right llm.UserMessage) bool {
+	return reflect.DeepEqual(left, right)
 }
 
 // Steer 把用户输入加入当前运行的 steering 队列，不打断正在进行的模型或工具
@@ -39,8 +78,17 @@ func (a *Agent) Steer(input string) error {
 	if input == "" {
 		return errors.New("agent: steering input is empty")
 	}
+	return a.SteerMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// SteerMessage 把带图片的用户输入加入当前运行的 steering 队列
+func (a *Agent) SteerMessage(message llm.UserMessage) error {
+	if len(message.Content) == 0 {
+		return errors.New("agent: steering input is empty")
+	}
 	a.steeringMu.Lock()
-	a.steering = append(a.steering, steeringMessage{input: input})
+	a.steering = append(a.steering, steeringMessage{input: textOfUserMessage(message), message: cloneUserMessage(message)})
+	a.steeringRevision++
 	a.steeringMu.Unlock()
 	return nil
 }
@@ -58,9 +106,27 @@ func (a *Agent) SteeringMessages() []string {
 	defer a.steeringMu.Unlock()
 	messages := make([]string, len(a.steering))
 	for i, message := range a.steering {
-		messages[i] = message.input
+		messages[i] = displayUserMessageText(message.message)
 	}
 	return messages
+}
+
+// SteeringUserMessages 返回等待消费的结构化 steering 副本
+func (a *Agent) SteeringUserMessages() []llm.UserMessage {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	messages := make([]llm.UserMessage, len(a.steering))
+	for i, message := range a.steering {
+		messages[i] = cloneUserMessage(message.message)
+	}
+	return messages
+}
+
+// SteeringRevision 返回等待消费队列的单调版本
+func (a *Agent) SteeringRevision() uint64 {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	return a.steeringRevision
 }
 
 // TakeSteering 清空等待消费的 steering，并按 FIFO 返回消息文本
@@ -71,17 +137,45 @@ func (a *Agent) TakeSteering() []string {
 	for i, message := range a.steering {
 		messages[i] = message.input
 	}
-	a.steering = nil
+	if len(a.steering) > 0 {
+		a.steering = nil
+		a.steeringRevision++
+	}
+	return messages
+}
+
+// TakeSteeringMessages 原子取出结构化 steering，供 TUI 撤回
+func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
+	a.steeringMu.Lock()
+	defer a.steeringMu.Unlock()
+	messages := make([]llm.UserMessage, len(a.steering))
+	for i, message := range a.steering {
+		messages[i] = cloneUserMessage(message.message)
+	}
+	if len(a.steering) > 0 {
+		a.steering = nil
+		a.steeringRevision++
+	}
 	return messages
 }
 
 // AcknowledgeSteering 删除宿主提交失败后恢复、且已由会话补写的 steering
 func (a *Agent) AcknowledgeSteering(input string) bool {
+	return a.acknowledgeSteering(func(message steeringMessage) bool { return message.input == input })
+}
+
+// AcknowledgeSteeringMessage 确认已由宿主补写的结构化 steering
+func (a *Agent) AcknowledgeSteeringMessage(input llm.UserMessage) bool {
+	return a.acknowledgeSteering(func(message steeringMessage) bool { return equalUserMessage(message.message, input) })
+}
+
+func (a *Agent) acknowledgeSteering(match func(steeringMessage) bool) bool {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
 	for i, message := range a.steering {
-		if message.retryable && message.input == input {
+		if message.retryable && match(message) {
 			a.steering = append(a.steering[:i], a.steering[i+1:]...)
+			a.steeringRevision++
 			return true
 		}
 	}
@@ -97,6 +191,7 @@ func (a *Agent) takeSteering() (steeringMessage, bool) {
 	}
 	message := a.steering[0]
 	a.steering = a.steering[1:]
+	a.steeringRevision++
 	return message, true
 }
 
@@ -105,6 +200,7 @@ func (a *Agent) restoreSteering(message steeringMessage) {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
 	a.steering = append([]steeringMessage{message}, a.steering...)
+	a.steeringRevision++
 }
 
 // PreparedRequest 是一次模型请求的配置与上下文快照
@@ -143,6 +239,11 @@ func (a *Agent) acquireRunGuard(ctx context.Context) (func(), error) {
 }
 
 func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
+	return a.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// RunMessage 运行一条包含文本和图片的用户消息
+func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*llm.AssistantMessage, error) {
 	// 同一 Agent 的多次运行在此排队串行执行，等待期间响应取消
 	release, err := a.acquireRunGuard(ctx)
 	if err != nil {
@@ -159,9 +260,6 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	}
 
 	// 1.发出用户消息事件并写入上下文
-	userMessage := llm.UserMessage{
-		Content: []llm.Content{llm.TextContent{Text: input}},
-	}
 	if err := a.emit(llm.TurnStartEvent{}); err != nil {
 		return nil, err
 	}
@@ -272,7 +370,10 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			pending, ok = a.takeSteering()
 		}
 		if ok {
-			userMessage := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
+			userMessage := pending.message
+			if len(userMessage.Content) == 0 {
+				userMessage = llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
+			}
 			ids, err := a.persistMessages([]llm.Message{userMessage})
 			if err != nil {
 				pending.retryable = true

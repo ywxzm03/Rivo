@@ -77,7 +77,7 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 			Provider:         id,
 			API:              llm.API(api),
 			Reasoning:        m.Reasoning,
-			SupportsImages:   m.SupportsImages,
+			SupportsImages:   m.SupportsImages || hasImageInput(m.Input),
 			ContextWindow:    m.ContextWindow,
 			MaxTokens:        m.MaxTokens,
 			ThinkingLevelMap: thinkingLevelMap(m.ThinkingLevelMap),
@@ -95,6 +95,16 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 			return models, p.Stream
 		},
 	}, nil
+}
+
+// hasImageInput 兼容 PI models.json 的 input 能力声明
+func hasImageInput(inputs []string) bool {
+	for _, input := range inputs {
+		if strings.EqualFold(strings.TrimSpace(input), "image") {
+			return true
+		}
+	}
+	return false
 }
 
 // thinkingLevelMap 把 config 的字符串映射转为 llm 的强类型映射

@@ -36,6 +36,8 @@ type Model struct {
 	Reasoning bool `json:"reasoning"`
 	// SupportsImages 表示模型接受图片输入，影响 read 工具是否把图片降级为文字说明
 	SupportsImages bool `json:"supportsImages"`
+	// Input 是 PI 配置中的模型输入能力列表；包含 image 时表示模型接受图片
+	Input []string `json:"input"`
 	// ThinkingLevelMap 把思考等级映射为该模型的 reasoning effort；值 null 表示该等级禁用
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 	// SamplingParams 是并入请求体的自由采样参数（temperature/top_p 等）

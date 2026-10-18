@@ -68,13 +68,21 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Unlock()
 	if req.Kind == "steer" {
 		var err error
+		var revision uint64
 		if activeApp == nil {
 			err = app.ErrSteeringUnavailable
 		} else {
-			err = activeApp.EnqueueSteering(req.Value)
+			if req.Message != nil {
+				err = activeApp.EnqueueSteeringMessage(*req.Message)
+			} else {
+				err = activeApp.EnqueueSteering(req.Value)
+			}
+			if err == nil {
+				revision = activeApp.SteeringRevision()
+			}
 		}
 		return func() tea.Msg {
-			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Err: err}
+			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
 		}
 	}
 	value := req.Value
@@ -82,7 +90,9 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		var err error
 		value, err = r.expandSkillInput(activeApp, value)
 		if err != nil {
-			return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
+			return func() tea.Msg {
+				return tui.OperationDoneMsg{ID: req.ID, Err: err, EditorValue: userMessageEditorTextOrEmpty(req.Message), EditorMessage: req.Message, RestoreEditor: req.Message != nil}
+			}
 		}
 	}
 	r.mu.Lock()
@@ -101,9 +111,11 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		r.turnRetrying = false
 	}
 	r.mu.Unlock()
-	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value, RestoreMode: filehistory.RestoreMode(req.RestoreMode)})
+	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value, Message: req.Message, RestoreMode: filehistory.RestoreMode(req.RestoreMode)})
 	if err != nil {
-		return func() tea.Msg { return tui.OperationDoneMsg{ID: req.ID, Err: err} }
+		return func() tea.Msg {
+			return tui.OperationDoneMsg{ID: req.ID, Err: err, EditorValue: userMessageEditorTextOrEmpty(req.Message), EditorMessage: req.Message, RestoreEditor: req.Message != nil}
+		}
 	}
 	return func() tea.Msg {
 		result := op.Wait()
@@ -214,7 +226,18 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 				}
 			}
 		}
-		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: result.EditorText, RestoreEditor: result.RestoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}
+		restoreEditor := result.RestoreEditor
+		editorValue := result.EditorText
+		editorMessage := result.EditorMessage
+		if result.RestoreEditor && result.EditorMessage != nil {
+			editorValue = userMessageEditorText(*result.EditorMessage)
+		}
+		if result.Err != nil && req.Message != nil {
+			restoreEditor = true
+			editorValue = userMessageEditorText(*req.Message)
+			editorMessage = req.Message
+		}
+		return tui.OperationDoneMsg{ID: req.ID, Snapshot: &snapshot, RetainMessages: !reset, Tail: tail, Changes: changes, Err: result.Err, Notice: notice, EditorValue: editorValue, EditorMessage: editorMessage, RestoreEditor: restoreEditor, ResetSessionUI: req.Kind == "new" && result.Next != nil, ResetTranscript: req.Kind == "clear" && result.Err == nil}
 	}
 }
 
@@ -387,7 +410,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 		notifications = append(notifications, tui.StatusMsg(status))
 	}
 	if steeringChanged && r.app != nil {
-		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages()})
+		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages(), Inputs: r.app.SteeringUserMessages(), Revision: r.app.SteeringRevision()})
 	}
 	send := r.send
 	r.mu.Unlock()
@@ -492,6 +515,7 @@ func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Mess
 	switch message := message.(type) {
 	case llm.UserMessage:
 		converted.Role, converted.Text = "user", textContent(message.Content)
+		converted.Images = imageViews(message.Content)
 		converted.Skill = skillInvocation(converted.Text)
 	case llm.AssistantMessage:
 		converted.Role = "assistant"
@@ -508,7 +532,17 @@ func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Mess
 	default:
 		return tui.Message{}, false
 	}
-	return converted, converted.Text != "" || converted.Thinking != ""
+	return converted, converted.Text != "" || converted.Thinking != "" || len(converted.Images) > 0
+}
+
+func imageViews(contents []llm.Content) []tui.ImageView {
+	var images []tui.ImageView
+	for _, content := range contents {
+		if image, ok := content.(llm.ImageContent); ok {
+			images = append(images, tui.ImageView{MIMEType: image.MIMEType})
+		}
+	}
+	return images
 }
 
 func textContent(contents []llm.Content) string {
@@ -521,6 +555,28 @@ func textContent(contents []llm.Content) string {
 	return strings.Join(parts, "\n")
 }
 
+func userMessageEditorText(message llm.UserMessage) string {
+	var builder strings.Builder
+	imageIndex := 0
+	for _, content := range message.Content {
+		switch content := content.(type) {
+		case llm.TextContent:
+			builder.WriteString(content.Text)
+		case llm.ImageContent:
+			imageIndex++
+			fmt.Fprintf(&builder, "[Image #%d]", imageIndex)
+		}
+	}
+	return builder.String()
+}
+
+func userMessageEditorTextOrEmpty(message *llm.UserMessage) string {
+	if message == nil {
+		return ""
+	}
+	return userMessageEditorText(*message)
+}
+
 func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	model := r.app.CurrentModel()
 	thinking := r.app.CurrentThinkingLevel()
@@ -529,7 +585,7 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	models := make([]tui.ModelOption, 0)
 	for _, candidate := range r.app.AvailableModels() {
-		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate)})
+		models = append(models, tui.ModelOption{ID: candidate.ID, Provider: candidate.Provider, Name: candidate.Name, ContextWindow: candidate.ContextWindow, Levels: thinkingLevels(candidate), SupportsImages: candidate.SupportsImages})
 	}
 	current := modelOption(model)
 	var skills []tui.SkillOption
@@ -541,8 +597,9 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		messages = append([]tui.Message(nil), r.messages...)
 	}
 	steering := r.app.SteeringMessages()
+	steeringInputs := r.app.SteeringUserMessages()
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
 }
 
 // listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
@@ -560,7 +617,7 @@ func listSessionOptions(cwd string) []tui.SessionOption {
 }
 
 func modelOption(model llm.Model) tui.ModelOption {
-	return tui.ModelOption{ID: model.ID, Provider: model.Provider, Name: model.Name, ContextWindow: model.ContextWindow, Levels: thinkingLevels(model)}
+	return tui.ModelOption{ID: model.ID, Provider: model.Provider, Name: model.Name, ContextWindow: model.ContextWindow, Levels: thinkingLevels(model), SupportsImages: model.SupportsImages}
 }
 
 func (r *Runtime) snapshot() tui.Snapshot {
@@ -619,6 +676,17 @@ func (r *Runtime) RestoreSteering() []string {
 	return activeApp.TakeSteering()
 }
 
+// RestoreSteeringMessages 原子取出结构化 steering
+func (r *Runtime) RestoreSteeringMessages() []llm.UserMessage {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.TakeSteeringMessages()
+}
+
 // EnqueueSteering 同步接受一条 steering，队列操作不涉及磁盘或模型调用
 func (r *Runtime) EnqueueSteering(value string) error {
 	r.mu.Lock()
@@ -628,6 +696,17 @@ func (r *Runtime) EnqueueSteering(value string) error {
 		return app.ErrSteeringUnavailable
 	}
 	return activeApp.EnqueueSteering(value)
+}
+
+// EnqueueSteeringMessage 同步接受带图片的 steering
+func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrSteeringUnavailable
+	}
+	return activeApp.EnqueueSteeringMessage(value)
 }
 
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }

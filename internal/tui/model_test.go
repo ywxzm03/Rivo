@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestMain(m *testing.M) {
@@ -406,6 +407,37 @@ func TestRejectedSteeringDoesNotOverwriteNewDraft(t *testing.T) {
 	m.Update(SteeringResultMsg{Value: "late steering", Err: fmt.Errorf("operation ended")})
 	if got := m.editor.Value(); got != "new draft" {
 		t.Fatalf("draft = %q, want new draft", got)
+	}
+}
+
+func TestSteeringSnapshotsIgnoreOutOfOrderUpdates(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy = true
+	m.Update(SteeringResultMsg{Value: "new", Revision: 2})
+	m.Update(SteeringStateMsg{Messages: nil, Revision: 1})
+	if got := m.state.Steering; len(got) != 1 || got[0] != "new" {
+		t.Fatalf("stale snapshot cleared steering = %v", got)
+	}
+
+	m.Update(SteeringStateMsg{Messages: nil, Revision: 3})
+	m.Update(SteeringResultMsg{Value: "stale", Revision: 2})
+	if len(m.state.Steering) != 0 {
+		t.Fatalf("stale result appended steering = %v", m.state.Steering)
+	}
+}
+
+func TestEmptySteeringRestoreKeepsSnapshotWithoutReplayingIt(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy = true
+	m.state.Steering = []string{"already consumed"}
+	m.state.SteeringInputs = []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "already consumed"}}}}
+	m.handlers.RestoreSteeringMessages = func() []llm.UserMessage { return nil }
+	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if got := m.editor.Value(); got != "" {
+		t.Fatalf("editor = %q, want no stale replay", got)
+	}
+	if len(m.state.Steering) != 1 || m.state.Steering[0] != "already consumed" {
+		t.Fatalf("steering snapshot = %v, want preserved snapshot", m.state.Steering)
 	}
 }
 
