@@ -365,7 +365,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice("Error: " + msg.Err.Error())
 		} else {
 			m.contextNoticeSeq++
-			m.upsertMessage(Message{ID: fmt.Sprintf("context-%d", m.contextNoticeSeq), Role: "context", Text: formatContextUsage(msg)})
+			m.upsertMessage(Message{ID: "context", Revision: m.contextNoticeSeq, Role: "context", Text: formatContextUsage(msg)})
 			m.refreshTranscript()
 		}
 	case SteeringResultMsg:

@@ -50,6 +50,20 @@ func TestContextCommandAppendsWhiteRuntimeLine(t *testing.T) {
 	}
 }
 
+func TestContextCommandReplacesPreviousRuntimeLine(t *testing.T) {
+	m := testModel(100, 24)
+	m.Update(ContextUsageMsg{Tokens: 1000, ContextWindow: 200000, Available: true})
+	first := m.state.Messages[0]
+	m.Update(ContextUsageMsg{Tokens: 2000, ContextWindow: 200000, Available: true})
+	if len(m.state.Messages) != 1 {
+		t.Fatalf("context messages = %d, want one runtime line", len(m.state.Messages))
+	}
+	got := m.state.Messages[0]
+	if got.ID != "context" || got.Text != "context: 2.0k/200.0k" || got.Revision <= first.Revision {
+		t.Fatalf("context line = %+v, first = %+v", got, first)
+	}
+}
+
 func TestContextCommandRejectsBusyAndArguments(t *testing.T) {
 	m := testModel(100, 24)
 	called := false

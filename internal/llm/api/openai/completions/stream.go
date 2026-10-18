@@ -197,7 +197,7 @@ func firstChoice(chunk sdk.ChatCompletionChunk) (sdk.ChatCompletionChunkChoice, 
 }
 
 func usageFromChunk(chunk sdk.ChatCompletionChunk) (llm.Usage, bool) {
-	usage := normalizeUsage(
+	usage := llm.NormalizeUsage(
 		int(chunk.Usage.PromptTokens),
 		int(chunk.Usage.CompletionTokens),
 		int(chunk.Usage.TotalTokens),
@@ -206,7 +206,7 @@ func usageFromChunk(chunk sdk.ChatCompletionChunk) (llm.Usage, bool) {
 		0,
 		int(chunk.Usage.CompletionTokensDetails.ReasoningTokens),
 	)
-	return usage, chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 || chunk.Usage.TotalTokens != 0 || usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0
+	return usage, hasUsageValues(usage)
 }
 
 func usageFromRaw(raw map[string]any) (llm.Usage, bool) {
@@ -233,31 +233,25 @@ func usageFromRaw(raw map[string]any) (llm.Usage, bool) {
 		cacheRead = rawInt(usageRaw, "prompt_cache_hit_tokens")
 	}
 	cacheWrite := rawInt(usageRaw, "cache_write_tokens")
-	if details, ok := usageRaw["prompt_tokens_details"].(map[string]any); ok {
+	details, hasDetails := usageRaw["prompt_tokens_details"].(map[string]any)
+	if hasDetails {
 		cacheWrite = max(cacheWrite, rawInt(details, "cache_write_tokens"))
 	}
 	reasoning := 0
-	if details, ok := usageRaw["completion_tokens_details"].(map[string]any); ok {
-		reasoning = rawInt(details, "reasoning_tokens")
+	if outputDetails, ok := usageRaw["completion_tokens_details"].(map[string]any); ok {
+		reasoning = rawInt(outputDetails, "reasoning_tokens")
 	}
 	cacheWrite1h := rawInt(usageRaw, "cache_write_1h_tokens")
-	return normalizeUsage(prompt, completion, total, cacheRead, cacheWrite, cacheWrite1h, reasoning), true
+	if hasDetails {
+		cacheWrite1h = max(cacheWrite1h, rawInt(details, "cache_write_1h_tokens"))
+	}
+	usage := llm.NormalizeUsage(prompt, completion, total, cacheRead, cacheWrite, cacheWrite1h, reasoning)
+	return usage, hasUsageValues(usage)
 }
 
-func normalizeUsage(prompt, completion, total, cacheRead, cacheWrite, cacheWrite1h, reasoning int) llm.Usage {
-	input := max(0, prompt-cacheRead-cacheWrite)
-	if total == 0 {
-		total = input + completion + cacheRead + cacheWrite
-	}
-	return llm.Usage{
-		InputTokens:        input,
-		OutputTokens:       completion,
-		CacheReadTokens:    cacheRead,
-		CacheWriteTokens:   cacheWrite,
-		CacheWrite1HTokens: cacheWrite1h,
-		ReasoningTokens:    reasoning,
-		TotalTokens:        total,
-	}
+func hasUsageValues(usage llm.Usage) bool {
+	return usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CacheReadTokens != 0 ||
+		usage.CacheWriteTokens != 0 || usage.CacheWrite1HTokens != 0 || usage.ReasoningTokens != 0 || usage.TotalTokens != 0
 }
 
 func rawInt(values map[string]any, key string) int {

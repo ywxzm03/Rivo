@@ -432,20 +432,30 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 	}
 	cacheRead := int(resp.Usage.InputTokensDetails.CachedTokens)
 	cacheWrite := int(resp.Usage.InputTokensDetails.CacheWriteTokens)
-	input := max(0, int(resp.Usage.InputTokens)-cacheRead-cacheWrite)
-	total := int(resp.Usage.TotalTokens)
-	if total == 0 {
-		total = input + int(resp.Usage.OutputTokens) + cacheRead + cacheWrite
-	}
-	msg.Usage = llm.Usage{
-		InputTokens:      input,
-		OutputTokens:     int(resp.Usage.OutputTokens),
-		CacheReadTokens:  cacheRead,
-		CacheWriteTokens: cacheWrite,
-		ReasoningTokens:  int(resp.Usage.OutputTokensDetails.ReasoningTokens),
-		TotalTokens:      total,
-	}
+	cacheWrite1h := responseCacheWrite1H(resp.Usage.RawJSON())
+	msg.Usage = llm.NormalizeUsage(
+		int(resp.Usage.InputTokens),
+		int(resp.Usage.OutputTokens),
+		int(resp.Usage.TotalTokens),
+		cacheRead,
+		cacheWrite,
+		cacheWrite1h,
+		int(resp.Usage.OutputTokensDetails.ReasoningTokens),
+	)
 	return msg, calls, nil
+}
+
+func responseCacheWrite1H(raw string) int {
+	var usage struct {
+		CacheWrite1H int `json:"cache_write_1h_tokens"`
+		InputDetails struct {
+			CacheWrite1H int `json:"cache_write_1h_tokens"`
+		} `json:"input_tokens_details"`
+	}
+	if err := json.Unmarshal([]byte(raw), &usage); err != nil {
+		return 0
+	}
+	return max(usage.CacheWrite1H, usage.InputDetails.CacheWrite1H)
 }
 
 func toolCallFromItem(item responses.ResponseOutputItemUnion) (llm.ToolCall, error) {

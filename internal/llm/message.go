@@ -66,6 +66,7 @@ const (
 )
 
 type Usage struct {
+	// CacheWrite1HTokens 是 CacheWriteTokens 的细分项，ReasoningTokens 已包含在 OutputTokens 中
 	InputTokens        int
 	OutputTokens       int
 	CacheReadTokens    int
@@ -81,7 +82,7 @@ func (u Usage) ContextTokens() int {
 	if u.TotalTokens > 0 {
 		return u.TotalTokens
 	}
-	return u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
+	return u.InputTokens + u.OutputTokens + u.CacheReadTokens + max(u.CacheWriteTokens, u.CacheWrite1HTokens)
 }
 
 var (

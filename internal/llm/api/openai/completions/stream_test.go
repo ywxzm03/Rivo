@@ -154,3 +154,24 @@ func TestStreamStartCancellationPreservesCause(t *testing.T) {
 		t.Fatalf("stream error = %v, want deadline exceeded", streamErr)
 	}
 }
+
+func TestUsageFromRawRejectsEmptyUsageAndIncludesNestedCacheWrite1H(t *testing.T) {
+	if usage, ok := usageFromRaw(map[string]any{"usage": map[string]any{}}); ok || usage != (llm.Usage{}) {
+		t.Fatalf("empty usage = %+v, %v; want no usage", usage, ok)
+	}
+
+	usage, ok := usageFromRaw(map[string]any{"usage": map[string]any{
+		"prompt_tokens":     10.0,
+		"completion_tokens": 2.0,
+		"prompt_tokens_details": map[string]any{
+			"cache_write_1h_tokens": 3.0,
+		},
+	}})
+	if !ok {
+		t.Fatal("nested cache write usage was rejected")
+	}
+	want := llm.Usage{InputTokens: 7, OutputTokens: 2, CacheWriteTokens: 3, CacheWrite1HTokens: 3, TotalTokens: 12}
+	if usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}

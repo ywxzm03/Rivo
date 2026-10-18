@@ -15,12 +15,16 @@ type ContextUsage struct {
 
 // UsageTotals 返回当前会话全部持久化 usage，供非 TUI 查询和后续统计展示使用。
 func (a *App) UsageTotals() session.UsageTotals {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
 	return a.session.UsageTotals()
 }
 
 // ContextUsage 返回当前已提交上下文的只读 token 快照，不启动 operation 或修改 session。
 func (a *App) ContextUsage() ContextUsage {
-	model := a.CurrentModel()
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	model := a.agent.AgentConfig.Model
 	if model.ContextWindow <= 0 {
 		return ContextUsage{}
 	}
@@ -40,7 +44,7 @@ func usageAnchorMatchesModel(messages []llm.Message, model llm.Model) bool {
 			continue
 		}
 		if assistant.Provider == "" || assistant.Model == "" {
-			return true
+			continue
 		}
 		return assistant.Provider == model.Provider && assistant.Model == model.ID
 	}
