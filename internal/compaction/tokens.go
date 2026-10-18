@@ -21,7 +21,7 @@ func EstimateTokens(text string) int {
 	return (n + 3) / 4
 }
 
-// contentTokens 估算单个内容块：文本按 chars/4，图片按固定值，工具调用按参数 JSON 估算，thinking 不计
+// contentTokens 估算单个内容块：文本按 chars/4，图片按固定值，工具调用按参数 JSON 估算
 func contentTokens(content llm.Content) int {
 	switch c := content.(type) {
 	case llm.TextContent:
@@ -35,6 +35,8 @@ func contentTokens(content llm.Content) int {
 			return EstimateTokens(c.Name) + EstimateTokens(fmt.Sprint(c.Arguments))
 		}
 		return EstimateTokens(c.Name) + EstimateTokens(string(data))
+	case llm.ThinkingContent:
+		return EstimateTokens(c.Thinking)
 	default:
 		return 0
 	}
@@ -54,9 +56,7 @@ func MessageTokens(msg llm.Message) int {
 		}
 	case llm.ToolResultMessage:
 		for _, c := range m.Content {
-			if t, ok := c.(llm.TextContent); ok {
-				total += EstimateTokens(t.Text)
-			}
+			total += contentTokens(c)
 		}
 	case llm.SystemMessage:
 		// system prompt 分节文本计入上下文，各节按文本长度估算
@@ -67,13 +67,12 @@ func MessageTokens(msg llm.Message) int {
 	return total
 }
 
-// ContextTokens 估算当前上下文的 token 数：以最后一条 assistant 消息的真实 usage.input_tokens 为基准，
-// 它本身就包含 system prompt、tools 与全部历史，其后新增的消息（通常是工具结果）按 chars/4 估算；
-// usage 缺失（provider 未返回或为 0）时回退到全量估算，避免阈值判断塌缩
+// ContextTokens 估算当前上下文的 token 数：以最后一条有效 assistant 的完整 usage 为基准，
+// 其后新增的消息按 chars/4 估算；usage 缺失时回退到全量估算
 func ContextTokens(messages []llm.Message) int {
 	last := -1
 	for i := len(messages) - 1; i >= 0; i-- {
-		if _, ok := messages[i].(llm.AssistantMessage); ok {
+		if assistant, ok := messages[i].(llm.AssistantMessage); ok && assistant.StopReason != llm.StopReasonError && assistant.StopReason != llm.StopReasonAborted && assistant.Usage.ContextTokens() > 0 {
 			last = i
 			break
 		}
@@ -81,13 +80,7 @@ func ContextTokens(messages []llm.Message) int {
 	if last < 0 {
 		return EstimateContextTokens(messages)
 	}
-	base := messages[last].(llm.AssistantMessage).Usage.InputTokens
-	if base <= 0 {
-		return EstimateContextTokens(messages)
-	}
-	// 下一轮请求会把这条 assistant 的输出计入历史，基线需补上它自身的体积，
-	// 大回复或大工具参数才不会漏判溢出
-	base += MessageTokens(messages[last])
+	base := messages[last].(llm.AssistantMessage).Usage.ContextTokens()
 	for _, msg := range messages[last+1:] {
 		base += MessageTokens(msg)
 	}

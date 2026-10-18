@@ -430,9 +430,20 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 	default:
 		msg.StopReason = llm.StopReasonStop
 	}
+	cacheRead := int(resp.Usage.InputTokensDetails.CachedTokens)
+	cacheWrite := int(resp.Usage.InputTokensDetails.CacheWriteTokens)
+	input := max(0, int(resp.Usage.InputTokens)-cacheRead-cacheWrite)
+	total := int(resp.Usage.TotalTokens)
+	if total == 0 {
+		total = input + int(resp.Usage.OutputTokens) + cacheRead + cacheWrite
+	}
 	msg.Usage = llm.Usage{
-		InputTokens:  int(resp.Usage.InputTokens),
-		OutputTokens: int(resp.Usage.OutputTokens),
+		InputTokens:      input,
+		OutputTokens:     int(resp.Usage.OutputTokens),
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+		ReasoningTokens:  int(resp.Usage.OutputTokensDetails.ReasoningTokens),
+		TotalTokens:      total,
 	}
 	return msg, calls, nil
 }

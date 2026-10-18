@@ -370,7 +370,12 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 			Content    json.RawMessage `json:"content"`
 			Details    json.RawMessage `json:"details,omitempty"`
 			IsError    bool            `json:"isError"`
-		}{"toolResult", m.ToolCallID, m.ToolName, content, nil, m.IsError}
+			Usage      *Usage          `json:"usage,omitempty"`
+		}{"toolResult", m.ToolCallID, m.ToolName, content, nil, m.IsError, nil}
+		if m.Usage != nil {
+			usage := usageWire(*m.Usage)
+			wire.Usage = &usage
+		}
 		if m.Details != nil {
 			details, err := json.Marshal(m.Details)
 			if err != nil {
@@ -431,7 +436,15 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			ResponseID:   wire.ResponseID,
 			StopReason:   llm.StopReason(wire.StopReason),
 			ErrorMessage: wire.ErrorMessage,
-			Usage:        llm.Usage{InputTokens: wire.Usage.InputTokens, OutputTokens: wire.Usage.OutputTokens},
+			Usage: llm.Usage{
+				InputTokens:        wire.Usage.InputTokens,
+				OutputTokens:       wire.Usage.OutputTokens,
+				CacheReadTokens:    wire.Usage.CacheReadTokens,
+				CacheWriteTokens:   wire.Usage.CacheWriteTokens,
+				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
+				ReasoningTokens:    wire.Usage.ReasoningTokens,
+				TotalTokens:        wire.Usage.TotalTokens,
+			},
 		}, nil
 	case "toolResult":
 		var wire struct {
@@ -440,6 +453,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			Content    json.RawMessage `json:"content"`
 			Details    json.RawMessage `json:"details"`
 			IsError    bool            `json:"isError"`
+			Usage      *Usage          `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			return nil, err
@@ -453,6 +467,18 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			ToolName:   wire.ToolName,
 			Content:    content,
 			IsError:    wire.IsError,
+		}
+		if wire.Usage != nil {
+			usage := llm.Usage{
+				InputTokens:        wire.Usage.InputTokens,
+				OutputTokens:       wire.Usage.OutputTokens,
+				CacheReadTokens:    wire.Usage.CacheReadTokens,
+				CacheWriteTokens:   wire.Usage.CacheWriteTokens,
+				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
+				ReasoningTokens:    wire.Usage.ReasoningTokens,
+				TotalTokens:        wire.Usage.TotalTokens,
+			}
+			msg.Usage = &usage
 		}
 		if len(wire.Details) > 0 && !bytes.Equal(bytes.TrimSpace(wire.Details), []byte("null")) {
 			msg.Details = json.RawMessage(append([]byte(nil), wire.Details...))
@@ -487,5 +513,13 @@ func messageContent(m llm.Message) []llm.Content {
 
 // usageWire 在 llm.Usage 与会话格式之间转换
 func usageWire(u llm.Usage) Usage {
-	return Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens}
+	return Usage{
+		InputTokens:        u.InputTokens,
+		OutputTokens:       u.OutputTokens,
+		CacheReadTokens:    u.CacheReadTokens,
+		CacheWriteTokens:   u.CacheWriteTokens,
+		CacheWrite1HTokens: u.CacheWrite1HTokens,
+		ReasoningTokens:    u.ReasoningTokens,
+		TotalTokens:        u.TotalTokens,
+	}
 }

@@ -68,15 +68,18 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		}
 		for stream.Next() {
 			chunk := stream.Current()
+			raw := map[string]any{}
+			_ = json.Unmarshal([]byte(chunk.RawJSON()), &raw)
 			partial.ResponseID = chunk.ID
 			if chunk.Model != "" && chunk.Model != model.ID {
 				partial.Model = chunk.Model
 			}
-			if chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 {
-				partial.Usage = usageFromChunk(chunk)
+			if usage, ok := usageFromChunk(chunk); ok {
+				partial.Usage = usage
 			}
-			raw := map[string]any{}
-			_ = json.Unmarshal([]byte(chunk.RawJSON()), &raw)
+			if usage, ok := usageFromRaw(raw); ok {
+				partial.Usage = usage
+			}
 			choice, ok := firstChoice(chunk)
 			if !ok {
 				continue
@@ -193,8 +196,85 @@ func firstChoice(chunk sdk.ChatCompletionChunk) (sdk.ChatCompletionChunkChoice, 
 	return chunk.Choices[0], true
 }
 
-func usageFromChunk(chunk sdk.ChatCompletionChunk) llm.Usage {
-	return llm.Usage{InputTokens: int(chunk.Usage.PromptTokens), OutputTokens: int(chunk.Usage.CompletionTokens)}
+func usageFromChunk(chunk sdk.ChatCompletionChunk) (llm.Usage, bool) {
+	usage := normalizeUsage(
+		int(chunk.Usage.PromptTokens),
+		int(chunk.Usage.CompletionTokens),
+		int(chunk.Usage.TotalTokens),
+		int(chunk.Usage.PromptTokensDetails.CachedTokens),
+		int(chunk.Usage.PromptTokensDetails.CacheWriteTokens),
+		0,
+		int(chunk.Usage.CompletionTokensDetails.ReasoningTokens),
+	)
+	return usage, chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 || chunk.Usage.TotalTokens != 0 || usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0
+}
+
+func usageFromRaw(raw map[string]any) (llm.Usage, bool) {
+	usageRaw, ok := raw["usage"].(map[string]any)
+	if !ok {
+		choices, _ := raw["choices"].([]any)
+		if len(choices) == 0 {
+			return llm.Usage{}, false
+		}
+		choice, _ := choices[0].(map[string]any)
+		usageRaw, ok = choice["usage"].(map[string]any)
+		if !ok {
+			return llm.Usage{}, false
+		}
+	}
+	prompt := rawInt(usageRaw, "prompt_tokens")
+	completion := rawInt(usageRaw, "completion_tokens")
+	total := rawInt(usageRaw, "total_tokens")
+	cacheRead := rawInt(usageRaw, "cached_tokens")
+	if details, ok := usageRaw["prompt_tokens_details"].(map[string]any); ok {
+		cacheRead = max(cacheRead, rawInt(details, "cached_tokens"))
+	}
+	if cacheRead == 0 {
+		cacheRead = rawInt(usageRaw, "prompt_cache_hit_tokens")
+	}
+	cacheWrite := rawInt(usageRaw, "cache_write_tokens")
+	if details, ok := usageRaw["prompt_tokens_details"].(map[string]any); ok {
+		cacheWrite = max(cacheWrite, rawInt(details, "cache_write_tokens"))
+	}
+	reasoning := 0
+	if details, ok := usageRaw["completion_tokens_details"].(map[string]any); ok {
+		reasoning = rawInt(details, "reasoning_tokens")
+	}
+	cacheWrite1h := rawInt(usageRaw, "cache_write_1h_tokens")
+	return normalizeUsage(prompt, completion, total, cacheRead, cacheWrite, cacheWrite1h, reasoning), true
+}
+
+func normalizeUsage(prompt, completion, total, cacheRead, cacheWrite, cacheWrite1h, reasoning int) llm.Usage {
+	input := max(0, prompt-cacheRead-cacheWrite)
+	if total == 0 {
+		total = input + completion + cacheRead + cacheWrite
+	}
+	return llm.Usage{
+		InputTokens:        input,
+		OutputTokens:       completion,
+		CacheReadTokens:    cacheRead,
+		CacheWriteTokens:   cacheWrite,
+		CacheWrite1HTokens: cacheWrite1h,
+		ReasoningTokens:    reasoning,
+		TotalTokens:        total,
+	}
+}
+
+func rawInt(values map[string]any, key string) int {
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch value := value.(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int64:
+		return int(value)
+	default:
+		return 0
+	}
 }
 
 func rawDeltaString(raw map[string]any, field string) string {

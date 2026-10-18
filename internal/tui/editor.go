@@ -25,6 +25,7 @@ var commands = []slashCommand{
 	{"clear", "Clear the current conversation context"},
 	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
+	{"context", "Show current context usage"},
 	{"exit", "Exit Rivo"},
 }
 
@@ -328,7 +329,7 @@ func (m *Model) submit() tea.Cmd {
 		}
 		return m.dispatchSteering(input)
 	}
-	if !m.busy && m.handlers.Request == nil {
+	if !m.busy && m.handlers.Request == nil && m.handlers.Context == nil {
 		if hasImages {
 			return nil
 		}
@@ -399,6 +400,16 @@ func (m *Model) submit() tea.Cmd {
 		return m.openSelector("resume", arg)
 	case "/compact":
 		return m.dispatch("compact", arg)
+	case "/context":
+		if arg != "" {
+			m.notice("Usage: /context")
+			return nil
+		}
+		if m.handlers.Context == nil {
+			m.notice("Context usage is unavailable")
+			return nil
+		}
+		return m.handlers.Context()
 	case "/rename":
 		if arg == "" {
 			m.notice("Usage: /rename <new Name>")

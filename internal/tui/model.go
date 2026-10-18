@@ -149,6 +149,8 @@ type Request struct {
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
 type Handlers struct {
 	Request func(Request) tea.Cmd
+	// Context 查询当前已提交 context usage，不启动模型 operation
+	Context func() tea.Cmd
 	Cancel  func()
 	// EnqueueSteering 同步接受一条 steering，避免撤回与异步入队竞态
 	EnqueueSteering        func(string) error
@@ -169,6 +171,12 @@ type MessageCommittedMsg struct {
 }
 
 type StatusMsg string
+type ContextUsageMsg struct {
+	Tokens        int
+	ContextWindow int
+	Available     bool
+	Err           error
+}
 type SteeringResultMsg struct {
 	ID       uint64
 	Value    string
@@ -264,6 +272,7 @@ type Model struct {
 	mouseFragment    string
 	copyNoticeSeq    uint64
 	copyNotice       bool
+	contextNoticeSeq uint64
 	pastes           map[int]string
 	pasteCounter     int
 	images           map[int]llm.ImageContent
@@ -350,6 +359,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case strings.HasPrefix(value, "Compacting context"):
 			m.compacting = true
+		}
+	case ContextUsageMsg:
+		if msg.Err != nil {
+			m.notice("Error: " + msg.Err.Error())
+		} else {
+			m.contextNoticeSeq++
+			m.upsertMessage(Message{ID: fmt.Sprintf("context-%d", m.contextNoticeSeq), Role: "context", Text: formatContextUsage(msg)})
+			m.refreshTranscript()
 		}
 	case SteeringResultMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
@@ -853,8 +870,12 @@ func (m *Model) applyMetadata(s Snapshot) {
 }
 
 func (m *Model) lastMessageID() string {
-	if len(m.state.Messages) > 0 {
-		return m.state.Messages[len(m.state.Messages)-1].ID
+	for i := len(m.state.Messages) - 1; i >= 0; i-- {
+		message := m.state.Messages[i]
+		if message.Role == "notice" || message.Role == "summary" || message.Role == "context" {
+			continue
+		}
+		return message.ID
 	}
 	return ""
 }

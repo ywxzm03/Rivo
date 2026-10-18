@@ -365,7 +365,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 		if msg.StopReason != llm.StopReasonToolUse {
 			t.Errorf("StopReason = %q, want toolUse", msg.StopReason)
 		}
-		if msg.Usage != (llm.Usage{InputTokens: 10, OutputTokens: 5}) {
+		if msg.Usage != (llm.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}) {
 			t.Errorf("Usage = %+v", msg.Usage)
 		}
 		if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "ping" {

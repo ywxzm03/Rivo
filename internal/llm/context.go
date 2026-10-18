@@ -38,6 +38,7 @@ type ToolResult struct {
 	Content []Content
 	Details any
 	IsError bool
+	Usage   *Usage
 }
 
 type Context struct {

@@ -29,13 +29,13 @@ func TestMessageTokens(t *testing.T) {
 	if got := MessageTokens(user); got != 2 {
 		t.Errorf("user tokens = %d, want 2", got)
 	}
-	// thinking 不计入上下文预算
+	// thinking 计入上下文预算
 	assistant := llm.AssistantMessage{Content: []llm.Content{
 		llm.ThinkingContent{Thinking: "abcdefgh"},
 		llm.TextContent{Text: "abcdefgh"},
 	}}
-	if got := MessageTokens(assistant); got != 2 {
-		t.Errorf("assistant tokens = %d, want 2 (thinking excluded)", got)
+	if got := MessageTokens(assistant); got != 4 {
+		t.Errorf("assistant tokens = %d, want 4 (thinking included)", got)
 	}
 	image := llm.UserMessage{Content: []llm.Content{llm.ImageContent{MIMEType: "image/png"}}}
 	if got := MessageTokens(image); got != imageTokenEstimate {
@@ -54,8 +54,8 @@ func TestContextTokensPrefersLastAssistantUsage(t *testing.T) {
 		llm.ToolResultMessage{ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "abcdefgh"}}},
 	}
 	// 基准取最后一条 assistant 的真实 usage，其后的工具结果按 chars/4 估算
-	if got := ContextTokens(messages); got != 5002 {
-		t.Errorf("ContextTokens = %d, want 5002", got)
+	if got := ContextTokens(messages); got != 5012 {
+		t.Errorf("ContextTokens = %d, want 5012", got)
 	}
 }
 
