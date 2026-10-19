@@ -203,11 +203,6 @@ func TestLoadModelsValidationErrors(t *testing.T) {
 			wantErr: `unsupported api "chat-completions"`,
 		},
 		{
-			name:    "missing baseUrl",
-			body:    `{"providers": {"x": {"apiKey": "k", "models": [{"id": "m"}]}}}`,
-			wantErr: `provider "x" is missing baseUrl`,
-		},
-		{
 			name:    "no models",
 			body:    `{"providers": {"x": {"baseUrl": "http://x/v1"}}}`,
 			wantErr: `provider "x" has no models`,
@@ -226,6 +221,25 @@ func TestLoadModelsValidationErrors(t *testing.T) {
 				t.Fatalf("LoadModels() error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestLoadModelsAllowsOverrideOnlyProvider(t *testing.T) {
+	writeModelsFile(t, `{"providers":{"openai":{"modelOverrides":{"gpt-6.1-sol":{"contextWindow":64000}}}}}`)
+	m, err := LoadModels()
+	if err != nil {
+		t.Fatalf("LoadModels() error = %v", err)
+	}
+	override := m.Providers[0].Provider.ModelOverrides["gpt-6.1-sol"]
+	if override.ContextWindow == nil || *override.ContextWindow != 64000 {
+		t.Fatalf("contextWindow override = %+v, want 64000", override.ContextWindow)
+	}
+}
+
+func TestLoadModelsReadsInvalidContextWindowOverrideForAppValidation(t *testing.T) {
+	writeModelsFile(t, `{"providers":{"openai":{"modelOverrides":{"gpt-6.1-sol":{"contextWindow":0}}}}}`)
+	if _, err := LoadModels(); err != nil {
+		t.Fatalf("LoadModels() error = %v, want app-level validation", err)
 	}
 }
 

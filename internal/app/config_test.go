@@ -223,6 +223,53 @@ func TestLoadCustomProviderAssemblesOpenAICompatibleSpec(t *testing.T) {
 	}
 }
 
+func TestLoadCustomProviderModelOverride(t *testing.T) {
+	dir := useConfigHome(t)
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{
+		"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"magpie",
+		"models":[{"id":"glm-5.3","contextWindow":200000}],
+		"modelOverrides":{"glm-5.3":{"contextWindow":64000,"maxTokens":4096}}
+	}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec, err := cfg.lookupProvider("magpie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := findModel("magpie", spec.models, "glm-5.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != 64000 || model.MaxTokens != 4096 {
+		t.Errorf("model limits = %d/%d, want 64000/4096", model.ContextWindow, model.MaxTokens)
+	}
+}
+
+func TestLoadBuiltinModelDefinitionUsesPIContextDefault(t *testing.T) {
+	dir := useConfigHome(t)
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{"models":[{"id":"`+openai.DefaultModel+`"}]}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec, err := cfg.lookupProvider(openai.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := findModel(openai.ProviderID, spec.models, openai.DefaultModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != defaultContextWindow || model.MaxTokens != defaultMaxTokens {
+		t.Errorf("model defaults = %d/%d, want %d/%d", model.ContextWindow, model.MaxTokens, defaultContextWindow, defaultMaxTokens)
+	}
+}
+
 func TestLoadCustomProviderUsesPIImageInputCapability(t *testing.T) {
 	dir := useConfigHome(t)
 	writeAgentConfig(t, dir, "models.json", `{"providers":{"magpie":{
@@ -254,8 +301,94 @@ func TestLoadCustomProviderSelectsChatCompletionsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.models) != 1 || spec.models[0].API != llm.APIOpenAICompletions {
-		t.Fatalf("models = %#v, want chat completions model", spec.models)
+	model, err := findModel(spec.id, spec.models, "gpt-5.6-sol")
+	if err != nil || model.API != llm.APIOpenAICompletions {
+		t.Fatalf("model = %#v, error = %v, want chat completions model", model, err)
+	}
+	if len(spec.models) != 4 {
+		t.Fatalf("models = %d, want builtins plus configured model", len(spec.models))
+	}
+}
+
+func TestLoadBuiltinModelOverridePreservesProviderModels(t *testing.T) {
+	dir := useConfigHome(t)
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{"modelOverrides":{"`+openai.DefaultModel+`":{"contextWindow":64000}}}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec, err := cfg.lookupProvider(openai.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := findModel(openai.ProviderID, spec.models, openai.DefaultModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != 64000 {
+		t.Errorf("ContextWindow = %d, want 64000", model.ContextWindow)
+	}
+	if len(spec.models) != 3 {
+		t.Errorf("models = %d, want all built-in models preserved", len(spec.models))
+	}
+	a, err := NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewWithSessionDir() error = %v", err)
+	}
+	if a.CurrentModel().ContextWindow != 64000 || a.coordinator.Compactor == nil || a.coordinator.Compactor.Config.ContextWindow != 64000 {
+		t.Errorf("runtime context window = model %d, compactor %+v; want 64000", a.CurrentModel().ContextWindow, a.coordinator.Compactor)
+	}
+}
+
+func TestLoadModelsOverrideWinsOverModelDefinition(t *testing.T) {
+	dir := useConfigHome(t)
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{
+		"models":[{"id":"`+openai.DefaultModel+`","contextWindow":90000}],
+		"modelOverrides":{"`+openai.DefaultModel+`":{"contextWindow":64000}}
+	}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec, err := cfg.lookupProvider(openai.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := findModel(openai.ProviderID, spec.models, openai.DefaultModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != 64000 {
+		t.Errorf("ContextWindow = %d, want override value 64000", model.ContextWindow)
+	}
+}
+
+func TestLoadInvalidBuiltinOverrideFallsBackWithWarning(t *testing.T) {
+	dir := useConfigHome(t)
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	writeAgentConfig(t, dir, "models.json", `{"providers":{"openai":{"modelOverrides":{"`+openai.DefaultModel+`":{"contextWindow":0}}}}}`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Warnings) == 0 || !strings.Contains(cfg.Warnings[0], "overlay ignored") {
+		t.Fatalf("Warnings = %v, want overlay warning", cfg.Warnings)
+	}
+	spec, err := cfg.lookupProvider(openai.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := findModel(openai.ProviderID, spec.models, openai.DefaultModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != 1_050_000 {
+		t.Errorf("ContextWindow = %d, want original builtin value", model.ContextWindow)
 	}
 }
 
