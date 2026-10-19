@@ -134,6 +134,30 @@ func TestLoadModelsPreservesOrderAndDefaultsAPI(t *testing.T) {
 	}
 }
 
+func TestLoadModelsReadsModelCost(t *testing.T) {
+	writeModelsFile(t, `{
+		"providers": {
+			"custom": {"baseUrl": "http://custom/v1", "models": [{"id": "m", "cost": {"input": 0.15, "output": 0.6, "cacheRead": 0.003, "cacheWrite": 0}}]}
+		}
+	}`)
+
+	m, err := LoadModels()
+	if err != nil {
+		t.Fatalf("LoadModels() error = %v", err)
+	}
+	got := m.Providers[0].Provider.Models[0].Cost
+	if got == nil || got.Input != 0.15 || got.Output != 0.6 || got.CacheRead != 0.003 || got.CacheWrite != 0 {
+		t.Fatalf("model cost = %+v, want configured rates", got)
+	}
+}
+
+func TestLoadModelsRejectsNegativeModelCost(t *testing.T) {
+	writeModelsFile(t, `{"providers": {"custom": {"baseUrl": "http://custom/v1", "models": [{"id": "m", "cost": {"input": -1}}]}}}`)
+	if _, err := LoadModels(); err == nil || !strings.Contains(err.Error(), "negative cost") {
+		t.Fatalf("LoadModels() error = %v, want negative cost error", err)
+	}
+}
+
 func TestLoadModelsInterpolatesEnvAndKeepsPlaintext(t *testing.T) {
 	t.Setenv("TEST_PROVIDER_KEY", "env-secret")
 	writeModelsFile(t, `{

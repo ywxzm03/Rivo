@@ -71,11 +71,17 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 		if m.API != "" {
 			api = m.API
 		}
+		var cost *llm.CostRates
+		if m.Cost != nil {
+			copy := *m.Cost
+			cost = &copy
+		}
 		models = append(models, llm.Model{
 			ID:               m.ID,
 			Name:             name,
 			Provider:         id,
 			API:              llm.API(api),
+			Cost:             cost,
 			Reasoning:        m.Reasoning,
 			SupportsImages:   m.SupportsImages || hasImageInput(m.Input),
 			ContextWindow:    m.ContextWindow,

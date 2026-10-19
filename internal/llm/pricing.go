@@ -9,6 +9,14 @@ type Cost struct {
 	Total      float64 `json:"total"`
 }
 
+// CostRates 保存模型每百万 token 的美元费率
+type CostRates struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+}
+
 type costRates struct {
 	input      float64
 	output     float64
@@ -64,18 +72,34 @@ func PriceUsage(model Model, usage Usage) *Cost {
 	if usage.ContextTokens() <= 0 {
 		return nil
 	}
-	pricing, ok := builtinPricing[model.Provider+"/"+model.ID]
-	if !ok {
-		return nil
+
+	var rates costRates
+	var longContext *costRates
+	var longContextLimit int
+	if model.Cost != nil {
+		// 自定义费率完整覆盖内置表，并使用固定费率
+		rates = costRates{
+			input:      model.Cost.Input,
+			output:     model.Cost.Output,
+			cacheRead:  model.Cost.CacheRead,
+			cacheWrite: model.Cost.CacheWrite,
+		}
+	} else {
+		pricing, ok := builtinPricing[model.Provider+"/"+model.ID]
+		if !ok {
+			return nil
+		}
+		rates = pricing.standard
+		longContext = pricing.longContext
+		longContextLimit = pricing.longContextLimit
 	}
-	rates := pricing.standard
 	cacheWriteTokens := usage.CacheWriteTokens
 	if cacheWriteTokens < usage.CacheWrite1HTokens {
 		cacheWriteTokens = usage.CacheWrite1HTokens
 	}
 	promptTokens := usage.InputTokens + usage.CacheReadTokens + cacheWriteTokens
-	if pricing.longContext != nil && promptTokens > pricing.longContextLimit {
-		rates = *pricing.longContext
+	if longContext != nil && promptTokens > longContextLimit {
+		rates = *longContext
 	}
 	return &Cost{
 		Input:      float64(usage.InputTokens) * rates.input / 1_000_000,

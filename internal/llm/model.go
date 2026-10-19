@@ -10,6 +10,8 @@ type Model struct {
 	Name     string
 	Provider string
 	API      API
+	// Cost 是模型每百万 token 的美元费率；nil 表示未配置
+	Cost *CostRates
 
 	// SupportsImages 表示这个模型接受图片输入
 	SupportsImages bool

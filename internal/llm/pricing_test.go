@@ -47,6 +47,38 @@ func TestPriceUsageUnknownModelReturnsNil(t *testing.T) {
 	}
 }
 
+func TestPriceUsageUsesModelCost(t *testing.T) {
+	cost := PriceUsage(Model{
+		Provider: "custom",
+		ID:       "model",
+		Cost:     &CostRates{Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4},
+	}, Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000, CacheWriteTokens: 1_000_000})
+	if cost == nil {
+		t.Fatal("cost = nil")
+	}
+	assertCost(t, *cost, Cost{Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4, Total: 10})
+}
+
+func TestPriceUsageModelCostOverridesBuiltinPricing(t *testing.T) {
+	cost := PriceUsage(Model{
+		Provider: "openai",
+		ID:       "gpt-6.1-sol",
+		Cost:     &CostRates{Input: 3, Output: 4, CacheRead: 5, CacheWrite: 6},
+	}, Usage{InputTokens: 272_001, OutputTokens: 1_000_000})
+	if cost == nil {
+		t.Fatal("cost = nil")
+	}
+	assertCost(t, *cost, Cost{Input: 0.816003, Output: 4, Total: 4.816003})
+}
+
+func TestPriceUsageExplicitZeroCostIsKnown(t *testing.T) {
+	cost := PriceUsage(Model{Provider: "custom", ID: "free", Cost: &CostRates{}}, Usage{InputTokens: 1})
+	if cost == nil {
+		t.Fatal("cost = nil, want known zero cost")
+	}
+	assertCost(t, *cost, Cost{})
+}
+
 func TestPriceUsageZeroUsageReturnsNil(t *testing.T) {
 	if cost := PriceUsage(Model{Provider: "openai", ID: "gpt-6.1-sol"}, Usage{}); cost != nil {
 		t.Fatalf("cost = %+v, want nil", cost)
