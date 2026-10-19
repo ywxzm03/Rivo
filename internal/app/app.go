@@ -51,11 +51,11 @@ func (a *App) Warnings() []string {
 // Open 恢复指定会话文件：按投影记录的 Provider/Model 装配运行链，
 // 模型解析失败时回退 env 配置并记录警告
 func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
-	cwd, err := os.Getwd()
+	commandCwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
 	}
-	sm, err := session.Open(path, cwd)
+	sm, err := session.Open(path, commandCwd)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +127,30 @@ func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App
 	return newApp(cfg, sm, onEvent)
 }
 
+// NewWithSessionID 创建指定 ID 且延迟发布的会话
+func NewWithSessionID(cfg Config, id string, onEvent llm.AgentEventSink) (*App, error) {
+	return NewWithSessionIDInDir(cfg, "", id, onEvent)
+}
+
+// NewWithSessionIDInDir 在指定目录创建稳定 ID 的会话
+func NewWithSessionIDInDir(cfg Config, dir, id string, onEvent llm.AgentEventSink) (*App, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+	}
+	if dir == "" {
+		dir, err = session.DefaultDir(cwd)
+		if err != nil {
+			return nil, err
+		}
+	}
+	sm, err := session.NewWithID(cwd, dir, id)
+	if err != nil {
+		return nil, err
+	}
+	return newApp(cfg, sm, onEvent)
+}
+
 // newApp 组装编排层与 Agent，模型取自 env 配置
 func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
 	return newAppWithModel(cfg, cfg.ProviderID, cfg.ModelID, sm, onEvent)
@@ -167,9 +191,13 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 
 	// 1.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+	cwd := sm.Cwd()
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+		}
 	}
 	loader := prompt.NewLoader(cwd, agentDir)
 	loader.Reload()
@@ -228,6 +256,9 @@ func (a *App) ContextView() compaction.ContextView { return a.session.BuildConte
 
 // Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器
 func (a *App) Tree() session.TreeSnapshot { return a.session.Tree() }
+
+// Cwd 返回加载项目资源时使用的工作目录
+func (a *App) Cwd() string { return a.cwd }
 
 func (a *App) SessionID() string { return a.session.ID() }
 

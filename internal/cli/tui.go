@@ -17,27 +17,21 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
-func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr io.Writer) int {
+func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) int {
 	cwd, _ := os.Getwd()
-	branchBytes, _ := exec.Command("git", "branch", "--show-current").Output()
-	runtime := adapter.New(cfg, cwd, strings.TrimSpace(string(branchBytes)))
-	var a *app.App
-	var err error
-	if continueRecent {
-		a, err = resumeRecentApp(cfg, runtime.HandleEvent)
-	} else {
-		a, err = app.New(cfg, runtime.HandleEvent)
-	}
+	runtime := adapter.New(cfg, cwd, gitBranch(cwd))
+	a, err := openSessionTarget(cfg, target, runtime.HandleEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
+	runtime.SetProjectContext(a.Cwd(), gitBranch(a.Cwd()))
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
 	runtime.Attach(a)
 	output := newSerializedOutput(stdout)
-	model := tui.New(runtime.Snapshot(), tui.Handlers{
+	model := tui.NewWithInitialPrompt(runtime.Snapshot(), tui.Handlers{
 		Request:           runtime.Request,
 		Context:           runtime.Context,
 		Cancel:            runtime.Cancel,
@@ -50,7 +44,7 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 			}
 			return writeOSC52(output, text)
 		},
-	})
+	}, initialPrompt)
 	input := tui.NewInputReader(stdin)
 	defer input.Close()
 	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -63,6 +57,11 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 		return 1
 	}
 	return 0
+}
+
+func gitBranch(cwd string) string {
+	branchBytes, _ := exec.Command("git", "-C", cwd, "branch", "--show-current").Output()
+	return strings.TrimSpace(string(branchBytes))
 }
 
 // serializedOutput 串行化 Bubble Tea 渲染与 OSC52 fallback 的终端写入

@@ -249,6 +249,7 @@ type Model struct {
 	draft            string
 	draftMessage     *llm.UserMessage
 	busy, closing    bool
+	initialPrompt    string
 	steeringRestored bool
 	canceling        bool
 	compacting       bool
@@ -283,6 +284,15 @@ type Model struct {
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
 func New(state Snapshot, handlers Handlers) *Model {
+	return newModel(state, handlers, "")
+}
+
+// NewWithInitialPrompt 创建启动后自动提交一次 prompt 的界面
+func NewWithInitialPrompt(state Snapshot, handlers Handlers, prompt string) *Model {
+	return newModel(state, handlers, prompt)
+}
+
+func newModel(state Snapshot, handlers Handlers, initialPrompt string) *Model {
 	ed := textarea.New()
 	ed.Prompt, ed.Placeholder = "❯ ", ""
 	ed.SetPromptFunc(2, func(line int) string {
@@ -299,13 +309,20 @@ func New(state Snapshot, handlers Handlers) *Model {
 	ed.BlurredStyle = ed.FocusedStyle
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
-	m := &Model{handlers: handlers, editor: ed, viewport: viewport.New(0, 0),
+	m := &Model{handlers: handlers, editor: ed, initialPrompt: initialPrompt, viewport: viewport.New(0, 0),
 		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), markdownPreview: make(map[string]string), images: make(map[int]llm.ImageContent), clock: time.Now}
 	m.applySnapshot(state)
 	return m
 }
 
-func (m *Model) Init() tea.Cmd { return textarea.Blink }
+func (m *Model) Init() tea.Cmd {
+	if m.initialPrompt == "" {
+		return textarea.Blink
+	}
+	prompt := m.initialPrompt
+	m.initialPrompt = ""
+	return tea.Batch(textarea.Blink, m.dispatch("run", prompt))
+}
 
 // Update 处理事件，不读取或修改后台运行器的状态
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

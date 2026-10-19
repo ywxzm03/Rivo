@@ -22,6 +22,22 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestInitialPromptDispatchesOnce(t *testing.T) {
+	var requests []Request
+	m := NewWithInitialPrompt(Snapshot{}, Handlers{Request: func(request Request) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}}, "next prompt")
+	_ = m.Init()
+	_ = m.Init()
+	if len(requests) != 1 || requests[0].Kind != "run" || requests[0].Value != "next prompt" {
+		t.Fatalf("initial requests = %+v, want one run request", requests)
+	}
+	if !m.busy {
+		t.Fatal("initial prompt did not mark the operation busy")
+	}
+}
+
 func TestMarkdownRendererBoundsWidthAndRoleCache(t *testing.T) {
 	var renderer markdownRenderer
 	for _, width := range []int{40, 80, 120, 40, 100, 140, 160, 180} {

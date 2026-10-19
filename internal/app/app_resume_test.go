@@ -76,6 +76,28 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	}
 }
 
+func TestOpenUsesSessionHeaderCwd(t *testing.T) {
+	dir := t.TempDir()
+	projectCwd := filepath.Join(t.TempDir(), "foreign-project")
+	if err := os.MkdirAll(projectCwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sm, err := session.NewWithID(projectCwd, dir, "foreign-cwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(sm.Path(), configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Cwd() != projectCwd {
+		t.Fatalf("App.Cwd() = %q, want session cwd %q", a.Cwd(), projectCwd)
+	}
+}
+
 func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 	dir := t.TempDir()
 	path := newSessionFileWithModel(t, dir, openai.ProviderID, "no-such-model", "hello")

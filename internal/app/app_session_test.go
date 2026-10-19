@@ -27,3 +27,13 @@ func TestNewWithSessionDirAcceptsDeepSeek(t *testing.T) {
 		t.Fatal("session manager = nil, want non-nil")
 	}
 }
+
+func TestNewWithSessionIDPreservesStableIdentity(t *testing.T) {
+	a, err := NewWithSessionIDInDir(configWithBuiltin(openai.ProviderID, openai.DefaultModel), t.TempDir(), "stable-session", nil)
+	if err != nil {
+		t.Fatalf("NewWithSessionIDInDir() error = %v", err)
+	}
+	if a.SessionID() != "stable-session" || a.Cwd() == "" {
+		t.Fatalf("session = id %q cwd %q", a.SessionID(), a.Cwd())
+	}
+}

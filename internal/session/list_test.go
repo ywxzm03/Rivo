@@ -159,6 +159,46 @@ func TestListSessionsUsesDefaultDir(t *testing.T) {
 	}
 }
 
+func TestListAllSessionsIncludesProjectMetadata(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectA := filepath.Join(t.TempDir(), "project-a")
+	projectB := filepath.Join(t.TempDir(), "project-b")
+	dirA, err := DefaultDir(projectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirB, err := DefaultDir(projectB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewWithID(projectA, dirA, "project-a-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AppendMessage(userMsg("a")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewWithID(projectB, dirB, "project-b-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AppendMessage(userMsg("b")); err != nil {
+		t.Fatal(err)
+	}
+	infos, err := ListAllSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]SessionInfo{}
+	for _, info := range infos {
+		seen[info.ID] = info
+	}
+	if seen["project-a-id"].Cwd != projectA || seen["project-b-id"].Cwd != projectB {
+		t.Fatalf("session metadata = %+v", seen)
+	}
+}
+
 func TestListSessionsSkipsOversizedLine(t *testing.T) {
 	dir := t.TempDir()
 	// 超过 summaryLineLimit 的首条 user 消息（如内嵌 base64 图片）不缓冲，摘要为空且不阻塞扫描

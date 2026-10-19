@@ -5,7 +5,9 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	compact "github.com/ywxzm03/Rivo/internal/compaction"
@@ -153,6 +155,26 @@ func newSessionID() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	h := hex.EncodeToString(b[:])
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// ValidateID 校验 --session-id 接受的稳定标识符
+func ValidateID(id string) error {
+	if id == "" {
+		return errors.New("session: id must be non-empty")
+	}
+	if !isAlphaNumeric(id[0]) || !isAlphaNumeric(id[len(id)-1]) {
+		return errors.New("session: id must start and end with a letter or number")
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("-_.", r) {
+			return errors.New("session: id may contain only letters, numbers, '-', '_' and '.'")
+		}
+	}
+	return nil
+}
+
+func isAlphaNumeric(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func randomHexID() string {
