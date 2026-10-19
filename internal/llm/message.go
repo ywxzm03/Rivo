@@ -74,6 +74,7 @@ type Usage struct {
 	CacheWrite1HTokens int
 	ReasoningTokens    int
 	TotalTokens        int
+	Cost               *Cost
 }
 
 // ContextTokens 返回 provider usage 对当前上下文窗口的 token 贡献。

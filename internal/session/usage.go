@@ -11,6 +11,8 @@ type UsageTotals struct {
 	CacheWrite1HTokens int
 	ReasoningTokens    int
 	TotalTokens        int
+	Cost               llm.Cost
+	UnknownCostEntries int
 }
 
 // Add 累加一条 usage；reasoning 和 cacheWrite1h 是其它字段的子集，不重复计入 total。
@@ -22,6 +24,15 @@ func (t *UsageTotals) Add(usage llm.Usage) {
 	t.CacheWrite1HTokens += usage.CacheWrite1HTokens
 	t.ReasoningTokens += usage.ReasoningTokens
 	t.TotalTokens += usage.ContextTokens()
+	if usage.Cost != nil {
+		t.Cost.Input += usage.Cost.Input
+		t.Cost.Output += usage.Cost.Output
+		t.Cost.CacheRead += usage.Cost.CacheRead
+		t.Cost.CacheWrite += usage.Cost.CacheWrite
+		t.Cost.Total += usage.Cost.Total
+	} else if usage.ContextTokens() > 0 {
+		t.UnknownCostEntries++
+	}
 }
 
 // UsageTotals 汇总全部 session entries，包括已压缩历史和非 active branch。
@@ -58,5 +69,14 @@ func usageFromWire(usage Usage) llm.Usage {
 		CacheWrite1HTokens: usage.CacheWrite1HTokens,
 		ReasoningTokens:    usage.ReasoningTokens,
 		TotalTokens:        usage.TotalTokens,
+		Cost:               cloneCost(usage.Cost),
 	}
+}
+
+func cloneCost(cost *llm.Cost) *llm.Cost {
+	if cost == nil {
+		return nil
+	}
+	copy := *cost
+	return &copy
 }

@@ -24,6 +24,7 @@ Usage:
 
 Options:
   -h, --help              Show this help
+      --cost <path>       Print cost totals for a JSONL session and exit
       --continue          Continue the most recent session
       --resume            Alias of --continue
       --print, -p         Non-interactive mode: process prompt and exit
@@ -209,7 +210,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		switch args[i] {
-		case "--provider", "--model", "--thinking":
+		case "--cost", "--provider", "--model", "--thinking":
 			i++
 		}
 	}
@@ -217,6 +218,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var (
 		continueRecent bool
 		printRequested bool
+		costPath       string
 		providerArg    string
 		modelArg       string
 		thinkingArg    string
@@ -225,6 +227,17 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
+		case "--cost":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				fmt.Fprintf(stderr, "Rivo: flag --cost requires a value\n")
+				return 2
+			}
+			if costPath != "" {
+				fmt.Fprintln(stderr, "Rivo: flag --cost may only be specified once")
+				return 2
+			}
+			i++
+			costPath = args[i]
 		case "--continue", "--resume":
 			continueRecent = true
 		case "--print", "-p":
@@ -251,6 +264,13 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			positional = append(positional, arg)
 		}
+	}
+	if costPath != "" {
+		if continueRecent || printRequested || providerArg != "" || modelArg != "" || thinkingArg != "" || len(positional) > 0 {
+			fmt.Fprintln(stderr, "Rivo: --cost cannot be combined with runtime options or a prompt")
+			return 2
+		}
+		return costMode(costPath, stdout, stderr)
 	}
 	if !printRequested && len(positional) > 0 {
 		fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", positional[0])
@@ -287,6 +307,34 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	// 非终端流继续使用逐行入口，保留脚本与既有测试的可组合性
 	return repl(cfg, continueRecent, stdin, stdout, stderr)
+}
+
+// costMode 读取指定 JSONL 会话并输出其累计 token 与美元费用，不加载运行配置。
+func costMode(path string, stdout, stderr io.Writer) int {
+	if data, err := os.ReadFile(path); err != nil {
+		fmt.Fprintf(stderr, "Rivo: failed to read session file: %v\n", err)
+		return 2
+	} else if strings.TrimSpace(string(data)) == "" {
+		printCostTotals(session.UsageTotals{}, stdout)
+		return 0
+	}
+	sm, err := session.Open(path, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 2
+	}
+	printCostTotals(sm.UsageTotals(), stdout)
+	return 0
+}
+
+func printCostTotals(totals session.UsageTotals, stdout io.Writer) {
+	fmt.Fprintf(stdout, "Cost (USD): $%.6f\n", totals.Cost.Total)
+	fmt.Fprintf(stdout, "Input tokens: %d\n", totals.InputTokens)
+	fmt.Fprintf(stdout, "Output tokens: %d\n", totals.OutputTokens)
+	fmt.Fprintf(stdout, "Cache read tokens: %d\n", totals.CacheReadTokens)
+	fmt.Fprintf(stdout, "Cache write tokens: %d\n", totals.CacheWriteTokens)
+	fmt.Fprintf(stdout, "Total tokens: %d\n", totals.TotalTokens)
+	fmt.Fprintf(stdout, "Unknown cost entries: %d\n", totals.UnknownCostEntries)
 }
 
 func terminalStreams(stdin io.Reader, stdout io.Writer) bool {

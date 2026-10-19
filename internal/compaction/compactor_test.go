@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,40 @@ func TestCompactGeneratesSummary(t *testing.T) {
 	}
 	if !strings.Contains(call.Messages[0].(llm.UserMessage).Content[0].(llm.TextContent).Text, "## Goal") {
 		t.Error("summarize prompt should contain format sections")
+	}
+}
+
+func TestCompactPricesSummaryUsage(t *testing.T) {
+	streamFn := func(_ context.Context, _ llm.Model, _ llm.Context, _ llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		ch := make(chan llm.AssistantMessageEvent, 1)
+		ch <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{
+			Content: []llm.Content{llm.TextContent{Text: "SUMMARY"}},
+			Usage:   llm.Usage{InputTokens: 1_000_000},
+		}}
+		close(ch)
+		return ch, nil
+	}
+	c := &Compactor{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}, StreamFn: streamFn, Config: singleCallConfig()}
+	result, err := c.Compact(context.Background(), contextView(compactFixture()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.Cost == nil || result.Usage.Cost.Total != 4 {
+		t.Fatalf("summary cost = %+v, want $4", result.Usage.Cost)
+	}
+}
+
+func TestCombineUsageAddsCosts(t *testing.T) {
+	got := combineUsage(
+		llm.Usage{InputTokens: 2, Cost: &llm.Cost{Input: 0.1, Total: 0.1}},
+		llm.Usage{OutputTokens: 3, Cost: &llm.Cost{Output: 0.2, Total: 0.2}},
+	)
+	if got.Cost == nil {
+		t.Fatal("combined cost = nil")
+	}
+	want := &llm.Cost{Input: 0.1, Output: 0.2, Total: 0.3}
+	if math.Abs(got.Cost.Input-want.Input) > 1e-12 || math.Abs(got.Cost.Output-want.Output) > 1e-12 || math.Abs(got.Cost.Total-want.Total) > 1e-12 {
+		t.Fatalf("combined cost = %+v, want %+v", *got.Cost, *want)
 	}
 }
 

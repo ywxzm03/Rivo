@@ -46,7 +46,7 @@ func initialState() tui.Snapshot {
 	branch, _ := exec.Command("git", "branch", "--show-current").Output()
 	levels := []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 	models := []tui.ModelOption{
-		{ID: "deepseek-v4.1-flash", Provider: "deepseek", Name: "DeepSeek V4.1 Flash", ContextWindow: 1000000, Levels: levels},
+		{ID: "deepseek-flash", Provider: "deepseek", Name: "DeepSeek Flash", ContextWindow: 1000000, Levels: levels},
 	}
 	return tui.Snapshot{Cwd: cwd, Branch: strings.TrimSpace(string(branch)), Models: models, ModelKey: models[0].Key(), DefaultModelKey: models[0].Key(), Thinking: "max",
 		Sessions: []tui.SessionOption{

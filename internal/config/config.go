@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // APIOpenAIResponses 是 models.json 中 provider 支持的唯一协议标识
@@ -42,6 +44,8 @@ type Model struct {
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 	// SamplingParams 是并入请求体的自由采样参数（temperature/top_p 等）
 	SamplingParams map[string]any `json:"samplingParams"`
+	// Cost 是模型每百万 token 的美元费率；nil 表示未配置
+	Cost *llm.CostRates `json:"cost"`
 }
 
 // Provider 是 models.json 中 providers 下的一个自定义 provider 条目
@@ -241,6 +245,9 @@ func (m *ModelsFile) validate() error {
 			}
 			if model.API != "" && model.API != APIOpenAIResponses && model.API != APIOpenAICompletions {
 				return fmt.Errorf("config: provider %q model %q has unsupported api %q", m.Providers[i].ID, model.ID, model.API)
+			}
+			if model.Cost != nil && (model.Cost.Input < 0 || model.Cost.Output < 0 || model.Cost.CacheRead < 0 || model.Cost.CacheWrite < 0) {
+				return fmt.Errorf("config: provider %q model %q has negative cost", m.Providers[i].ID, model.ID)
 			}
 		}
 	}

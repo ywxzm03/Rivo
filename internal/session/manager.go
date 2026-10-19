@@ -124,7 +124,7 @@ func (m *SessionManager) LastEntryID() string {
 
 // AppendMessage 追加一条消息，以当前 leaf 为父节点并推进 leaf
 func (m *SessionManager) AppendMessage(msg llm.Message) error {
-	return m.appendEntry(&MessageEntry{Message: msg})
+	return m.appendEntry(&MessageEntry{Message: priceMessage(msg)})
 }
 
 // AppendModelChange 记录中途切换模型
@@ -158,6 +158,9 @@ func (m *SessionManager) Name() string {
 
 // AppendUsage 记录不依附消息的模型用量，note 为空时不写入
 func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usage, note string) error {
+	if usage.Cost == nil {
+		usage.Cost = llm.PriceUsage(llm.Model{Provider: provider, ID: model}, usage)
+	}
 	return m.appendEntry(&UsageEntry{
 		Kind:     kind,
 		Provider: provider,
@@ -352,6 +355,7 @@ func (m *SessionManager) PendingContextEdit() *ContextEditEntry {
 func (m *SessionManager) AppendMessages(messages []llm.Message) ([]string, error) {
 	entries := make([]Entry, len(messages))
 	for i, message := range messages {
+		message = priceMessage(message)
 		entries[i] = &MessageEntry{Message: message}
 	}
 	err := m.appendEntries(entries)
@@ -360,6 +364,27 @@ func (m *SessionManager) AppendMessages(messages []llm.Message) ([]string, error
 		ids[i] = entry.base().ID
 	}
 	return ids, err
+}
+
+func priceMessage(message llm.Message) llm.Message {
+	switch message := message.(type) {
+	case llm.AssistantMessage:
+		if message.Usage.Cost == nil {
+			message.Usage.Cost = llm.PriceUsage(llm.Model{Provider: message.Provider, ID: message.Model}, message.Usage)
+		}
+		return message
+	case *llm.AssistantMessage:
+		if message == nil {
+			return nil
+		}
+		copy := *message
+		if copy.Usage.Cost == nil {
+			copy.Usage.Cost = llm.PriceUsage(llm.Model{Provider: copy.Provider, ID: copy.Model}, copy.Usage)
+		}
+		return copy
+	default:
+		return message
+	}
 }
 
 // appendEntry 准备候选记录，写入失败时保留它供显式重试

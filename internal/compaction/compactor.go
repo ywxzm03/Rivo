@@ -129,6 +129,23 @@ func combineUsage(first, second llm.Usage) llm.Usage {
 	if combined.TotalTokens == 0 {
 		combined.TotalTokens = combined.ContextTokens()
 	}
+	if first.Cost != nil || second.Cost != nil {
+		combined.Cost = &llm.Cost{}
+		if first.Cost != nil {
+			combined.Cost.Input += first.Cost.Input
+			combined.Cost.Output += first.Cost.Output
+			combined.Cost.CacheRead += first.Cost.CacheRead
+			combined.Cost.CacheWrite += first.Cost.CacheWrite
+			combined.Cost.Total += first.Cost.Total
+		}
+		if second.Cost != nil {
+			combined.Cost.Input += second.Cost.Input
+			combined.Cost.Output += second.Cost.Output
+			combined.Cost.CacheRead += second.Cost.CacheRead
+			combined.Cost.CacheWrite += second.Cost.CacheWrite
+			combined.Cost.Total += second.Cost.Total
+		}
+	}
 	return combined
 }
 
@@ -225,6 +242,9 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 		text := summaryText(final.Content)
 		if text == "" {
 			return "", usage, fmt.Errorf("compaction: empty summary")
+		}
+		if usage.Cost == nil {
+			usage.Cost = llm.PriceUsage(c.Model, usage)
 		}
 		return text, usage, nil
 	}
