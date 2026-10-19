@@ -152,3 +152,28 @@ func TestRunCostRejectsRuntimeOptions(t *testing.T) {
 		t.Fatalf("Run() = %d, stderr = %q", code, stderr.String())
 	}
 }
+
+func TestRunCostDoesNotDeleteEmptySessionFile(t *testing.T) {
+	path := t.TempDir() + string(os.PathSeparator) + "empty.jsonl"
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"--cost", path}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("empty session file was removed: %v", err)
+	}
+	want := "Cost (USD): $0.000000\n" +
+		"Input tokens: 0\n" +
+		"Output tokens: 0\n" +
+		"Cache read tokens: 0\n" +
+		"Cache write tokens: 0\n" +
+		"Total tokens: 0\n" +
+		"Unknown cost entries: 0\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}

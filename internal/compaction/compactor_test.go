@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,20 @@ func TestCompactPricesSummaryUsage(t *testing.T) {
 	}
 	if result.Usage.Cost == nil || result.Usage.Cost.Total != 4 {
 		t.Fatalf("summary cost = %+v, want $4", result.Usage.Cost)
+	}
+}
+
+func TestCombineUsageAddsCosts(t *testing.T) {
+	got := combineUsage(
+		llm.Usage{InputTokens: 2, Cost: &llm.Cost{Input: 0.1, Total: 0.1}},
+		llm.Usage{OutputTokens: 3, Cost: &llm.Cost{Output: 0.2, Total: 0.2}},
+	)
+	if got.Cost == nil {
+		t.Fatal("combined cost = nil")
+	}
+	want := &llm.Cost{Input: 0.1, Output: 0.2, Total: 0.3}
+	if math.Abs(got.Cost.Input-want.Input) > 1e-12 || math.Abs(got.Cost.Output-want.Output) > 1e-12 || math.Abs(got.Cost.Total-want.Total) > 1e-12 {
+		t.Fatalf("combined cost = %+v, want %+v", *got.Cost, *want)
 	}
 }
 

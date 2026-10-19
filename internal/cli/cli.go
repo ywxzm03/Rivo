@@ -311,12 +311,23 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 // costMode 读取指定 JSONL 会话并输出其累计 token 与美元费用，不加载运行配置。
 func costMode(path string, stdout, stderr io.Writer) int {
+	if data, err := os.ReadFile(path); err != nil {
+		fmt.Fprintf(stderr, "Rivo: failed to read session file: %v\n", err)
+		return 2
+	} else if strings.TrimSpace(string(data)) == "" {
+		printCostTotals(session.UsageTotals{}, stdout)
+		return 0
+	}
 	sm, err := session.Open(path, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	totals := sm.UsageTotals()
+	printCostTotals(sm.UsageTotals(), stdout)
+	return 0
+}
+
+func printCostTotals(totals session.UsageTotals, stdout io.Writer) {
 	fmt.Fprintf(stdout, "Cost (USD): $%.6f\n", totals.Cost.Total)
 	fmt.Fprintf(stdout, "Input tokens: %d\n", totals.InputTokens)
 	fmt.Fprintf(stdout, "Output tokens: %d\n", totals.OutputTokens)
@@ -324,7 +335,6 @@ func costMode(path string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Cache write tokens: %d\n", totals.CacheWriteTokens)
 	fmt.Fprintf(stdout, "Total tokens: %d\n", totals.TotalTokens)
 	fmt.Fprintf(stdout, "Unknown cost entries: %d\n", totals.UnknownCostEntries)
-	return 0
 }
 
 func terminalStreams(stdin io.Reader, stdout io.Writer) bool {

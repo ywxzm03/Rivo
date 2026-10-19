@@ -47,6 +47,12 @@ func TestPriceUsageUnknownModelReturnsNil(t *testing.T) {
 	}
 }
 
+func TestPriceUsageZeroUsageReturnsNil(t *testing.T) {
+	if cost := PriceUsage(Model{Provider: "openai", ID: "gpt-6.1-sol"}, Usage{}); cost != nil {
+		t.Fatalf("cost = %+v, want nil", cost)
+	}
+}
+
 func assertCost(t *testing.T, got, want Cost) {
 	t.Helper()
 	values := [][2]float64{

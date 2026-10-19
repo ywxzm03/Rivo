@@ -61,6 +61,9 @@ func ptrCostRates(rates costRates) *costRates { return &rates }
 // PriceUsage 根据 provider/model 和请求 usage 计算一次美元费用。
 // OpenAI 长上下文价格按整次请求的 prompt token 总量选择。
 func PriceUsage(model Model, usage Usage) *Cost {
+	if usage.ContextTokens() <= 0 {
+		return nil
+	}
 	pricing, ok := builtinPricing[model.Provider+"/"+model.ID]
 	if !ok {
 		return nil
