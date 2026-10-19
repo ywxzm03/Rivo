@@ -178,9 +178,27 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 	sm.AttachFileHistory(agentDir)
 
-	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}}
+	// 1.资源加载：会话恢复使用 header cwd，新会话使用当前进程 cwd
+	cwd := sm.Cwd()
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+		}
+	}
+
+	tools := []llm.Tool{
+		&tool.Read{SupportsImages: model.SupportsImages, WorkingDir: cwd},
+		&tool.Ls{WorkingDir: cwd},
+		&tool.Grep{WorkingDir: cwd},
+		&tool.Find{WorkingDir: cwd},
+		&tool.Bash{WorkingDir: cwd},
+		&tool.Write{History: sm.FileHistory(), WorkingDir: cwd},
+		&tool.Edit{History: sm.FileHistory(), WorkingDir: cwd},
+	}
 	if runtime.GOOS == "windows" {
-		tools = append(tools, &tool.PowerShell{})
+		tools = append(tools, &tool.PowerShell{WorkingDir: cwd})
 	}
 
 	coord := NewCoordinator(sm, onEvent)
@@ -190,19 +208,11 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
 	}
 
-	// 1.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
-	cwd := sm.Cwd()
-	if cwd == "" {
-		var err error
-		cwd, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("app: failed to get working directory: %w", err)
-		}
-	}
+	// 2.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
 	loader := prompt.NewLoader(cwd, agentDir)
 	loader.Reload()
 
-	// 2.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
+	// 3.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
 	coord.SetPromptSections(prompt.BuildSections(prompt.Options{
 		Cwd:          cwd,
 		Tools:        tools,

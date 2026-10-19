@@ -17,7 +17,7 @@ import (
 
 const findDefaultLimit = 1000
 
-type Find struct{}
+type Find struct{ WorkingDir string }
 
 func (f *Find) Name() string { return "find" }
 
@@ -74,7 +74,7 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolvePath(options.searchPath)
+	absPath, err := resolvePathFrom(options.searchPath, f.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

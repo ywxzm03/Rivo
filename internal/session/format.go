@@ -159,22 +159,36 @@ func newSessionID() string {
 
 // ValidateID 校验 --session-id 接受的稳定标识符
 func ValidateID(id string) error {
-	if id == "" {
+	runes := []rune(id)
+	if len(runes) == 0 {
 		return errors.New("session: id must be non-empty")
 	}
-	if !isAlphaNumeric(id[0]) || !isAlphaNumeric(id[len(id)-1]) {
-		return errors.New("session: id must start and end with a letter or number")
-	}
-	for _, r := range id {
-		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("-_.", r) {
+	for i, r := range runes {
+		if !isAlphaNumericRune(r) && !strings.ContainsRune("-_.", r) {
 			return errors.New("session: id may contain only letters, numbers, '-', '_' and '.'")
 		}
+		if (i == 0 || i == len(runes)-1) && !isAlphaNumericRune(r) {
+			return errors.New("session: id must start and end with a letter or number")
+		}
+	}
+	if isWindowsReservedID(id) {
+		return errors.New("session: id is reserved on Windows")
 	}
 	return nil
 }
 
-func isAlphaNumeric(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+func isAlphaNumericRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+func isWindowsReservedID(id string) bool {
+	base := strings.ToLower(strings.SplitN(id, ".", 2)[0])
+	switch base {
+	case "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9":
+		return true
+	default:
+		return false
+	}
 }
 
 func randomHexID() string {

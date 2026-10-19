@@ -18,14 +18,22 @@ import (
 )
 
 func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) int {
-	cwd, _ := os.Getwd()
-	runtime := adapter.New(cfg, cwd, gitBranch(cwd))
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: failed to get working directory: %v\n", err)
+		return 2
+	}
+	branch := gitBranch(cwd)
+	runtime := adapter.New(cfg, cwd, branch)
 	a, err := openSessionTarget(cfg, target, runtime.HandleEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	runtime.SetProjectContext(a.Cwd(), gitBranch(a.Cwd()))
+	if a.Cwd() != cwd {
+		branch = gitBranch(a.Cwd())
+	}
+	runtime.SetProjectContext(a.Cwd(), branch)
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}

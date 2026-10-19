@@ -280,7 +280,7 @@ func TestNewWithIDAndValidateID(t *testing.T) {
 	if m.ID() != "stable-id_1.2" || m.Cwd() != "/project" || !strings.Contains(m.Path(), "stable-id_1.2") {
 		t.Fatalf("session = id %q cwd %q path %q", m.ID(), m.Cwd(), m.Path())
 	}
-	for _, id := range []string{"", ".bad", "bad.", "bad/id", "bad space"} {
+	for _, id := range []string{"", ".bad", "bad.", "bad/id", "bad space", "con", "nul.txt", "COM1.log"} {
 		if _, err := NewWithID("/project", dir, id); err == nil {
 			t.Errorf("NewWithID(%q) error = nil", id)
 		}

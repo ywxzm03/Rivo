@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,12 +52,14 @@ func ListAllSessions() ([]SessionInfo, error) {
 		return nil, fmt.Errorf("session: failed to read session root: %w", err)
 	}
 	var all []SessionInfo
+	var listErrs []error
 	for _, project := range projects {
 		if !project.IsDir() {
 			continue
 		}
 		infos, err := listSessionsInDir(filepath.Join(root, project.Name()))
 		if err != nil {
+			listErrs = append(listErrs, fmt.Errorf("%s: %w", project.Name(), err))
 			continue
 		}
 		all = append(all, infos...)
@@ -67,7 +70,7 @@ func ListAllSessions() ([]SessionInfo, error) {
 		}
 		return all[i].ModTime.After(all[j].ModTime)
 	})
-	return all, nil
+	return all, errors.Join(listErrs...)
 }
 
 // SessionsRoot 返回按 cwd 分组的会话根目录

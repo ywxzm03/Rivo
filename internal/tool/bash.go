@@ -14,7 +14,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Bash struct{}
+type Bash struct{ WorkingDir string }
 
 func (b *Bash) Name() string { return "bash" }
 
@@ -33,7 +33,7 @@ func (b *Bash) Parameters() map[string]any {
 }
 
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	return executeShellCommand(ctx, args, "bash", func(commandCtx context.Context, command string) (*exec.Cmd, error) {
+	return executeShellCommand(ctx, args, "bash", b.WorkingDir, func(commandCtx context.Context, command string) (*exec.Cmd, error) {
 		bashPath, err := findBash()
 		if err != nil {
 			return nil, err

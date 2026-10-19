@@ -10,6 +10,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 // newSessionFileWithModel 在 dir 下创建一个已落盘、带模型记录的会话，返回文件路径
@@ -96,6 +97,15 @@ func TestOpenUsesSessionHeaderCwd(t *testing.T) {
 	if a.Cwd() != projectCwd {
 		t.Fatalf("App.Cwd() = %q, want session cwd %q", a.Cwd(), projectCwd)
 	}
+	for _, candidate := range a.tools {
+		if bash, ok := candidate.(*tool.Bash); ok {
+			if bash.WorkingDir != projectCwd {
+				t.Fatalf("bash working dir = %q, want session cwd %q", bash.WorkingDir, projectCwd)
+			}
+			return
+		}
+	}
+	t.Fatal("bash tool not configured")
 }
 
 func TestOpenFallsBackWhenModelUnknown(t *testing.T) {

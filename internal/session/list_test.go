@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,29 @@ func TestListAllSessionsIncludesProjectMetadata(t *testing.T) {
 	}
 	if seen["project-a-id"].Cwd != projectA || seen["project-b-id"].Cwd != projectB {
 		t.Fatalf("session metadata = %+v", seen)
+	}
+}
+
+func TestListAllSessionsReportsUnreadableProjectDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission model differs on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root, err := SessionsRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	badDir := filepath.Join(root, "unreadable")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badDir, 0o755) })
+	if _, err := ListAllSessions(); err == nil {
+		t.Fatal("ListAllSessions() error = nil, want unreadable directory error")
 	}
 }
 
