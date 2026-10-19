@@ -38,7 +38,7 @@ func (c Config) AvailableModels() []llm.Model {
 }
 
 // Load 从 agent dir 的 settings.json 与 models.json 解析运行配置：
-// 1.构建注册表（内置 openai/deepseek + models.json 自定义，同名时自定义覆盖内置）
+// 1.构建注册表（内置 openai/deepseek + models.json provider 叠加）
 // 2.按三级链解析默认模型：settings 成对指定 → 内置默认 deepseek → 首个有凭据的 provider
 // 3.配置文件解析失败按 pi 语义软降级：记录警告、按空配置继续，最终无可用模型才报错
 func Load() (Config, error) {
@@ -53,15 +53,26 @@ func Load() (Config, error) {
 		cfg.Warnings = append(cfg.Warnings, err.Error())
 	}
 
-	// 1.合并自定义 provider：文件顺序即解析顺序，同名覆盖内置
+	// 1.合并 models.json provider：同名内置 provider 叠加，未知 provider 作为自定义注册
 	var order []string
 	for _, np := range models.Providers {
-		spec, err := customSpec(np.ID, np.Provider)
-		if err != nil {
-			return Config{}, err
+		id := strings.ToLower(np.ID)
+		base, builtin := cfg.registry[id]
+		if builtin {
+			spec, err := overlaySpec(base, np.Provider)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("config: provider %q overlay ignored: %v", np.ID, err))
+				continue
+			}
+			cfg.registry[id] = spec
+		} else {
+			spec, err := customSpec(np.ID, np.Provider)
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.registry[id] = spec
 		}
-		cfg.registry[strings.ToLower(np.ID)] = spec
-		order = append(order, strings.ToLower(np.ID))
+		order = append(order, id)
 	}
 
 	// 2.默认思考等级：非法值警告后忽略

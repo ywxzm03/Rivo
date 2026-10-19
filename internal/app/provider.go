@@ -12,6 +12,11 @@ import (
 
 const defaultProviderID = deepseek.ProviderID
 
+const (
+	defaultContextWindow = 128000
+	defaultMaxTokens     = 16384
+)
+
 type providerSpec struct {
 	id           string
 	defaultModel string
@@ -55,41 +60,27 @@ func builtinRegistry() map[string]providerSpec {
 	return specs
 }
 
-// customSpec 把 models.json 的 provider 条目转成 openai 兼容的 providerSpec
+// customSpec 把 models.json 的自定义 provider 条目转成 openai 兼容的 providerSpec
 func customSpec(id string, p config.Provider) (providerSpec, error) {
 	id = strings.ToLower(strings.TrimSpace(id))
 	if len(p.Models) == 0 {
 		return providerSpec{}, fmt.Errorf("provider %q has no models", id)
 	}
+	if strings.TrimSpace(p.BaseURL) == "" {
+		return providerSpec{}, fmt.Errorf("provider %q is missing baseUrl", id)
+	}
+	if err := validateModelOverrides(id, p.ModelOverrides); err != nil {
+		return providerSpec{}, err
+	}
 	models := make([]llm.Model, 0, len(p.Models))
 	for _, m := range p.Models {
-		name := m.Name
-		if name == "" {
-			name = m.ID
+		model, err := modelFromConfig(id, p, m, nil)
+		if err != nil {
+			return providerSpec{}, err
 		}
-		api := p.API
-		if m.API != "" {
-			api = m.API
-		}
-		var cost *llm.CostRates
-		if m.Cost != nil {
-			copy := *m.Cost
-			cost = &copy
-		}
-		models = append(models, llm.Model{
-			ID:               m.ID,
-			Name:             name,
-			Provider:         id,
-			API:              llm.API(api),
-			Cost:             cost,
-			Reasoning:        m.Reasoning,
-			SupportsImages:   m.SupportsImages || hasImageInput(m.Input),
-			ContextWindow:    m.ContextWindow,
-			MaxTokens:        m.MaxTokens,
-			ThinkingLevelMap: thinkingLevelMap(m.ThinkingLevelMap),
-			SamplingParams:   m.SamplingParams,
-		})
+		models = append(models, model)
 	}
+	models = applyModelOverrides(models, p.ModelOverrides)
 	return providerSpec{
 		id:           id,
 		defaultModel: models[0].ID,
@@ -101,6 +92,235 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 			return models, p.Stream
 		},
 	}, nil
+}
+
+// overlaySpec 在内置 provider 上叠加 models.json 配置
+func overlaySpec(base providerSpec, p config.Provider) (providerSpec, error) {
+	if err := validateModelOverrides(base.id, p.ModelOverrides); err != nil {
+		return providerSpec{}, err
+	}
+	spec := base
+	if p.APIKey != "" {
+		spec.apiKey = p.APIKey
+	}
+	if p.BaseURL != "" {
+		spec.baseURL = p.BaseURL
+	}
+	models := cloneModels(base.models)
+	for _, definition := range p.Models {
+		index := findModelIndex(models, definition.ID)
+		var defaults *llm.Model
+		if index >= 0 {
+			defaults = &models[index]
+		} else if len(models) > 0 {
+			defaults = &models[0]
+		}
+		model, err := modelFromConfig(base.id, p, definition, defaults)
+		if err != nil {
+			return providerSpec{}, err
+		}
+		if index >= 0 {
+			models[index] = model
+		} else {
+			models = append(models, model)
+		}
+	}
+	spec.models = applyModelOverrides(models, p.ModelOverrides)
+	return withModelList(spec, base), nil
+}
+
+func validateModelOverrides(providerID string, overrides map[string]config.ModelOverride) error {
+	for modelID, override := range overrides {
+		if override.ContextWindow != nil && *override.ContextWindow <= 0 {
+			return fmt.Errorf("provider %q model %q has invalid contextWindow override", providerID, modelID)
+		}
+		if override.Cost != nil && (negative(override.Cost.Input) || negative(override.Cost.Output) || negative(override.Cost.CacheRead) || negative(override.Cost.CacheWrite)) {
+			return fmt.Errorf("provider %q model %q has negative cost override", providerID, modelID)
+		}
+	}
+	return nil
+}
+
+func negative(value *float64) bool {
+	return value != nil && *value < 0
+}
+
+// withModelList 保留原 provider 的协议流函数，只替换模型元数据
+func withModelList(spec, base providerSpec) providerSpec {
+	models := cloneModels(spec.models)
+	spec.new = func(apiKey, baseURL string) ([]llm.Model, llm.StreamFn) {
+		_, streamFn := base.new(apiKey, baseURL)
+		return cloneModels(models), streamFn
+	}
+	return spec
+}
+
+// modelFromConfig 将 models.json 模型定义转换为运行时模型
+func modelFromConfig(providerID string, provider config.Provider, definition config.Model, defaults *llm.Model) (llm.Model, error) {
+	if definition.HasContextWindow() && definition.ContextWindow <= 0 {
+		return llm.Model{}, fmt.Errorf("provider %q model %q has invalid contextWindow", providerID, definition.ID)
+	}
+	api := definition.API
+	if api == "" {
+		if provider.HasAPI() {
+			api = provider.API
+		}
+	}
+	if api == "" && defaults != nil {
+		api = string(defaults.API)
+	}
+	if api == "" {
+		api = config.APIOpenAIResponses
+	}
+	contextWindow := definition.ContextWindow
+	if !definition.HasContextWindow() {
+		contextWindow = defaultContextWindow
+	}
+	maxTokens := definition.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = defaultMaxTokens
+	}
+	name := definition.Name
+	if name == "" {
+		name = definition.ID
+	}
+	var cost *llm.CostRates
+	if definition.Cost != nil {
+		copy := *definition.Cost
+		cost = &copy
+	}
+	model := llm.Model{
+		ID:               definition.ID,
+		Name:             name,
+		Provider:         providerID,
+		API:              llm.API(api),
+		Cost:             cost,
+		Reasoning:        definition.Reasoning,
+		SupportsImages:   definition.SupportsImages || hasImageInput(definition.Input),
+		ContextWindow:    contextWindow,
+		MaxTokens:        maxTokens,
+		ThinkingLevelMap: thinkingLevelMap(definition.ThinkingLevelMap),
+		SamplingParams:   cloneParams(definition.SamplingParams),
+	}
+	if defaults != nil {
+		model.ReasoningEffort = defaults.ReasoningEffort
+	}
+	return model, nil
+}
+
+// applyModelOverrides 将字段级覆盖应用到模型列表；未知模型 ID 忽略
+func applyModelOverrides(models []llm.Model, overrides map[string]config.ModelOverride) []llm.Model {
+	for i := range models {
+		override, ok := overrides[models[i].ID]
+		if ok {
+			models[i] = applyModelOverride(models[i], override)
+		}
+	}
+	return models
+}
+
+// applyModelOverride 应用单个模型的字段级覆盖
+func applyModelOverride(model llm.Model, override config.ModelOverride) llm.Model {
+	model = cloneModel(model)
+	if override.Name != nil {
+		model.Name = *override.Name
+	}
+	if override.Reasoning != nil {
+		model.Reasoning = *override.Reasoning
+	}
+	if override.Input != nil {
+		model.SupportsImages = hasImageInput(override.Input)
+	}
+	if override.Cost != nil {
+		cost := llm.CostRates{}
+		if model.Cost != nil {
+			cost = *model.Cost
+		}
+		if override.Cost.Input != nil {
+			cost.Input = *override.Cost.Input
+		}
+		if override.Cost.Output != nil {
+			cost.Output = *override.Cost.Output
+		}
+		if override.Cost.CacheRead != nil {
+			cost.CacheRead = *override.Cost.CacheRead
+		}
+		if override.Cost.CacheWrite != nil {
+			cost.CacheWrite = *override.Cost.CacheWrite
+		}
+		model.Cost = &cost
+	}
+	if override.ContextWindow != nil {
+		model.ContextWindow = *override.ContextWindow
+	}
+	if override.MaxTokens != nil {
+		model.MaxTokens = *override.MaxTokens
+	}
+	if override.ThinkingLevelMap != nil {
+		if model.ThinkingLevelMap == nil {
+			model.ThinkingLevelMap = make(map[llm.ThinkingLevel]*llm.ReasoningEffort)
+		}
+		for level, effort := range thinkingLevelMap(override.ThinkingLevelMap) {
+			model.ThinkingLevelMap[level] = effort
+		}
+	}
+	if override.SamplingParams != nil {
+		if model.SamplingParams == nil {
+			model.SamplingParams = make(map[string]any)
+		}
+		for key, value := range override.SamplingParams {
+			model.SamplingParams[key] = value
+		}
+	}
+	return model
+}
+
+func findModelIndex(models []llm.Model, id string) int {
+	for i := range models {
+		if models[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func cloneModels(models []llm.Model) []llm.Model {
+	cloned := make([]llm.Model, len(models))
+	for i, model := range models {
+		cloned[i] = cloneModel(model)
+	}
+	return cloned
+}
+
+func cloneModel(model llm.Model) llm.Model {
+	if model.Cost != nil {
+		cost := *model.Cost
+		model.Cost = &cost
+	}
+	if model.ThinkingLevelMap != nil {
+		mapping := make(map[llm.ThinkingLevel]*llm.ReasoningEffort, len(model.ThinkingLevelMap))
+		for level, effort := range model.ThinkingLevelMap {
+			if effort != nil {
+				copy := *effort
+				effort = &copy
+			}
+			mapping[level] = effort
+		}
+		model.ThinkingLevelMap = mapping
+	}
+	model.SamplingParams = cloneParams(model.SamplingParams)
+	return model
+}
+
+func cloneParams(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(params))
+	for key, value := range params {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // hasImageInput 兼容 PI models.json 的 input 能力声明

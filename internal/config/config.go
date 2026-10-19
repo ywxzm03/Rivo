@@ -46,6 +46,49 @@ type Model struct {
 	SamplingParams map[string]any `json:"samplingParams"`
 	// Cost 是模型每百万 token 的美元费率；nil 表示未配置
 	Cost *llm.CostRates `json:"cost"`
+
+	contextWindowSet bool
+}
+
+// UnmarshalJSON 记录 contextWindow 是否在配置中显式出现
+func (m *Model) UnmarshalJSON(data []byte) error {
+	type plainModel Model
+	var decoded plainModel
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*m = Model(decoded)
+	_, m.contextWindowSet = fields["contextWindow"]
+	return nil
+}
+
+// HasContextWindow 表示 contextWindow 是否由配置显式指定
+func (m Model) HasContextWindow() bool {
+	return m.contextWindowSet || m.ContextWindow != 0
+}
+
+// CostOverride 是 modelOverrides 中可逐字段覆盖的费率
+type CostOverride struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cacheRead"`
+	CacheWrite *float64 `json:"cacheWrite"`
+}
+
+// ModelOverride 是 models.json 中针对已有模型的字段级覆盖
+type ModelOverride struct {
+	Name             *string            `json:"name"`
+	Reasoning        *bool              `json:"reasoning"`
+	Input            []string           `json:"input"`
+	Cost             *CostOverride      `json:"cost"`
+	ContextWindow    *int               `json:"contextWindow"`
+	MaxTokens        *int               `json:"maxTokens"`
+	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
+	SamplingParams   map[string]any     `json:"samplingParams"`
 }
 
 // Provider 是 models.json 中 providers 下的一个自定义 provider 条目
@@ -56,6 +99,32 @@ type Provider struct {
 	API     string  `json:"api"`
 	APIKey  string  `json:"apiKey"`
 	Models  []Model `json:"models"`
+	// ModelOverrides 覆盖 provider 中已有模型的元数据
+	ModelOverrides map[string]ModelOverride `json:"modelOverrides"`
+
+	apiSet       bool
+	apiDefaulted bool
+}
+
+// UnmarshalJSON 记录 provider 是否显式指定 api
+func (p *Provider) UnmarshalJSON(data []byte) error {
+	type plainProvider Provider
+	var decoded plainProvider
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*p = Provider(decoded)
+	_, p.apiSet = fields["api"]
+	return nil
+}
+
+// HasAPI 表示 provider 是否由配置显式指定 api
+func (p Provider) HasAPI() bool {
+	return p.apiSet || (p.API != "" && !p.apiDefaulted)
 }
 
 // ModelsFile 对应 ~/.rivo/agent/models.json：keyed by provider id，解析时保持文件顺序
@@ -224,22 +293,21 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 	return err
 }
 
-// validate 校验 provider 条目：协议支持 OpenAI Responses 和 Chat Completions，baseUrl 与 models 必填；api 缺省补 Responses
+// validate 校验 provider 条目；仅有 modelOverrides 的内置 provider 可以省略 baseUrl 与 models
 func (m *ModelsFile) validate() error {
 	for i := range m.Providers {
-		if m.Providers[i].Provider.API == "" {
-			m.Providers[i].Provider.API = APIOpenAIResponses
+		provider := &m.Providers[i].Provider
+		if provider.API == "" {
+			provider.API = APIOpenAIResponses
+			provider.apiDefaulted = true
 		}
-		if m.Providers[i].Provider.API != APIOpenAIResponses && m.Providers[i].Provider.API != APIOpenAICompletions {
+		if provider.API != APIOpenAIResponses && provider.API != APIOpenAICompletions {
 			return fmt.Errorf("config: provider %q has unsupported api %q", m.Providers[i].ID, m.Providers[i].Provider.API)
 		}
-		if strings.TrimSpace(m.Providers[i].Provider.BaseURL) == "" {
-			return fmt.Errorf("config: provider %q is missing baseUrl", m.Providers[i].ID)
-		}
-		if len(m.Providers[i].Provider.Models) == 0 {
+		if len(provider.Models) == 0 && len(provider.ModelOverrides) == 0 {
 			return fmt.Errorf("config: provider %q has no models", m.Providers[i].ID)
 		}
-		for _, model := range m.Providers[i].Provider.Models {
+		for _, model := range provider.Models {
 			if strings.TrimSpace(model.ID) == "" {
 				return fmt.Errorf("config: provider %q has a model without id", m.Providers[i].ID)
 			}
@@ -248,6 +316,11 @@ func (m *ModelsFile) validate() error {
 			}
 			if model.Cost != nil && (model.Cost.Input < 0 || model.Cost.Output < 0 || model.Cost.CacheRead < 0 || model.Cost.CacheWrite < 0) {
 				return fmt.Errorf("config: provider %q model %q has negative cost", m.Providers[i].ID, model.ID)
+			}
+		}
+		for modelID := range provider.ModelOverrides {
+			if strings.TrimSpace(modelID) == "" {
+				return fmt.Errorf("config: provider %q has an override without model id", m.Providers[i].ID)
 			}
 		}
 	}
