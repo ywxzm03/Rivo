@@ -47,7 +47,7 @@ type ToolResultMessage struct {
 func (ToolResultMessage) Role() Role { return RoleToolResult }
 func (ToolResultMessage) message()   {}
 
-// SystemMessage 一条 system prompt 声明：Sections 承载分节文本，空串表示该节被删除
+// SystemMessage 一条 system prompt 声明；Sections 中空串表示该节被删除
 type SystemMessage struct {
 	Sections map[string]string
 }
@@ -66,7 +66,7 @@ const (
 )
 
 type Usage struct {
-	// CacheWrite1HTokens 是 CacheWriteTokens 的细分项，ReasoningTokens 已包含在 OutputTokens 中
+	// CacheWrite1HTokens 是 CacheWriteTokens 的细分项，ReasoningTokens 含在 OutputTokens 内
 	InputTokens        int
 	OutputTokens       int
 	CacheReadTokens    int
@@ -77,8 +77,7 @@ type Usage struct {
 	Cost               *Cost
 }
 
-// ContextTokens 返回 provider usage 对当前上下文窗口的 token 贡献。
-// provider 未返回 total 时按规范化后的分项回退计算
+// ContextTokens 返回该 usage 对上下文窗口的 token 贡献，total 缺失时按分项回退计算
 func (u Usage) ContextTokens() int {
 	if u.TotalTokens > 0 {
 		return u.TotalTokens

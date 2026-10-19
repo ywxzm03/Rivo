@@ -32,7 +32,6 @@ func exampleToolGroup() *tui.ToolGroupView {
 	}
 }
 
-// preview 持有模拟运行状态；只通过 UI 消息交付值副本
 type preview struct {
 	state    tui.Snapshot
 	send     func(tea.Msg)
@@ -56,7 +55,6 @@ func initialState() tui.Snapshot {
 		}}
 }
 
-// request 创建取消边界后返回命令；所有模拟状态变更都在单次命令内完成
 func (p *preview) request(request tui.Request) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
@@ -140,7 +138,7 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 		message.Divider = &tui.TurnDividerView{Elapsed: time.Since(start)}
 	}
 	if aborted {
-		// 与真实行为一致：partial 正文 + 消息级取消标记，渲染层追加提示行
+		// 与真实行为一致：partial 正文 + 消息级取消标记
 		message.Aborted = true
 	}
 	p.state.Messages = append(p.state.Messages, message)
@@ -150,7 +148,7 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 	return tui.OperationDoneMsg{Snapshot: &p.state}
 }
 
-// previewModel 在收到真实终端尺寸后注入场景按键，避免预览专用状态进入正式组件
+// previewModel 在收到真实终端尺寸后注入场景按键
 type previewModel struct {
 	*tui.Model
 	scene  string
@@ -216,7 +214,6 @@ func main() {
 	}}), scene: *scene}
 	input := tui.NewInputReader(os.Stdin)
 	defer input.Close()
-	// all-motion 让预览也能验证未按键移动触发的悬浮状态
 	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(os.Stdout, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	driver.send = program.Send
 	_, err := program.Run()

@@ -16,7 +16,7 @@ type Config struct {
 	ProviderID    string
 	ModelID       string
 	ThinkingLevel llm.ThinkingLevel
-	// Warnings 是加载期的非致命警告（如配置文件解析失败被软降级），由调用方输出到 stderr
+	// Warnings 是加载期的非致命警告，由调用方输出到 stderr
 	Warnings []string
 	// registry 是内置与 models.json 自定义 provider 的合并注册表
 	registry map[string]providerSpec
@@ -40,7 +40,7 @@ func (c Config) AvailableModels() []llm.Model {
 // Load 从 agent dir 的 settings.json 与 models.json 解析运行配置：
 // 1.构建注册表（内置 openai/deepseek + models.json provider 叠加）
 // 2.按三级链解析默认模型：settings 成对指定 → 内置默认 deepseek → 首个有凭据的 provider
-// 3.配置文件解析失败按 pi 语义软降级：记录警告、按空配置继续，最终无可用模型才报错
+// 3.配置文件解析失败时记录警告、按空配置继续，最终无可用模型才报错
 func Load() (Config, error) {
 	cfg := Config{registry: builtinRegistry()}
 
@@ -85,7 +85,7 @@ func Load() (Config, error) {
 	}
 
 	// 3.三级链解析默认模型
-	// 3.1 settings 成对指定：模型不存在或无凭据时软回退（对齐 pi findInitialModel）
+	// 3.1 settings 成对指定：模型不存在或无凭据时软回退
 	if settings.DefaultProvider != "" && settings.DefaultModel != "" {
 		spec, err := cfg.lookupProvider(settings.DefaultProvider)
 		if err == nil {
@@ -117,13 +117,12 @@ func Load() (Config, error) {
 	}
 	message := fmt.Sprintf("no models available: configure a provider in %s/models.json", dir)
 	if len(cfg.Warnings) > 0 {
-		// 软降级发生时（如 models.json 解析失败）把原始原因并入错误，避免掩盖真实问题
+		// 把原始降级原因并入错误，避免掩盖真实问题
 		message += "; config warnings: " + strings.Join(cfg.Warnings, "; ")
 	}
 	return Config{}, fmt.Errorf("%s", message)
 }
 
-// knownThinkingLevel 判断给定的思考等级是否在 pi 等级体系内
 func knownThinkingLevel(level string) bool {
 	switch llm.ThinkingLevel(level) {
 	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
@@ -134,7 +133,6 @@ func knownThinkingLevel(level string) bool {
 	}
 }
 
-// lookupProvider 按 id 查找 provider；空 id 落到内置默认 provider
 func (c Config) lookupProvider(id string) (providerSpec, error) {
 	id = strings.ToLower(strings.TrimSpace(id))
 	if id == "" {
@@ -148,7 +146,7 @@ func (c Config) lookupProvider(id string) (providerSpec, error) {
 }
 
 // apiKeyFromEnv 读取内置 provider 的凭据环境变量 <PROVIDER>_API_KEY，
-// 是 models.json 之外最低优先级的凭据来源（对齐 pi）
+// 是 models.json 之外最低优先级的凭据来源
 func apiKeyFromEnv(providerID string) string {
 	return os.Getenv(strings.ToUpper(providerID) + "_API_KEY")
 }

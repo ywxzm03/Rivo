@@ -64,29 +64,21 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (responses.Re
 	return params, nil
 }
 
-// reservedParamKeys 是 BuildParams 自行构建的核心请求字段，
-// models.json 的自由采样参数不得与它们同名覆盖
+// reservedParamKeys 是 BuildParams 自行构建的核心请求字段，采样参数不得覆盖
 var reservedParamKeys = map[string]bool{
 	"model": true, "input": true, "stream": true, "max_output_tokens": true,
 	"tools": true, "tool_choice": true, "reasoning": true, "include": true,
 	"prompt_cache_key": true, "prompt_cache_options": true, "prompt_cache_retention": true,
 }
 
-// thinkingLevels 是 pi 的扩展思考等级体系，顺序从低到高
+// thinkingLevels 是扩展思考等级体系，顺序从低到高
 var thinkingLevels = []llm.ThinkingLevel{
 	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
 	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
 }
 
-// resolveReasoningEffort 按 pi 语义把思考等级解析为 reasoning effort：
-// 1.无显式等级：沿用模型默认 effort（缺省 medium），保持既有行为；
-//
-//	不采用 pi 无等级时经 map.off 回落到 "none" 的语义，避免改变历史默认
-//
-// 2.有显式等级：先经 clampThinkingLevel 收敛到模型支持的最近可用等级
-// 3.收敛后为 off：发 effort "none" 或 map.off 的映射值（pi 流程中 off 经 void 后落入无等级分支）
-// 4.其余等级：命中映射用映射值，未命中原样透传
-// 非 reasoning 模型不经此函数（外层 if model.Reasoning 拦截）
+// resolveReasoningEffort 把思考等级解析为 reasoning effort：无显式等级沿用模型默认值，
+// 有显式等级时先收敛到模型支持的最近可用等级；非 reasoning 模型不经此函数
 func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffort {
 	if opts.ThinkingLevel == "" {
 		effort := model.ReasoningEffort
@@ -110,7 +102,7 @@ func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffo
 	return llm.ReasoningEffort(level)
 }
 
-// clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级（对齐 pi clampThinkingLevel）
+// clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级
 func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLevel {
 	available := supportedThinkingLevels(model)
 	for _, l := range available {
@@ -125,11 +117,9 @@ func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLe
 			break
 		}
 	}
-	// 未知等级直接落到首个可用等级
 	if requestedIndex == -1 {
 		return firstThinkingLevel(available)
 	}
-	// 先向更高等级收敛，再向更低
 	for i := requestedIndex; i < len(thinkingLevels); i++ {
 		if containsThinkingLevel(available, thinkingLevels[i]) {
 			return thinkingLevels[i]
@@ -143,8 +133,8 @@ func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLe
 	return firstThinkingLevel(available)
 }
 
-// supportedThinkingLevels 返回模型支持的思考等级：非 reasoning 模型只有 off；
-// reasoning 模型默认全档可用，但显式 null 禁用该等级，xhigh/max 须显式映射才可用
+// supportedThinkingLevels 返回模型支持的思考等级：非 reasoning 模型只有 off，
+// reasoning 模型显式 null 禁用该等级，xhigh/max 须显式映射才可用
 func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
 	if !model.Reasoning {
 		return []llm.ThinkingLevel{llm.ThinkingLevelOff}
@@ -186,7 +176,7 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			c.SystemPrompt, responses.EasyInputMessageRoleSystem,
 		))
 	}
-	// 消息序列中位于最前的那条 system 消息渲染完整文本，其余渲染补丁框定文本
+	// 首条非空 system 消息渲染完整文本，其余渲染补丁文本
 	systemCount := 0
 	for i, m := range c.Messages {
 		switch msg := m.(type) {
@@ -205,7 +195,6 @@ func BuildInputItems(c llm.Context) (responses.ResponseInputParam, error) {
 			if systemCount == 0 {
 				text = llm.RenderSystemMessageText(msg)
 			}
-			// 只有真正产出文本的消息才占首位，空快照不得把后续完整声明挤成补丁渲染
 			if text == "" {
 				continue
 			}
@@ -231,7 +220,6 @@ func userMessageItem(m llm.UserMessage) responses.ResponseInputItemUnionParam {
 	return responses.ResponseInputItemParamOfMessage(contents, responses.EasyInputMessageRoleUser)
 }
 
-// assistantMessageItems 将 assistant 内容拆分为 Responses 输入 item
 func assistantMessageItems(msgIndex int, m llm.AssistantMessage) ([]responses.ResponseInputItemUnionParam, error) {
 	var items []responses.ResponseInputItemUnionParam
 	var contents []responses.ResponseOutputMessageContentUnionParam
@@ -294,14 +282,12 @@ func assistantMessageID(msgIndex, textIndex int) string {
 func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionParam {
 	var output responses.ResponseInputItemFunctionCallOutputOutputUnionParam
 	if allText(m.Content) {
-		// 纯文本仍走字符串形态，线上形状不变
 		var text string
 		for _, c := range m.Content {
 			text += c.(llm.TextContent).Text
 		}
 		output.OfString = sdk.String(text)
 	} else {
-		// 含图片时改走结构化形态，非文本内容才不会被丢掉
 		var items responses.ResponseFunctionCallOutputItemListParam
 		for _, c := range m.Content {
 			switch v := c.(type) {
@@ -328,7 +314,6 @@ func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionPar
 	}
 }
 
-// allText 判断工具结果里是不是只有文本
 func allText(content []llm.Content) bool {
 	for _, c := range content {
 		if _, ok := c.(llm.TextContent); !ok {

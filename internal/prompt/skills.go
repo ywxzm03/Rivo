@@ -29,12 +29,12 @@ func discoverSkills(cwd, agentDir string) []Skill {
 	seenNames := make(map[string]bool)
 	seenFiles := make(map[string]bool)
 	add := func(skill Skill) {
-		// 1.同一份 SKILL.md 通过多个软链接出现时只保留第一次结果
+		// 同一份 SKILL.md 通过多个软链接出现时只保留第一次结果
 		fileKey := skillFileKey(skill.FilePath)
 		if seenFiles[fileKey] {
 			return
 		}
-		// 2.全局目录先加入，名称冲突时它胜出
+		// 全局目录先加入，名称冲突时它胜出
 		if seenNames[skill.Name] {
 			return
 		}
@@ -42,11 +42,10 @@ func discoverSkills(cwd, agentDir string) []Skill {
 		seenNames[skill.Name] = true
 		skills = append(skills, skill)
 	}
-	// 1.全局目录优先，冲突时它胜出
 	for _, skill := range loadSkillsFromDir(filepath.Join(agentDir, skillsDirName)) {
 		add(skill)
 	}
-	// 2.项目级目录补充，重名项跳过
+	// 项目级目录补充，重名项跳过
 	for _, skill := range loadSkillsFromDir(filepath.Join(cwd, ".rivo", skillsDirName)) {
 		add(skill)
 	}
@@ -155,8 +154,7 @@ func loadSkillFromFile(path, baseDir string) (Skill, bool) {
 	}, true
 }
 
-// parseFrontmatter 解析 YAML frontmatter；无 frontmatter 或 frontmatter 为空时返回零值结构，
-// 有 frontmatter 但解析失败时返回错误
+// parseFrontmatter 解析 YAML frontmatter；无 frontmatter 时返回零值结构，解析失败返回错误
 func parseFrontmatter(content string) (skillFrontmatter, error) {
 	yamlText, _ := splitFrontmatter(content)
 	var frontmatter skillFrontmatter
@@ -172,7 +170,7 @@ func splitFrontmatter(content string) (yamlText, body string) {
 	if !strings.HasPrefix(normalized, "---") {
 		return "", normalized
 	}
-	// 从 3 起查找结束标记，YAML 容忍前导换行；end 为 0 时区间为空，覆盖 "---\n---" 这种空 frontmatter
+	// 从 3 起查找结束标记，YAML 容忍前导换行
 	end := strings.Index(normalized[3:], "\n---")
 	if end == -1 {
 		return "", normalized
@@ -193,7 +191,7 @@ func ReadSkillBody(path string) (string, error) {
 	return strings.TrimSpace(body), nil
 }
 
-// validSkillName 校验 skill 名：小写字母、数字与连字符，长度受限，首尾无连字符且无连续连字符
+// validSkillName 校验 skill 名：小写字母、数字与连字符，首尾无连字符且无连续连字符
 func validSkillName(name string) bool {
 	if name == "" || len(name) > maxSkillNameLength {
 		return false

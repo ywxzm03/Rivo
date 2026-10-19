@@ -29,7 +29,6 @@ type ImageContent struct {
 func (ImageContent) Type() ContentType { return ContentImage }
 func (ImageContent) content()          {}
 
-// ThinkingContent 保存模型 reasoning 的可展示文本和 provider 原始 item 用于回放
 type ThinkingContent struct {
 	Thinking          string
 	ThinkingSignature string

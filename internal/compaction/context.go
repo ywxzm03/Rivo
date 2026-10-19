@@ -16,7 +16,7 @@ type ContextEntry struct {
 	Kind     ContextKind
 	Messages []llm.Message
 	Summary  string
-	// Details 保存压缩点的结构化元数据，不额外生成模型消息
+	// Details 保存压缩点的结构化元数据
 	Details *FileLists
 }
 
@@ -30,7 +30,6 @@ type ContextView struct {
 	UsageStale       bool
 }
 
-// Messages 按投影顺序展开模型上下文消息
 func (v ContextView) Messages() []llm.Message {
 	var messages []llm.Message
 	for _, entry := range v.Entries {
@@ -39,7 +38,6 @@ func (v ContextView) Messages() []llm.Message {
 	return messages
 }
 
-// MessageCount 统计条目展开后的模型消息数量
 func MessageCount(entries []ContextEntry) int {
 	total := 0
 	for _, entry := range entries {

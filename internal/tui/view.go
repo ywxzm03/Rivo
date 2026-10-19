@@ -44,7 +44,7 @@ func (m *Model) layout() {
 	probe.ShowLineNumbers = false
 	probe.SetWidth(max(1, m.width))
 	for _, line := range strings.Split(m.editor.Value(), "\n") {
-		// 使用编辑器自身的软换行规则，包含行尾光标和按单词换行占用的空间
+		// 使用编辑器自身的软换行规则，包含行尾光标与按单词换行占用的空间
 		probe.SetValue(line)
 		rows += probe.LineInfo().Height
 	}
@@ -67,11 +67,9 @@ func (m *Model) layout() {
 	}
 }
 
-// refreshEditorViewport repositions the textarea after its dock height changes.
 func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int) {
-	// Bubble's textarea keeps its private viewport offset when SetHeight or
-	// SetWidth changes. Re-anchor at the input start, then walk back to the
-	// original logical line so the cursor remains where the user left it.
+	// textarea 在 SetHeight/SetWidth 后会保留私有视口偏移，先回到输入起点，
+	// 再走到原来的逻辑行，使光标停在用户离开的位置
 	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyCtrlHome})
 	for steps := 0; steps < 100000; steps++ {
 		line := editor.Line()
@@ -83,8 +81,7 @@ func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int)
 		_ = next
 	}
 	editor.SetCursor(targetColumn)
-	// An empty rune message runs textarea's repositionView without changing
-	// the restored value or cursor column.
+	// 空 rune 消息只触发 textarea 的 repositionView，不改变已恢复的值与光标列
 	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyRunes})
 }
 
@@ -101,8 +98,7 @@ func (m *Model) View() string {
 		lines = append(lines, make([]string, m.height-len(lines))...)
 	}
 	if len(lines) > m.height {
-		// The dock is measured before rendering; only a malformed child may
-		// overflow. Preserve the fixed footer/input boundary in that case.
+		// 输入坞高度已预先测量，只有异常子组件才会溢出，此时保住固定底栏边界
 		if m.height <= 1 {
 			lines = lines[len(lines)-1:]
 		} else {
@@ -144,7 +140,7 @@ func (m *Model) jumpPillHovered() bool {
 	return ok && m.mousePositionSet && m.mousePosition.y == bounds.y && m.mousePosition.x >= bounds.left && m.mousePosition.x < bounds.right
 }
 
-// paintJumpPill 在 transcript 最后一行覆盖 Claude 风格的到底提示
+// paintJumpPill 在 transcript 最后一行覆盖到底提示
 func (m *Model) paintJumpPill(lines []string) {
 	bounds, ok := m.jumpPillBounds()
 	if !ok || bounds.y < 0 || bounds.y >= len(lines) {
@@ -173,7 +169,6 @@ func (m *Model) jumpToBottom() {
 	m.clearSelection()
 }
 
-// frameLines builds the terminal rows in their stable top-to-bottom order.
 func (m *Model) frameLines() []string {
 	var lines []string
 	if m.viewport.Height > 0 {
@@ -208,7 +203,7 @@ func (m *Model) frameLines() []string {
 	return lines
 }
 
-// pendingRows 返回 PI 风格队列区域占用的行数
+// pendingRows 返回队列区域占用的行数
 func (m *Model) pendingRows() int {
 	if m.selector != nil || len(m.state.Steering) == 0 {
 		return 0
@@ -240,7 +235,7 @@ func (m *Model) pendingLines() []string {
 		if rows == 1 {
 			return lines[len(lines)-1:]
 		}
-		// Keep the spacer and the hint while showing the earliest messages that fit.
+		// 保留空行与提示，同时尽量多显示最早的消息
 		visible := append([]string(nil), lines[:rows-1]...)
 		visible = append(visible, lines[len(lines)-1])
 		return visible

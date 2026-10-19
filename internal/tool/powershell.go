@@ -27,7 +27,6 @@ func (p *PowerShell) Description() string {
 
 func (p *PowerShell) Parameters() map[string]any { return shellParameters() }
 
-// Execute 执行 PowerShell 命令并返回清洗、截断后的合并输出
 func (p *PowerShell) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	if runtime.GOOS != "windows" {
 		return llm.ToolResult{}, fmt.Errorf("powershell: only available on Windows")
@@ -46,7 +45,7 @@ func (p *PowerShell) Execute(ctx context.Context, args map[string]any) (llm.Tool
 	})
 }
 
-// findPowerShell 按 pi 的顺序查找 PowerShell 7 和 Windows PowerShell
+// findPowerShell 按顺序查找 PowerShell 7 与 Windows PowerShell
 func findPowerShell() (string, error) {
 	for _, name := range []string{"pwsh.exe", "powershell.exe"} {
 		if path, err := exec.LookPath(name); err == nil {

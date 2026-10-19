@@ -32,13 +32,12 @@ func withFileMutationQueue[T any](ctx context.Context, path string, fn func() (T
 	mutationQueues[key] = current
 	mutationQueuesMu.Unlock()
 
-	// canceled 标记等待前序操作期间被取消的调用，其节点不能提前从队列摘除
+	// canceled 标记等待前序操作期间被取消的调用
 	var canceled bool
 	defer func() {
 		mutationQueuesMu.Lock()
 		if mutationQueues[key] == current {
 			if canceled {
-				// 取消的等待者把队尾还给前序节点，后续调用仍会等到前序操作完成
 				mutationQueues[key] = previous
 			} else {
 				delete(mutationQueues, key)
@@ -54,7 +53,6 @@ func withFileMutationQueue[T any](ctx context.Context, path string, fn func() (T
 		select {
 		case <-previous.done:
 		case <-ctx.Done():
-			// 已入队的后续调用在等待本节点的 done，关闭时机推迟到前序操作完成之后
 			canceled = true
 			go func() {
 				<-previous.done
@@ -69,7 +67,6 @@ func withFileMutationQueue[T any](ctx context.Context, path string, fn func() (T
 	return fn()
 }
 
-// mutationQueueKey 解析已有符号链接，目标不存在时退回绝对路径
 func mutationQueueKey(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {

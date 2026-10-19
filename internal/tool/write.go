@@ -42,7 +42,7 @@ func (w *Write) Parameters() map[string]any {
 	}
 }
 
-// Execute 创建或覆盖文件，并在需要时递归创建父目录
+// Execute 创建或覆盖文件，需要时递归创建父目录
 func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.读取必填参数，空内容也是合法写入
 	path, ok := args["path"].(string)

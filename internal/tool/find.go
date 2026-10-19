@@ -101,7 +101,6 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	return llm.ToolResult{Content: formatFindOutput(result, options.limit)}, nil
 }
 
-// parseFindArgs 读取 find 参数并应用默认值
 func parseFindArgs(args map[string]any) (findOptions, error) {
 	pattern, ok := args["pattern"].(string)
 	if !ok {
@@ -129,7 +128,6 @@ func buildFindRipgrepArgs(pattern string) []string {
 	return []string{"--files", "--hidden", "--color=never", "--path-separator=/", "--glob", glob, "--", "."}
 }
 
-// runFindRipgrep 执行 rg 并在发现超限结果后停止搜索
 func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOptions) (findResult, error) {
 	command := exec.CommandContext(ctx, rgPath, buildFindRipgrepArgs(options.pattern)...)
 	command.Dir = absPath
@@ -175,7 +173,6 @@ func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOpt
 	return result, nil
 }
 
-// formatFindOutput 应用字节截断并生成模型可读的提示
 func formatFindOutput(result findResult, limit int) []llm.Content {
 	if len(result.paths) == 0 {
 		return textContents("No files found")

@@ -1,4 +1,4 @@
-// Package tui 实现 Pi 风格的全屏交互界面；核心运行通过回调与不可变消息接入
+// Package tui 实现全屏交互界面，核心运行通过回调与不可变消息接入
 package tui
 
 import (
@@ -18,7 +18,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// ModelOption 是可供选择的模型及核心已解析的思考等级，不含凭据
+// ModelOption 是可供选择的模型及已解析的思考等级
 type ModelOption struct {
 	ID, Provider, Name string
 	ContextWindow      int
@@ -32,7 +32,7 @@ type SessionOption struct {
 	Path, Summary, Modified string
 }
 
-// TreeNode 是 TUI 的 user-only 树投影；连接线由运行适配器预先计算。
+// TreeNode 是 TUI 的 user-only 树投影，连接线由运行适配器预先计算
 type TreeNode struct {
 	ID, Text, Prefix string
 	ParentID         string
@@ -40,12 +40,12 @@ type TreeNode struct {
 	Current          bool
 }
 
-// SkillOption 是命令补全使用的技能元数据，不向 UI 暴露文件读取职责
+// SkillOption 是命令补全使用的技能元数据
 type SkillOption struct {
 	Name, Description string
 }
 
-// SkillInvocationView 保存已提交正文的显示投影，不重新读取磁盘
+// SkillInvocationView 保存已提交正文的显示投影
 type SkillInvocationView struct {
 	Name, Location, Content, Arguments string
 }
@@ -69,7 +69,7 @@ type ThinkingBlockView struct {
 	TokensExact bool
 }
 
-// ToolCallView 保存完整工具状态；compact/full 只改变展示方式
+// ToolCallView 保存完整工具状态，compact/full 只改变展示方式
 type ToolCallView struct {
 	ID, Name  string
 	Arguments string
@@ -94,7 +94,7 @@ type TurnDividerView struct {
 	Elapsed time.Duration
 }
 
-// Message 是显示投影；ID 在流式更新中保持稳定，压缩提示不冒充用户消息
+// Message 是显示投影，ID 在流式更新中保持稳定
 type Message struct {
 	Revision                 uint64
 	ID, Role, Text, Thinking string
@@ -106,7 +106,7 @@ type Message struct {
 	Images                   []ImageView
 }
 
-// ImageView 是消息投影中的图片元数据，不包含图片正文
+// ImageView 是消息投影中的图片元数据
 type ImageView struct {
 	MIMEType       string
 	OriginalWidth  int
@@ -115,7 +115,7 @@ type ImageView struct {
 	Height         int
 }
 
-// Snapshot 由运行侧在安全边界提供；UI 不回读活动中的 Agent/SessionManager
+// Snapshot 由运行侧在安全边界提供，UI 不回读活动中的 Agent/SessionManager
 type Snapshot struct {
 	Cwd, Branch, ModelKey, DefaultModelKey, Thinking string
 	SessionName                                      string
@@ -137,7 +137,7 @@ type ClipboardData struct {
 	Images []llm.ImageContent
 }
 
-// Request 表示用户发起的一次操作；Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload/clear/delete
+// Request 表示用户发起的一次操作，Kind 为 run/model/thinking/resume/tree/compact/rename/new/reload/clear/delete
 type Request struct {
 	Kind, Value string
 	AfterID     string
@@ -163,7 +163,7 @@ type Handlers struct {
 	WriteClipboard          func(string) error
 }
 
-// MessageMsg 更新具有同一 ID 的消息；OperationDoneMsg 才结束整个用户操作
+// MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
 type MessageMsg Message
 type MessageCommittedMsg struct {
 	PreviousID string
@@ -230,7 +230,7 @@ type cachedMessage struct {
 	view     string
 }
 
-// Model 独占全部显示状态，生命周期与消息定稿分离
+// Model 独占全部显示状态
 type Model struct {
 	messageIndex     map[string]int
 	operationID      uint64
@@ -281,7 +281,7 @@ type Model struct {
 	cursorColumn     atomic.Int64
 }
 
-// New 创建界面；预览与正式运行共享同一套组件和消息处理
+// New 创建界面，预览与正式运行共享同一套组件和消息处理
 func New(state Snapshot, handlers Handlers) *Model {
 	ed := textarea.New()
 	ed.Prompt, ed.Placeholder = "❯ ", ""
@@ -519,7 +519,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applySnapshot 复制切片边界，预览/运行侧之后的赋值不会改动 UI
 func (m *Model) applySnapshot(s Snapshot) {
 	m.applyMetadata(s)
 	m.steeringRestored = false
@@ -570,7 +569,6 @@ func (m *Model) currentModel() ModelOption {
 	return ModelOption{ID: "no-model"}
 }
 
-// dispatch 先锁定 UI 操作状态，再让适配器异步执行
 func (m *Model) dispatch(kind, value string) tea.Cmd {
 	return m.dispatchMessage(kind, value, nil)
 }
@@ -597,7 +595,6 @@ func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) te
 	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
 }
 
-// dispatchSteering 把运行中的普通输入交给当前操作，不改变操作 ID 或 busy 状态
 func (m *Model) dispatchSteering(value string) tea.Cmd {
 	message := textUserMessage(value)
 	return m.dispatchSteeringMessage(value, &message)
@@ -693,7 +690,7 @@ func (m *Model) setSteeringState(messages []string, inputs []llm.UserMessage) {
 	m.state.SteeringRevision = m.steeringRevision
 }
 
-// restoreQueuedSteering 按 PI 的顺序把 steering 放回编辑器，并原子清空后台队列
+// restoreQueuedSteering 把 steering 按顺序放回编辑器，并原子清空后台队列
 func (m *Model) restoreQueuedSteering() int {
 	if m.handlers.RestoreSteeringMessages != nil || len(m.state.SteeringInputs) > 0 {
 		var queued []llm.UserMessage
@@ -782,7 +779,7 @@ func (m *Model) notice(value string) {
 	m.refreshTranscript()
 }
 
-// resetSessionUI 仅在新会话切换成功后恢复编辑器与显示偏好的初始状态
+// resetSessionUI 在新会话切换成功后恢复编辑器与显示偏好的初始状态
 func (m *Model) resetSessionUI() {
 	m.editor.Reset()
 	m.resetPastes()
@@ -840,7 +837,6 @@ func (m *Model) upsertMessage(message Message) {
 	m.state.Messages = append(m.state.Messages, message)
 }
 
-// applyMetadata 更新操作结果的设置与目录，不复制未变化的 transcript
 func (m *Model) applyMetadata(s Snapshot) {
 	messages := m.state.Messages
 	steering := append([]string(nil), m.state.Steering...)

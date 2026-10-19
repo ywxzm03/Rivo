@@ -30,19 +30,17 @@ type App struct {
 	onEvent        llm.AgentEventSink
 	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
 	loader *prompt.Loader
-	// cwd 与 tools 在 Reload 重建基线分节时复用
-	cwd   string
-	tools []llm.Tool
-	// modelFallback 非空表示恢复时投影模型解析失败，已回退 env 默认模型
+	cwd    string
+	tools  []llm.Tool
+	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
 
-// ModelFallbackMessage 返回恢复时的模型回退警告；未发生回退时为空
+// ModelFallbackMessage 返回恢复时的模型回退警告，未发生回退时为空
 func (a *App) ModelFallbackMessage() string {
 	return a.modelFallback
 }
 
-// Warnings 返回会话恢复或运行期间产生的降级警告。
 func (a *App) Warnings() []string {
 	if a.session == nil {
 		return nil
@@ -51,7 +49,7 @@ func (a *App) Warnings() []string {
 }
 
 // Open 恢复指定会话文件：按投影记录的 Provider/Model 装配运行链，
-// 模型解析失败时回退 env 配置并记录警告，投影无模型记录时直接走 env 配置
+// 模型解析失败时回退 env 配置并记录警告
 func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -66,17 +64,16 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 1.投影消息注入运行期上下文，恢复的会话才真正接上历史
+	// 1.投影消息注入运行期上下文
 	if messages := proj.Messages(); len(messages) > 0 {
 		a.agent.ReplaceMessages(messages)
 	}
-	// 2.思考等级：newAppWithModel 已按 cfg.ThinkingLevel 装配，
-	// 仅在 settings 未指定时回填会话投影的显式记录（含 off）
+	// 2.思考等级：仅在 settings 未指定时回填会话投影的显式记录
 	if cfg.ThinkingLevel == "" && proj.HasThinkingLevel {
 		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
 	}
 	a.modelFallback = warning
-	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills，变更留给下次请求前 diff
+	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills
 	a.Reload()
 	return a, nil
 }
@@ -91,7 +88,6 @@ func assembleResume(cfg Config, proj compaction.ContextView, sm *session.Session
 	if err == nil {
 		return a, "", nil
 	}
-	// 1.投影模型解析失败回退 env 默认模型，env 也失败按启动失败处理
 	a, err = newApp(cfg, sm, onEvent)
 	if err != nil {
 		return nil, "", err
@@ -103,7 +99,7 @@ func assembleResume(cfg Config, proj compaction.ContextView, sm *session.Session
 func fallbackWarning(cfg Config, proj compaction.ContextView) string {
 	modelID := cfg.ModelID
 	if modelID == "" {
-		// 空 ModelID 经装配兜底为 provider 默认模型，文案与实际装配保持一致
+		// 空 ModelID 经装配兜底为 provider 默认模型
 		if spec, err := cfg.lookupProvider(cfg.ProviderID); err == nil {
 			modelID = spec.defaultModel
 		}
@@ -116,7 +112,6 @@ func New(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	return NewWithSessionDir(cfg, "", onEvent)
 }
 
-// NewWithSessionDir 创建 App 并把会话文件写入指定目录；dir 为空时使用默认会话目录
 func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -137,7 +132,8 @@ func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) 
 	return newAppWithModel(cfg, cfg.ProviderID, cfg.ModelID, sm, onEvent)
 }
 
-// newAppWithModel 按指定厂商与模型装配编排层与 Agent：事件经编排层落盘，压缩与溢出恢复由编排层驱动
+// newAppWithModel 按指定厂商与模型装配编排层与 Agent：事件经编排层落盘，
+// 压缩与溢出恢复由编排层驱动
 func newAppWithModel(cfg Config, providerID, modelID string, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
 	spec, err := cfg.lookupProvider(providerID)
 	if err != nil {
@@ -208,7 +204,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}, nil
 }
 
-// Run 经编排层驱动一次运行，溢出恢复由编排层负责
+// Run 经编排层驱动一次运行
 func (a *App) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	op, err := a.Start(ctx, OperationRequest{Kind: OperationRun, Value: input})
 	if err != nil {
@@ -230,16 +226,13 @@ func (a *App) Compact(ctx context.Context, instructions string) error {
 // ContextView 返回带来源的已提交会话投影
 func (a *App) ContextView() compaction.ContextView { return a.session.BuildContext() }
 
-// Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器。
+// Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器
 func (a *App) Tree() session.TreeSnapshot { return a.session.Tree() }
 
-// SessionID 返回显示身份使用的会话命名空间
 func (a *App) SessionID() string { return a.session.ID() }
 
-// SessionName 返回已提交的 Thread 显示名称
 func (a *App) SessionName() string { return a.session.Name() }
 
-// TakeSteering 原子清空当前运行中尚未消费的 steering
 func (a *App) TakeSteering() []string {
 	if a == nil || a.agent == nil {
 		return nil
@@ -247,7 +240,6 @@ func (a *App) TakeSteering() []string {
 	return a.agent.TakeSteering()
 }
 
-// TakeSteeringMessages 原子清空结构化 steering
 func (a *App) TakeSteeringMessages() []llm.UserMessage {
 	if a == nil || a.agent == nil {
 		return nil
@@ -255,13 +247,11 @@ func (a *App) TakeSteeringMessages() []llm.UserMessage {
 	return a.agent.TakeSteeringMessages()
 }
 
-// Skills 返回当前已发现技能的副本，显式命令由 TUI 适配器消费
+// Skills 返回当前已发现技能的副本
 func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
 
-// CurrentModel 返回当前运行模型副本
 func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
 
-// CurrentThinkingLevel 返回当前思考等级
 func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
 
 // SteeringMessages 返回当前尚未消费的 steering 文本，供显示层生成快照
@@ -272,7 +262,6 @@ func (a *App) SteeringMessages() []string {
 	return a.agent.SteeringMessages()
 }
 
-// SteeringUserMessages 返回结构化 steering 快照
 func (a *App) SteeringUserMessages() []llm.UserMessage {
 	if a == nil || a.agent == nil {
 		return nil
@@ -280,7 +269,6 @@ func (a *App) SteeringUserMessages() []llm.UserMessage {
 	return a.agent.SteeringUserMessages()
 }
 
-// SteeringRevision 返回等待消费队列的单调版本
 func (a *App) SteeringRevision() uint64 {
 	if a == nil || a.agent == nil {
 		return 0
@@ -293,7 +281,6 @@ func (a *App) AutoCompactionEnabled() bool {
 	return a.coordinator != nil && a.coordinator.Compactor != nil
 }
 
-// AvailableModels 返回当前配置中的模型目录
 func (a *App) AvailableModels() []llm.Model { return a.cfg.AvailableModels() }
 
 // SetThinkingLevel 更新当前模型的思考等级并记录会话设置
@@ -316,7 +303,7 @@ func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
 	return nil
 }
 
-// SetModel 切换模型、流适配器和压缩器；校验完成后才应用运行模型
+// SetModel 切换模型、流适配器和压缩器
 func (a *App) SetModel(providerID, modelID string) error {
 	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationModel, Value: providerID + "/" + modelID})
 	if err != nil {
@@ -384,8 +371,7 @@ func validThinkingLevel(level llm.ThinkingLevel) bool {
 	}
 }
 
-// Reload 重读 AGENTS.md 与 skills 并重建基线分节；不写 system 消息，
-// 变更在下次请求前由编排层 diff 后追加
+// Reload 重读 AGENTS.md 与 skills 并重建基线分节，变更在下次请求前 diff 后追加
 func (a *App) Reload() {
 	a.loader.Reload()
 	a.coordinator.SetPromptSections(prompt.BuildSections(prompt.Options{

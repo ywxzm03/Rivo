@@ -44,8 +44,7 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 	return repl(cfg, false, stdin, stdout, stderr)
 }
 
-// repl 组装 Agent 并进入交互模式；continueRecent 为 true 时恢复最近会话，无会话则静默新建。
-// cfg 由调用方加载并应用 CLI 覆盖后传入，本函数不再重复加载
+// repl 组装 Agent 并进入交互模式，continueRecent 为 true 时恢复最近会话
 func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if warning, ok := ev.(llm.WarningEvent); ok {
@@ -58,8 +57,7 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 				return err
 			}
 		}
-		// 压缩完成打印一行反馈，覆盖自动与溢出来源；手动压缩的失败经 runREPL
-		// 的错误路径打印，避免同一错误输出两次
+		// 压缩完成打印一行反馈；手动压缩的失败交给 runREPL 的错误路径，避免重复输出
 		if end, ok := ev.(llm.CompactionEndEvent); ok {
 			if end.Error != "" {
 				if end.Reason != "manual" {
@@ -70,7 +68,7 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 				return nil
 			}
 			preview := end.Summary
-			// 按 rune 截断，避免把多字节字符从中间切开输出乱码
+			// 按 rune 截断，避免把多字节字符从中间切开
 			if runes := []rune(preview); len(runes) > 80 {
 				preview = string(runes[:80]) + "..."
 			}
@@ -93,7 +91,7 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
-	// 2.模型回退警告：恢复继续，但明确告知实际使用的模型
+	// 2.模型回退警告
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
@@ -109,7 +107,6 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 		}
 		return err
 	}, func(ctx context.Context, instructions string) error {
-		// 经闭包取当前 a，保证 /resume 替换实例后压缩作用于新会话
 		return a.Compact(ctx, instructions)
 	}, func() ([]session.SessionInfo, error) {
 		cwd, err := os.Getwd()
@@ -131,12 +128,11 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 		}
 		return nil
 	}, func() {
-		// 经闭包取当前 a，/resume 替换实例后 reload 作用于新会话
 		a.Reload()
 	})
 }
 
-// resumeRecentApp 恢复最近会话；目录下无会话时静默新建（照搬 pi --continue）
+// resumeRecentApp 恢复最近会话，无会话时静默新建
 func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -183,7 +179,7 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 			}
 			continue
 		}
-		// /resume 列出会话并按编号恢复；空列表或取消留在当前会话
+		// /resume 列出会话并按编号恢复
 		if input == "/resume" {
 			if !handleResume(reader, stdout, stderr, listSessions, resume) {
 				return 1
@@ -203,7 +199,7 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.先扫描 --help：一旦出现即优先展示帮助（跳过带值参数的值），不校验其余参数
+	// 1.先扫描 --help：一旦出现即优先展示帮助，不校验其余参数
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--help" || args[i] == "-h" {
 			fmt.Fprint(stdout, helpText)
@@ -278,7 +274,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// 2.加载运行配置并应用 CLI 覆盖（--provider/--model/--thinking）
+	// 2.加载运行配置并应用 CLI 覆盖
 	cfg, err := app.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
@@ -301,15 +297,14 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return printMode(cfg, prompt, continueRecent, stdout, stderr)
 	}
-	// 终端交互使用全屏 TUI；管道/测试流保留逐行入口，避免把 ANSI 控制序列写入非终端输出
+	// 终端交互使用全屏 TUI，管道/测试流保留逐行入口
 	if terminalStreams(stdin, stdout) {
 		return runTUI(cfg, continueRecent, stdin.(*os.File), stdout.(*os.File), stderr)
 	}
-	// 非终端流继续使用逐行入口，保留脚本与既有测试的可组合性
 	return repl(cfg, continueRecent, stdin, stdout, stderr)
 }
 
-// costMode 读取指定 JSONL 会话并输出其累计 token 与美元费用，不加载运行配置。
+// costMode 读取指定 JSONL 会话并输出其累计 token 与美元费用
 func costMode(path string, stdout, stderr io.Writer) int {
 	if data, err := os.ReadFile(path); err != nil {
 		fmt.Fprintf(stderr, "Rivo: failed to read session file: %v\n", err)
@@ -346,8 +341,7 @@ func terminalStreams(stdin io.Reader, stdout io.Writer) bool {
 	return term.IsTerminal(in.Fd()) && term.IsTerminal(out.Fd())
 }
 
-// buildPrintPrompt 组合 print 模式的提示词：位置参数优先（空格拼接），
-// 无位置参数时从 stdin 读取（管道/重定向）；stdin 是终端且无提示词时报错
+// buildPrintPrompt 组合 print 模式的提示词：位置参数优先，无位置参数时从 stdin 读取
 func buildPrintPrompt(positional []string, stdin io.Reader) (string, error) {
 	if len(positional) > 0 {
 		return strings.Join(positional, " "), nil
@@ -373,8 +367,7 @@ type promptRunner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
 }
 
-// printMode 非交互执行一轮：输出最终 assistant 消息的文本块；
-// 运行错误或 stopReason 为 error/aborted 时打到 stderr 并返回 1
+// printMode 非交互执行一轮，运行错误或 error/aborted 收场时打到 stderr 并返回 1
 func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
 	var run promptRunner
 	if len(runner) > 0 {
@@ -420,8 +413,7 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 	return 0
 }
 
-// handleResume 打印会话列表并读取编号完成恢复；返回 false 表示输入读取失败需退出 REPL。
-// 空列表、非法编号、直接回车都不改变当前会话
+// handleResume 打印会话列表并读取编号完成恢复，返回 false 表示输入读取失败
 func handleResume(reader *bufio.Reader, stdout, stderr io.Writer, listSessions func() ([]session.SessionInfo, error), resume func(string) error) bool {
 	infos, err := listSessions()
 	if err != nil {
@@ -432,7 +424,7 @@ func handleResume(reader *bufio.Reader, stdout, stderr io.Writer, listSessions f
 		fmt.Fprintln(stdout, "no sessions to resume")
 		return true
 	}
-	// 1.按编号打印列表：编号 + 相对时间 + 首条用户消息摘要
+	// 1.按编号打印列表
 	for i, info := range infos {
 		fmt.Fprintf(stdout, "%d. %s  %s\n", i+1, relativeTime(info.ModTime), info.Summary)
 	}

@@ -1,4 +1,4 @@
-// Package prompt 构建 system prompt 的分节内容，并负责 AGENTS.md 与 skills 的磁盘发现
+// Package prompt 构建 system prompt 分节，并负责 AGENTS.md 与 skills 的磁盘发现
 package prompt
 
 import (
@@ -7,18 +7,18 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// Sections 一组分节文本，键为分节名；空串表示该节不存在或被删除
+// Sections 一组分节文本，键为分节名；空串表示该节被删除
 type Sections map[string]string
 
 // Options 分节构建的输入
 type Options struct {
-	// Cwd 工作目录，进 cwd 分节
+	// Cwd 进 cwd 分节
 	Cwd string
-	// Tools 已装载的工具，按装载顺序贡献 tools 与 rules 分节
+	// Tools 按装载顺序贡献 tools 与 rules 分节
 	Tools []llm.Tool
-	// ContextFiles AGENTS.md 链，进 instructions 分节
+	// ContextFiles 进 instructions 分节
 	ContextFiles []ContextFile
-	// Skills 已发现的 skills，进 skills 分节
+	// Skills 进 skills 分节
 	Skills []Skill
 }
 
@@ -50,13 +50,12 @@ func BuildSections(opts Options) Sections {
 	return sections
 }
 
-// wrap 把分节内容包进同名标签，保证分节文本自包含（模型能根据标签把更新关联回原文）；
-// 分节名与 llm.SystemSectionOrder 的一致性由测试锁定
+// wrap 把分节内容包进同名标签，保证分节文本自包含
 func wrap(name, content string) string {
 	return "<" + name + ">\n" + content + "\n</" + name + ">"
 }
 
-// buildTools 渲染工具清单，每行一条 name 与 snippet；无 snippet 的工具不出现
+// buildTools 渲染工具清单，无 snippet 的工具不出现
 func buildTools(tools []llm.Tool) string {
 	var lines []string
 	for _, t := range tools {
@@ -90,7 +89,6 @@ func buildRules(tools []llm.Tool) string {
 	return wrap("rules", strings.Join(rules, "\n"))
 }
 
-// buildInstructions 渲染 AGENTS.md 链：固定前缀后每份文件一段，段间空行
 func buildInstructions(files []ContextFile) string {
 	body := "Project-specific instructions and guidelines:"
 	for _, file := range files {
@@ -99,8 +97,8 @@ func buildInstructions(files []ContextFile) string {
 	return wrap("instructions", body)
 }
 
-// DiffSections 比较当前分节与目标分节：只返回发生变化或需要删除的节，值指向目标文本；
-// 无差异返回 nil，空串表示该节需要删除
+// DiffSections 只返回发生变化或需要删除的节，值指向目标文本；无差异返回 nil，
+// 空串表示该节需要删除
 func DiffSections(current, target Sections) Sections {
 	patch := make(Sections)
 	for name, text := range target {

@@ -53,7 +53,6 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	})
 	input := tui.NewInputReader(stdin)
 	defer input.Close()
-	// all-motion 接收未按键的移动事件，驱动可交互提示的悬浮状态
 	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	runtime.SetProgram(program)
 	_, err = program.Run()
@@ -110,7 +109,6 @@ func (w *serializedOutput) Fd() uintptr {
 	return w.file.Fd()
 }
 
-// writeOSC52 仅向确认可用的终端输出 OSC52，避免重定向时虚报复制成功
 func writeOSC52(stdout interface {
 	io.Writer
 	Fd() uintptr

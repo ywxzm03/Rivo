@@ -13,14 +13,14 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// APIOpenAIResponses 是 models.json 中 provider 支持的唯一协议标识
+// APIOpenAIResponses 是 models.json 中 provider 支持的协议标识
 const APIOpenAIResponses = "openai-responses"
 const APIOpenAICompletions = "openai-completions"
 
 // agentDirEnv 是 agent 配置目录的环境变量覆盖名
 const agentDirEnv = "RIVO_AGENT_DIR"
 
-// Settings 对应 ~/.rivo/agent/settings.json；只消费默认模型相关字段，其余字段忽略
+// Settings 对应 ~/.rivo/agent/settings.json，只消费默认模型相关字段
 type Settings struct {
 	DefaultProvider      string `json:"defaultProvider"`
 	DefaultModel         string `json:"defaultModel"`
@@ -34,23 +34,20 @@ type Model struct {
 	API           string `json:"api"`
 	ContextWindow int    `json:"contextWindow"`
 	MaxTokens     int    `json:"maxTokens"`
-	// Reasoning 表示模型支持 provider reasoning 输出
-	Reasoning bool `json:"reasoning"`
-	// SupportsImages 表示模型接受图片输入，影响 read 工具是否把图片降级为文字说明
+	Reasoning     bool   `json:"reasoning"`
+	// SupportsImages 影响 read 工具是否把图片降级为文字说明
 	SupportsImages bool `json:"supportsImages"`
-	// Input 是 PI 配置中的模型输入能力列表；包含 image 时表示模型接受图片
+	// Input 包含 image 时表示模型接受图片
 	Input []string `json:"input"`
-	// ThinkingLevelMap 把思考等级映射为该模型的 reasoning effort；值 null 表示该等级禁用
+	// ThinkingLevelMap 中值 null 表示该等级禁用
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
-	// SamplingParams 是并入请求体的自由采样参数（temperature/top_p 等）
-	SamplingParams map[string]any `json:"samplingParams"`
-	// Cost 是模型每百万 token 的美元费率；nil 表示未配置
+	SamplingParams   map[string]any     `json:"samplingParams"`
+	// Cost 为 nil 表示未配置
 	Cost *llm.CostRates `json:"cost"`
 
 	contextWindowSet bool
 }
 
-// UnmarshalJSON 记录 contextWindow 是否在配置中显式出现
 func (m *Model) UnmarshalJSON(data []byte) error {
 	type plainModel Model
 	var decoded plainModel
@@ -66,7 +63,6 @@ func (m *Model) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// HasContextWindow 表示 contextWindow 是否由配置显式指定
 func (m Model) HasContextWindow() bool {
 	return m.contextWindowSet || m.ContextWindow != 0
 }
@@ -91,8 +87,7 @@ type ModelOverride struct {
 	SamplingParams   map[string]any     `json:"samplingParams"`
 }
 
-// Provider 是 models.json 中 providers 下的一个自定义 provider 条目
-// （pi 的 schema：ModelsConfigSchema = { providers: Record<string, ProviderConfigSchema> }）
+// Provider 是 models.json 中 providers 下的一个 provider 条目
 type Provider struct {
 	Name    string  `json:"name"`
 	BaseURL string  `json:"baseUrl"`
@@ -106,7 +101,6 @@ type Provider struct {
 	apiDefaulted bool
 }
 
-// UnmarshalJSON 记录 provider 是否显式指定 api
 func (p *Provider) UnmarshalJSON(data []byte) error {
 	type plainProvider Provider
 	var decoded plainProvider
@@ -122,12 +116,11 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// HasAPI 表示 provider 是否由配置显式指定 api
 func (p Provider) HasAPI() bool {
 	return p.apiSet || (p.API != "" && !p.apiDefaulted)
 }
 
-// ModelsFile 对应 ~/.rivo/agent/models.json：keyed by provider id，解析时保持文件顺序
+// ModelsFile 对应 ~/.rivo/agent/models.json，解析时保持文件顺序
 type ModelsFile struct {
 	Providers []NamedProvider
 }
@@ -138,8 +131,7 @@ type NamedProvider struct {
 	Provider Provider
 }
 
-// Dir 返回 agent 配置目录 ~/.rivo/agent；设置 RIVO_AGENT_DIR 环境变量时使用其值
-// （对齐 pi 的 PI_CODING_AGENT_DIR），否则回落到用户主目录
+// Dir 返回 agent 配置目录 ~/.rivo/agent；设置 RIVO_AGENT_DIR 时使用其值
 func Dir() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv(agentDirEnv)); dir != "" {
 		return dir, nil
@@ -151,7 +143,7 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".rivo", "agent"), nil
 }
 
-// LoadSettings 读取 settings.json；文件不存在返回零值配置
+// LoadSettings 读取 settings.json，文件不存在返回零值配置
 func LoadSettings() (Settings, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -175,7 +167,7 @@ func loadSettingsFromFile(path string) (Settings, error) {
 	return s, nil
 }
 
-// LoadModels 读取 models.json；文件不存在返回空注册表
+// LoadModels 读取 models.json，文件不存在返回空注册表
 func LoadModels() (ModelsFile, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -199,7 +191,7 @@ func loadModelsFromFile(path string) (ModelsFile, error) {
 	if err := m.validate(); err != nil {
 		return ModelsFile{}, err
 	}
-	// 1.凭据支持 $ENV/${ENV} 插值与明文，插值在读取后统一执行
+	// 1.凭据支持 $ENV/${ENV} 插值与明文
 	for i := range m.Providers {
 		m.Providers[i].Provider.APIKey = interpolate(m.Providers[i].Provider.APIKey)
 	}
@@ -207,7 +199,6 @@ func loadModelsFromFile(path string) (ModelsFile, error) {
 }
 
 // UnmarshalJSON 解析 {"providers": {...}} 结构并保持文件中 provider 的出现顺序
-// （schema 对齐 pi 的 ModelsConfigSchema：顶层必须有 providers 对象）
 func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
@@ -228,7 +219,7 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("config: models file keys must be strings")
 		}
 		if key != "providers" {
-			// 忽略未知顶层字段，与 pi 的 TypeBox 校验不冲突；providers 必须存在
+			// 忽略未知顶层字段，providers 必须存在
 			var skip json.RawMessage
 			if err := dec.Decode(&skip); err != nil {
 				return err
@@ -249,7 +240,7 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 	if !seen {
 		return fmt.Errorf("config: models file is missing the \"providers\" object")
 	}
-	// 尾随内容视为非法（对齐标准 json.Unmarshal 的行为），防止误改/误拼被静默接受
+	// 尾随内容视为非法，防止误改/误拼被静默接受
 	if _, err := dec.Token(); err == io.EOF {
 		return nil
 	} else if err != nil {
@@ -258,7 +249,6 @@ func (m *ModelsFile) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("config: unexpected trailing data after models file object")
 }
 
-// decodeProviders 解析 providers 对象，保持 key 的文件顺序
 func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 	tok, err := dec.Token()
 	if err != nil {
@@ -280,8 +270,7 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 		if err := dec.Decode(&p); err != nil {
 			return err
 		}
-		// 同名 provider（大小写不敏感，注册表 key 会转小写）视为配置错误，
-		// 与顶层重复 providers 键的处理保持一致
+		// 同名 provider（大小写不敏感）视为配置错误，与顶层重复 providers 键保持一致
 		for _, existing := range m.Providers {
 			if strings.EqualFold(existing.ID, id) {
 				return fmt.Errorf("config: providers has duplicate entry %q", id)
@@ -293,7 +282,7 @@ func (m *ModelsFile) decodeProviders(dec *json.Decoder) error {
 	return err
 }
 
-// validate 校验 provider 条目；仅有 modelOverrides 的内置 provider 可以省略 baseUrl 与 models
+// validate 校验 provider 条目；仅有 modelOverrides 的 provider 可以省略 baseUrl 与 models
 func (m *ModelsFile) validate() error {
 	for i := range m.Providers {
 		provider := &m.Providers[i].Provider
@@ -330,7 +319,7 @@ func (m *ModelsFile) validate() error {
 // envPattern 匹配 $VAR 与 ${VAR} 两种引用形式
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
 
-// interpolate 把 apiKey 中的 $VAR / ${VAR} 替换为环境变量值；未设置的变量替换为空串，明文原样保留
+// interpolate 把 apiKey 中的 $VAR / ${VAR} 替换为环境变量值，未设置的变量替换为空串
 func interpolate(s string) string {
 	return envPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := match

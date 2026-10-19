@@ -57,7 +57,6 @@ func (r *Read) Description() string {
 	)
 }
 
-// Parameters 每次新建，避免共享的 map 被下游改写
 func (r *Read) Parameters() map[string]any {
 	return map[string]any{
 		"type":     "object",
@@ -81,20 +80,17 @@ func (r *Read) Parameters() map[string]any {
 
 // Execute 读取文件：图片返回文字说明加图片附件，文本按行截断并附上续读提示
 func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	// 1.取参数，JSON 解出来的数字都是 float64
 	path, _ := args["path"].(string)
 	if path == "" {
 		return llm.ToolResult{}, fmt.Errorf("read: missing required parameter: path")
 	}
 	offset, _ := argInt(args, "offset")
 	limit, hasLimit := argInt(args, "limit")
-
-	// limit 得是正数才有意义，0 与负数当作没给
 	if limit <= 0 {
 		hasLimit = false
 	}
 
-	// 2.解析路径后整读，读不到就把错误原样透传给模型
+	// 1.解析路径后整读
 	absPath, err := resolvePath(path)
 	if err != nil {
 		return llm.ToolResult{}, err
@@ -107,12 +103,12 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{Content: textContents("")}, nil
 	}
 
-	// 3.是图片就走图片分支，不进文本管线
+	// 2.是图片就走图片分支
 	if mimeType := sniffImage(data); mimeType != "" {
 		return llm.ToolResult{Content: r.readImage(mimeType, data)}, nil
 	}
 
-	// 4.切行；结尾换行切出的空串不算一行，但切片仍要走原数组才能保住结尾换行
+	// 3.切行，结尾换行切出的空串不算一行
 	allLines := strings.Split(string(data), "\n")
 	totalFileLines := len(allLines)
 	if allLines[totalFileLines-1] == "" {
@@ -128,7 +124,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", offset, totalFileLines)
 	}
 
-	// 5.limit 只切出候选区间，真正的截断交给 truncateHead
+	// 4.limit 只切出候选区间，真正的截断交给 truncateHead
 	var selected string
 	userLimitedLines := 0
 	if hasLimit {
@@ -138,7 +134,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		selected = strings.Join(allLines[startLine:], "\n")
 	}
 
-	// 6.按截断结果拼续读提示，判定顺序不能换
+	// 5.按截断结果拼续读提示，判定顺序不能换
 	truncation := truncateHead(selected, defaultMaxLines, defaultMaxBytes)
 	switch {
 	case truncation.FirstLineExceedsLimit:
@@ -161,7 +157,6 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 }
 
-// readImage 处理图片，返回文字说明与（模型收图时的）图片附件
 func (r *Read) readImage(mimeType string, data []byte) []llm.Content {
 	note := "Read image file [" + mimeType + "]"
 
@@ -219,7 +214,7 @@ type ImageData struct {
 	Height         int
 }
 
-// ProcessImage 供用户输入等非 read 工具路径复用图片处理规则
+// ProcessImage 供非 read 工具路径复用图片处理规则
 func ProcessImage(data []byte, mimeType string) (ImageData, error) {
 	result, err := processImage(data, mimeType, defaultImageLimits)
 	if err != nil {
@@ -235,7 +230,6 @@ func ProcessImage(data []byte, mimeType string) (ImageData, error) {
 	}, nil
 }
 
-// decodeImage 按格式解码，JPEG 顺带应用 EXIF 方向
 func decodeImage(data []byte, mimeType string) (image.Image, error) {
 	reader := bytes.NewReader(data)
 	switch mimeType {
@@ -296,7 +290,7 @@ func processImage(data []byte, mimeType string, limits imageLimits) (imageResult
 		targetHeight = limits.maxHeight
 	}
 
-	// 3.逐步缩小，每轮先试 PNG 再试各档质量的 JPEG，第一个装得下的就返回
+	// 3.逐步缩小，每轮先试 PNG 再试各档质量的 JPEG
 	for {
 		resized := imaging.Resize(img, targetWidth, targetHeight, imaging.Lanczos)
 		for _, candidate := range encodeCandidates(resized) {
@@ -356,7 +350,7 @@ func encodeImage(img image.Image, format imaging.Format, quality int) (string, e
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// dimensionNote 告诉模型缩放前后的尺寸，方便它把坐标映射回原图
+// dimensionNote 告诉模型缩放前后的尺寸，方便把坐标映射回原图
 func dimensionNote(result imageResult) string {
 	scale := float64(result.OriginalWidth) / float64(result.Width)
 	return fmt.Sprintf("[Image: original %dx%d, displayed at %dx%d. Multiply coordinates by %.2f to map to original image.]",

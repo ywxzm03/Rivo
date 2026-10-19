@@ -35,7 +35,6 @@ func (l *Ls) Description() string {
 	)
 }
 
-// Parameters 每次新建，避免共享的 map 被下游改写
 func (l *Ls) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -52,9 +51,9 @@ func (l *Ls) Parameters() map[string]any {
 	}
 }
 
-// Execute 列出目录内容，一条一行、目录带斜杠后缀，撞到条目数或字节上限时附上提示
+// Execute 列出目录内容，目录带斜杠后缀，撞到条目数或字节上限时附上提示
 func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	// 1.取参数：path 缺省列当前目录，limit 非正数当作没给
+	// 1.取参数，limit 非正数当作没给
 	path, _ := args["path"].(string)
 	if path == "" {
 		path = "."
@@ -80,7 +79,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, 
 		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
 	}
 
-	// 3.列目录并按名字排序，大小写不敏感
+	// 3.列目录并按名字排序
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("Cannot read directory: %w", err)

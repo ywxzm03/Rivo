@@ -21,10 +21,8 @@ type markdownRendererKey struct {
 	role  string
 }
 
-// markdownStyle 逐项映射 Claude Code Markdown/语法高亮 token，不混入 Glamour 默认配色
 func markdownStyle(role string) style.StyleConfig {
 	primitive := func(color string) style.StylePrimitive {
-		// Skill 正文统一浅白色，保留各 Markdown 节点的排版和强调样式
 		if role == "skill" {
 			color = textColor
 		}
@@ -131,7 +129,7 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	if err != nil {
 		return colored(redColor, "Markdown: "+err.Error())
 	}
-	// 代码块也必须适配终端列宽，不能任由下层终端自动换行破坏高度分配
+	// 代码块也要适配终端列宽，避免下层终端自动换行破坏高度分配
 	return ansi.Hardwrap(strings.Trim(result, "\n"), width, true)
 }
 
@@ -161,7 +159,7 @@ func (m *Model) renderMessage(message Message) string {
 			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 		}
 		if message.Aborted {
-			// 取消属于用户操作：正文后追加固定红色提示（对齐 Pi 的 aborted 渲染）
+			// 取消是用户操作，正文后追加固定红色提示
 			parts = append(parts, colored(redColor, "Operation aborted"))
 			return strings.Join(parts, "\n\n")
 		}
@@ -171,7 +169,7 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(parts, "\n\n")
 	}
 	if message.Aborted {
-		// 取消属于用户操作：partial 正文后追加固定红色提示（对齐 Pi 的 aborted 渲染）
+		// 取消是用户操作，partial 正文后追加固定红色提示
 		parts := []string{}
 		if trimmed := strings.TrimSpace(message.Text); trimmed != "" {
 			parts = append(parts, m.markdown.render(trimmed, "assistant", width))
@@ -193,7 +191,7 @@ func (m *Model) renderMessage(message Message) string {
 			}
 			return strings.Join(parts, "\n\n")
 		}
-		// 用户行使用整行灰色框；去掉 Markdown 的内部 ANSI，避免重置码截断背景
+		// 用户行使用整行灰色框，去掉 Markdown 的内部 ANSI 避免重置码截断背景
 		bodyText := message.Text
 		for _, image := range message.Images {
 			label := "[image]"

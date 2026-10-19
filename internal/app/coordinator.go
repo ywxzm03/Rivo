@@ -17,9 +17,7 @@ import (
 // Runner 是编排层驱动 Agent 所需的能力，由 *agent.Agent 实现
 type Runner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
-	// Continue 在不追加用户消息的情况下重入运行循环
 	Continue(ctx context.Context) (*llm.AssistantMessage, error)
-	// Steer 把输入加入当前运行的 steering 队列
 	Steer(input string) error
 }
 
@@ -39,51 +37,47 @@ const (
 )
 
 // Coordinator 会话编排层：负责事件落盘、压缩编排与溢出恢复驱动。
-// 持久化与投影重建是直调，转发的事件退化为通知（对应 pi 的 AgentSession 角色）
+// 持久化与投影重建是直调，转发的事件退化为通知
 type Coordinator struct {
 	m    *session.SessionManager
 	next llm.AgentEventSink
 
-	// Agent 为被编排的运行器，由装配层在创建后设置
 	Agent Runner
 	// Compactor 为 nil 时禁用压缩
 	Compactor *compaction.Compactor
 
-	// pendingRecovery 记录正在收场的运行是否以可恢复的溢出结束，用于标注 agent_end 的 WillRetry
-	model           llm.Model
+	model llm.Model
+	// pendingRecovery 记录正在收场的运行是否以可恢复的溢出结束
 	pendingRecovery bool
 	// recovered 限制每次 Run 最多做一次溢出恢复
 	recovered bool
-	// promptSections 是当前基线分节，由装配层设置、Reload 时替换；请求前与重放结果 diff
+	// promptSections 是当前基线分节，请求前与重放结果 diff
 	promptSections prompt.Sections
-	// mu 只保护基线分节；runMu 串行化编排，生命周期所有权由 App 管理
+	// mu 只保护基线分节；runMu 串行化编排
 	mu         sync.Mutex
 	runMu      sync.Mutex
 	stateMu    sync.Mutex
 	compacting bool
 }
 
-// NewCoordinator 创建编排层：next 为事件转发链（CLI 显示等）
 func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordinator {
 	return &Coordinator{m: m, next: next}
 }
 
-// setModel 同步当前运行模型，恢复路径也能使用最新的输出上限
+// setModel 同步当前运行模型
 func (c *Coordinator) setModel(model llm.Model) {
 	c.model = model
 }
 
-// resetRecovery 开始重放已提交操作时重新建立本轮恢复状态
 func (c *Coordinator) resetRecovery() {
 	c.pendingRecovery, c.recovered = false, false
 }
 
-// EnqueueSteering 在压缩状态锁内接受一条 steering，压缩开始后拒绝新输入
 func (c *Coordinator) EnqueueSteering(input string) error {
 	return c.EnqueueSteeringMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-// EnqueueSteeringMessage 接受带图片的 steering 输入
+// EnqueueSteeringMessage 在压缩状态锁内接受一条 steering，压缩开始后拒绝新输入
 func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -102,23 +96,21 @@ func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 	return c.Agent.Steer(userMessageText(input))
 }
 
-// SetPromptSections 设置基线分节；装配与 Reload 时调用，不写 system 消息。
-// 加锁与 preparePrompt 的读取互斥，避免并发路径（如 TUI 事件回调）下数据竞争
+// SetPromptSections 设置基线分节；加锁与 preparePrompt 的读取互斥，避免并发路径下数据竞争
 func (c *Coordinator) SetPromptSections(sections prompt.Sections) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.promptSections = sections
 }
 
-// PromptSections 返回当前基线分节
 func (c *Coordinator) PromptSections() prompt.Sections {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.promptSections
 }
 
-// preparePrompt 在进入 Agent 之前对齐 system prompt：把重放得到的当前分节与基线 diff，
-// 有差异时先落盘再压入内存；transcript 只增不改，无差异不产生任何条目
+// preparePrompt 在进入 Agent 之前对齐 system prompt：有差异时先落盘再压入内存，
+// transcript 只增不改，无差异不产生任何条目
 func (c *Coordinator) preparePrompt() error {
 	sections := c.PromptSections()
 	if len(sections) == 0 {
@@ -149,7 +141,7 @@ func (c *Coordinator) CommitMessages(messages []llm.Message) ([]string, error) {
 		if _, ok := message.(llm.UserMessage); !ok || index >= len(ids) || ids[index] == "" {
 			continue
 		}
-		// 发送给模型前建立 turn 起点；文件历史失败只记录降级状态，不阻止模型运行
+		// 发送给模型前建立 turn 起点；文件历史失败只记录降级状态
 		if snapshotErr := c.m.MakeFileHistorySnapshot(ids[index]); snapshotErr != nil {
 			warning := fmt.Sprintf("file history snapshot unavailable for %s: %v", ids[index], snapshotErr)
 			c.m.AddWarning(warning)
@@ -175,7 +167,7 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 	return c.emit(event)
 }
 
-// PrepareRequest 返回会话投影快照，压缩失败不改写核心字段
+// PrepareRequest 返回会话投影快照，摘要生成失败时保留原上下文，存储失败必须停止运行
 func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
 	c.setModel(current.Config.Model)
 	compacted, err := c.CompactIfNeeded(ctx)
@@ -184,24 +176,23 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 		if errors.As(err, &commitErr) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return current, err
 		}
-		// 摘要生成失败保留原上下文；存储失败必须停止运行
 	}
 	current.Context.Messages = c.m.BuildContext().Messages()
 	current.Compacted = compacted
 	return current, nil
 }
 
-// Run 驱动一次运行；本轮以可恢复的溢出收场时，省略失败尝试、压缩后重试一次
+// Run 驱动一次文本运行
 func (c *Coordinator) Run(ctx context.Context, input string) (*llm.AssistantMessage, error) {
 	return c.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-// RunMessage 驱动一次包含文本和图片的运行
+// RunMessage 驱动一次运行；本轮以可恢复的溢出收场时，省略失败尝试、压缩后重试一次
 func (c *Coordinator) RunMessage(ctx context.Context, input llm.UserMessage) (*llm.AssistantMessage, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	c.resetRecovery()
-	// 0.请求前对齐 system prompt，变更以补丁条目追加
+	// 1.请求前对齐 system prompt，变更以补丁条目追加
 	if err := c.preparePrompt(); err != nil {
 		return nil, err
 	}
@@ -228,7 +219,7 @@ func userMessageText(message llm.UserMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// Continue 续接当前会话并完成一次溢出恢复，供同一操作消费晚到的 steering
+// Continue 续接当前会话并完成一次溢出恢复
 func (c *Coordinator) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
@@ -236,7 +227,6 @@ func (c *Coordinator) Continue(ctx context.Context) (*llm.AssistantMessage, erro
 	return c.finishRun(ctx, reply, runErr)
 }
 
-// ContinueQueued 只在 Runner 成功认领 steering 时续跑
 func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage, error) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
@@ -252,12 +242,11 @@ func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage
 
 // finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
 func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage, runErr error) (*llm.AssistantMessage, error) {
-	// 无压缩器时无法恢复（窗口未知等场景）：按原始错误收场，失败尝试保留在会话中
 	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
 		return reply, runErr
 	}
 	c.recovered = true
-	// 1.省略失败尝试：它必然是最后落盘的 entry，磁盘上保留、投影上排除；失败原因不吞掉
+	// 2.省略失败尝试：磁盘上保留、投影上排除；失败原因不吞掉
 	if oerr := c.omitLastAttempt(); oerr != nil {
 		return reply, errors.Join(runErr, oerr)
 	}
@@ -288,7 +277,7 @@ func (c *Coordinator) retryOverflowRecovery(ctx context.Context, resume bool) (*
 	return nil, nil
 }
 
-// Compact 手动触发一次压缩，instructions 为聚焦指令；与 Run 互斥避免并发读写
+// Compact 手动触发一次压缩，instructions 为聚焦指令
 func (c *Coordinator) Compact(ctx context.Context, instructions string) error {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
@@ -324,8 +313,7 @@ func (c *Coordinator) CompactIfNeeded(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// compact 先计算候选摘要，成功落盘后才发布新投影
-// 落盘成功前内存不替换，失败时会话与内存保持一致
+// compact 先计算候选摘要，落盘成功后才发布新投影；失败时会话与内存保持一致
 func (c *Coordinator) compact(ctx context.Context, reason, instructions string) error {
 	if c.Compactor == nil {
 		return errors.New("session: context compaction not enabled")
@@ -345,7 +333,6 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	}
 	result, err := c.Compactor.Compact(ctx, proj, instructions)
 	if err != nil {
-		// 失败通知，转发失败不影响状态
 		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
 		return err
 	}
@@ -370,7 +357,7 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	return nil
 }
 
-// omitLastAttempt 为最后落盘的失败尝试追加 context_edit 省略：磁盘上保留、投影上排除
+// omitLastAttempt 为最后落盘的失败尝试追加 context_edit 省略
 func (c *Coordinator) omitLastAttempt() error {
 	target := c.m.LastEntryID()
 	if target == "" {
@@ -379,7 +366,6 @@ func (c *Coordinator) omitLastAttempt() error {
 	return c.m.AppendContextEdit(target, nil)
 }
 
-// emit 转发事件给下游消费者
 func (c *Coordinator) emit(event llm.AgentEvent) error {
 	if c.next == nil {
 		return nil
@@ -387,9 +373,8 @@ func (c *Coordinator) emit(event llm.AgentEvent) error {
 	return c.next(event)
 }
 
-// contextTokens 按陈旧标记选择 token 估算方式：陈旧时保留尾部的 usage 反映压缩前的大上下文，
-// 改用纯消息体估算防止压缩刚结束就重复触发
-
+// contextTokens 按陈旧标记选择 token 估算方式：陈旧时尾部 usage 反映压缩前的大上下文，
+// 改用纯消息体估算，防止压缩刚结束就重复触发
 func contextTokens(proj compaction.ContextView) int {
 	if proj.UsageStale {
 		return compaction.EstimateContextTokens(proj.Messages())
@@ -397,7 +382,6 @@ func contextTokens(proj compaction.ContextView) int {
 	return compaction.ContextTokens(proj.Messages())
 }
 
-// lastAssistant 返回消息序列中最后一条 assistant 消息
 func lastAssistant(messages []llm.Message) *llm.AssistantMessage {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if msg, ok := messages[i].(llm.AssistantMessage); ok {

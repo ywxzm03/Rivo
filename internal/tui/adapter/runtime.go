@@ -18,7 +18,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
-// Runtime 把 app 的同步事件投影成 UI 消息；它不把 Agent 或 SessionManager 暴露给 TUI
+// Runtime 把 app 的同步事件投影成 UI 消息，不把 Agent 或 SessionManager 暴露给 TUI
 type Runtime struct {
 	mu sync.Mutex
 
@@ -60,7 +60,6 @@ func (r *Runtime) SetProgram(program *tea.Program) {
 	r.mu.Unlock()
 }
 
-// request 由 App 接受并立即执行工作，tea.Cmd 只等待结果并转换显示快照
 func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
 	activeApp := r.app
@@ -190,7 +189,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			r.sealToolGroupLocked()
 			changes = append(changes, r.messages[index])
 		}
-		// 手动压缩不产生普通消息，完成后追加可见提示；内部摘要仍只留在模型上下文
+		// 手动压缩不产生普通消息，完成后追加可见提示
 		if req.Kind == "compact" && result.Err == nil && r.compactionNotice != nil {
 			changes = append(changes, *r.compactionNotice)
 		}
@@ -255,7 +254,6 @@ func (r *Runtime) cancelCurrent() {
 	activeApp.Cancel()
 }
 
-// waitCurrent 在终端恢复后等待 App 收尾，不依赖未执行的 tea.Cmd
 func (r *Runtime) waitCurrent() {
 	r.mu.Lock()
 	activeApp := r.app
@@ -263,7 +261,6 @@ func (r *Runtime) waitCurrent() {
 	activeApp.Wait()
 }
 
-// handleEvent 只发送消息/状态事件；OperationDoneMsg 由请求命令在 app 返回后发送
 func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	r.mu.Lock()
 	var notifications []tea.Msg
@@ -327,7 +324,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			}
 			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, nil)
 			if !ok && assistant.StopReason == llm.StopReasonAborted {
-				// abort 必有可见反馈：空 partial 也要构造消息（对齐 Pi 的无条件渲染）
+				// abort 必须有可见反馈，空 partial 也要构造消息
 				converted = tui.Message{ID: r.currentAssistantID, Role: "assistant"}
 			}
 			if ok || assistant.StopReason == llm.StopReasonAborted {
@@ -346,7 +343,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			}
 		}
 	case llm.TurnEndEvent:
-		// Tool loops stay in one compact group until visible text or agent_end.
+		// 工具循环保持一个紧凑分组，直到出现可见文本或 agent_end
 	case llm.AgentEndEvent:
 		if event.WillRetry {
 			r.sealToolGroupLocked()
@@ -414,7 +411,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	}
 	send := r.send
 	r.mu.Unlock()
-	// 通知可以阻塞，发送时不持有投影或取消所需的锁
+	// 通知可能阻塞，发送时不持有投影或取消所需的锁
 	if send != nil {
 		for _, message := range notifications {
 			send(message)
@@ -423,7 +420,6 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	return nil
 }
 
-// upsertLocked 以稳定 ID 定位显示块，revision 只在此块发生变化时推进
 func (r *Runtime) upsertLocked(message tui.Message) {
 	index := r.messageIndexLocked(message.ID)
 	if message.ToolGroup != nil {
@@ -469,7 +465,6 @@ func (r *Runtime) renameMessageLocked(oldID, newID string) {
 	}
 }
 
-// replaceMessagesLocked 只在加载或来源结构变化时重放，元数据按来源身份保留
 func (r *Runtime) replaceMessagesLocked(view compaction.ContextView) {
 	messages := preserveDisplayMetadata(r.projectContext(view), r.messages)
 	r.messages = messages
@@ -477,7 +472,6 @@ func (r *Runtime) replaceMessagesLocked(view compaction.ContextView) {
 	r.activeToolAnchorID, r.currentAssistantID = "", ""
 }
 
-// resetProjectionLocked 清除 clear 后不再属于当前上下文的显示 bookkeeping
 func (r *Runtime) resetProjectionLocked() {
 	r.lastAssistantIndex = 0
 	r.hasToolGroup = false
@@ -602,7 +596,6 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
 }
 
-// listSessionOptions 在运行时锁外读取会话，慢速文件系统不阻塞取消与事件投影
 func listSessionOptions(cwd string) []tui.SessionOption {
 	sessions, _ := session.ListSessions(cwd)
 	options := make([]tui.SessionOption, 0, len(sessions))
@@ -643,12 +636,10 @@ func thinkingLevels(model llm.Model) []string {
 	return levels
 }
 
-// New 创建显示适配器，事件 sink 可在 App 装配时绑定
 func New(cfg app.Config, cwd, branch string) *Runtime {
 	return &Runtime{cfg: cfg, cwd: cwd, branch: branch}
 }
 
-// Attach 在加载边界绑定 App 并重放会话投影
 func (r *Runtime) Attach(a *app.App) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -665,7 +656,6 @@ func (r *Runtime) Attach(a *app.App) {
 	}
 }
 
-// RestoreSteering 原子取出运行中尚未消费的 steering，供 TUI 撤回到编辑器
 func (r *Runtime) RestoreSteering() []string {
 	r.mu.Lock()
 	activeApp := r.app
@@ -676,7 +666,6 @@ func (r *Runtime) RestoreSteering() []string {
 	return activeApp.TakeSteering()
 }
 
-// RestoreSteeringMessages 原子取出结构化 steering
 func (r *Runtime) RestoreSteeringMessages() []llm.UserMessage {
 	r.mu.Lock()
 	activeApp := r.app
@@ -687,7 +676,6 @@ func (r *Runtime) RestoreSteeringMessages() []llm.UserMessage {
 	return activeApp.TakeSteeringMessages()
 }
 
-// EnqueueSteering 同步接受一条 steering，队列操作不涉及磁盘或模型调用
 func (r *Runtime) EnqueueSteering(value string) error {
 	r.mu.Lock()
 	activeApp := r.app
@@ -698,7 +686,6 @@ func (r *Runtime) EnqueueSteering(value string) error {
 	return activeApp.EnqueueSteering(value)
 }
 
-// EnqueueSteeringMessage 同步接受带图片的 steering
 func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
 	r.mu.Lock()
 	activeApp := r.app
@@ -712,7 +699,7 @@ func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }
 func (r *Runtime) Request(request tui.Request) tea.Cmd    { return r.request(request) }
 
-// Context 返回只读 context 查询命令；它不创建 App operation，也不触碰 session 持久化。
+// Context 返回只读的 context 查询命令，不创建 App operation
 func (r *Runtime) Context() tea.Cmd {
 	return func() tea.Msg {
 		r.mu.Lock()

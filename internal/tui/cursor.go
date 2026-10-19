@@ -14,8 +14,8 @@ var finalCursorPosition = regexp.MustCompile(`\x1b\[([0-9]+)(?:;[0-9]*)?H$`)
 // resetAltScreenSaveCursorMode 退出 alt screen 的 DEC 私有模式序列
 const resetAltScreenSaveCursorMode = "\x1b[?1049l"
 
-// NewCursorWriter restores the editor cursor after Bubble Tea's renderer
-// parks it below the frame, which keeps IME candidate windows near the input.
+// NewCursorWriter 在 Bubble Tea 渲染器把光标停到帧下方后恢复编辑器光标，
+// 使输入法候选窗贴近输入框
 func NewCursorWriter(output io.Writer, position func() (row, column int)) io.Writer {
 	writer := &cursorWriter{output: output, position: position}
 	if file, ok := output.(terminalFile); ok {
@@ -33,8 +33,8 @@ type cursorWriter struct {
 
 func (w *cursorWriter) Write(data []byte) (int, error) {
 	originalLength := len(data)
-	// ?1049l 表示退出 alt screen：其后的写入属于主屏恢复序列，注入会把主屏
-	// 光标钉在 TUI 底边行，导致 shell 提示符上方出现大块空缺，因此清零 bottom
+	// ?1049l 表示退出 alt screen，其后的写入属于主屏恢复序列，
+	// 注入光标会把主屏钉在 TUI 底边行，因此清零 bottom
 	if bytes.Contains(data, []byte(resetAltScreenSaveCursorMode)) {
 		w.bottom = 0
 	}
@@ -83,7 +83,6 @@ func (w *cursorWriter) Close() error {
 	return w.file.Close()
 }
 
-// CursorPosition returns the terminal cell occupied by the editor cursor.
 func (m *Model) CursorPosition() (row, column int) {
 	return int(m.cursorRow.Load()), int(m.cursorColumn.Load())
 }

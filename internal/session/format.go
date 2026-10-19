@@ -13,7 +13,6 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// CurrentVersion 是 Rivo 会话格式自身的版本号，结构上对应树形语义，与 PI 的版本号空间无关
 const CurrentVersion = 1
 
 // entry 类型常量
@@ -26,12 +25,12 @@ const (
 	TypeCompaction          = "compaction"
 	TypeContextEdit         = "context_edit"
 	TypeSessionInfo         = "session_info"
-	// file-history records are JSONL metadata and do not participate in the tree
+	// file-history 记录是 JSONL metadata，不参与树结构
 	TypeFileHistorySnapshot = filehistory.TypeSnapshot
 	TypeFileHistoryDelta    = filehistory.TypeDelta
 )
 
-// Header 会话文件首行，只记录元数据，不参与树结构
+// Header 会话文件首行，不参与树结构
 type Header struct {
 	Type      string `json:"type"`
 	Version   int    `json:"version"`
@@ -48,7 +47,7 @@ type EntryBase struct {
 	Timestamp string  `json:"timestamp"`
 }
 
-// Entry 可入树的会话条目；未知类型的 entry 解码为 UnknownEntry，参与树路径但不产出 LLM 消息
+// Entry 可入树的会话条目；未知类型解码为 UnknownEntry，参与树路径但不产出 LLM 消息
 type Entry interface {
 	base() *EntryBase
 }
@@ -100,7 +99,7 @@ type UsageEntry struct {
 	Note     string `json:"note,omitempty"`
 }
 
-// CompactionEntry 上下文压缩点：摘要 + firstKeptEntryId + 压缩时的 system prompt 快照
+// CompactionEntry 上下文压缩点
 type CompactionEntry struct {
 	EntryBase
 	Summary          string             `json:"summary"`
@@ -111,7 +110,7 @@ type CompactionEntry struct {
 	Usage            *Usage             `json:"usage,omitempty"`
 }
 
-// cloneFileLists 复制结构化文件元数据，保证会话条目保存稳定快照
+// cloneFileLists 复制结构化文件元数据，避免会话条目共享可变切片
 func cloneFileLists(details *compact.FileLists) *compact.FileLists {
 	if details == nil {
 		return nil
@@ -122,7 +121,7 @@ func cloneFileLists(details *compact.FileLists) *compact.FileLists {
 	}
 }
 
-// Replacement context_edit 的替换内容；nil 表示省略目标 entry
+// Replacement context_edit 的替换内容，nil 表示省略目标 entry
 type Replacement struct {
 	Content []llm.Content `json:"content"`
 }
@@ -141,12 +140,10 @@ type UnknownEntry struct {
 
 func (b *EntryBase) base() *EntryBase { return b }
 
-// nowRFC3339 返回当前 UTC 时间的 RFC3339 字符串
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-// newSessionID 生成 UUIDv4 形式的会话 ID
 func newSessionID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -158,7 +155,6 @@ func newSessionID() string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
-// randomHexID 生成 8 位随机十六进制 entry ID
 func randomHexID() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

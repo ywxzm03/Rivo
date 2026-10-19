@@ -17,7 +17,8 @@ const (
 	EventError         = "error"
 )
 
-// AssistantMessageEvent 模型流事件，主要用于底层stream的返回消息的积攒，工具调用等；同时还会转化成AgentEvent供其消费者消费
+// AssistantMessageEvent 是模型流事件，用于累积底层 stream 返回的消息与工具调用，
+// 同时会转换成 AgentEvent 供上层消费
 type AssistantMessageEvent interface {
 	Type() string
 	assistantMessageEvent()
@@ -118,7 +119,7 @@ func (AssistantMessageDoneEvent) Type() string           { return EventDone }
 func (AssistantMessageDoneEvent) assistantMessageEvent() {}
 
 type AssistantMessageErrorEvent struct {
-	// Reason 区分 aborted（用户取消）与 error（真实失败），对齐 Pi 的 error 事件 reason
+	// Reason 区分 aborted（用户取消）与 error（真实失败）
 	Reason  StopReason
 	Err     error
 	Partial *AssistantMessage
@@ -143,7 +144,7 @@ const (
 	AgentEventWarning             = "warning"
 )
 
-// AgentEvent 的消费者主要是TUI渲染，自动压缩等Agent级事件
+// AgentEvent 是 Agent 级事件，消费者主要是 TUI 渲染与自动压缩
 type AgentEvent interface {
 	Type() string
 	agentEvent()
@@ -157,7 +158,7 @@ func (AgentStartEvent) agentEvent()  {}
 type AgentEndEvent struct {
 	Messages []Message
 	Err      error
-	// WillRetry 由编排层在转发时标注：本轮以可恢复的上下文溢出收场且即将续接重试
+	// WillRetry 由编排层标注：本轮以可恢复的上下文溢出收场且即将续接重试
 	WillRetry bool
 }
 
@@ -194,7 +195,7 @@ func (MessageUpdateEvent) agentEvent()  {}
 
 type MessageEndEvent struct {
 	Message Message
-	// SourceID 由宿主提交边界提供，模型消息本身不携带显示身份
+	// SourceID 由宿主提交边界提供，为空表示尚未落盘
 	SourceID string
 	// Pending 区分尚未落盘的显示输出与成功提交的结束通知
 	Pending bool
@@ -232,7 +233,7 @@ type ToolExecutionEndEvent struct {
 func (ToolExecutionEndEvent) Type() string { return AgentEventToolExecutionEnd }
 func (ToolExecutionEndEvent) agentEvent()  {}
 
-// WarningEvent 表示不阻止当前操作、但需要告知用户的降级状态。
+// WarningEvent 表示不阻止当前操作、但需要告知用户的降级状态
 type WarningEvent struct {
 	Message string
 }
@@ -240,7 +241,7 @@ type WarningEvent struct {
 func (WarningEvent) Type() string { return AgentEventWarning }
 func (WarningEvent) agentEvent()  {}
 
-// CompactionStartEvent 上下文压缩开始；Reason 取 auto（阈值触发）/ overflow（溢出恢复）/ manual（手动 /compact）
+// CompactionStartEvent 上下文压缩开始；Reason 取 auto / overflow / manual
 type CompactionStartEvent struct {
 	Reason       string
 	TokensBefore int
@@ -249,9 +250,8 @@ type CompactionStartEvent struct {
 func (CompactionStartEvent) Type() string { return AgentEventCompactionStart }
 func (CompactionStartEvent) agentEvent()  {}
 
-// CompactionEndEvent 上下文压缩完成；KeptMessageCount 为保留未压缩的尾部消息数，
-// 摘要消息本身经 CompactionEntry 回放产出，不发 message_end、不持久化为消息 entry。
-// Error 非空表示压缩失败：会话与内存上下文均未被修改，该事件仅用于通知，消费者不得落盘
+// CompactionEndEvent 上下文压缩完成；Error 非空表示压缩失败，此时会话与内存上下文均未修改，
+// 事件仅用于通知
 type CompactionEndEvent struct {
 	Reason           string
 	Summary          string
@@ -267,5 +267,5 @@ func (CompactionEndEvent) agentEvent()  {}
 
 type AgentEventSink func(AgentEvent) error
 
-// StreamFn 返回由生产者关闭的事件通道；关闭前释放底层连接，消费者取消后仍需排空通道
+// StreamFn 返回由生产者关闭的事件通道；消费者取消后仍需排空通道
 type StreamFn func(ctx context.Context, model Model, c Context, opts Options) (<-chan AssistantMessageEvent, error)

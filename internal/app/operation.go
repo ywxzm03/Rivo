@@ -40,8 +40,7 @@ type OperationResult struct {
 	Reply    *llm.AssistantMessage
 	Next     *App
 	Exit     bool
-	// EditorText is set after a successful tree rewind so the TUI can restore
-	// the selected user message without persisting a branch marker.
+	// EditorText 在 tree 回退成功后由 TUI 填回编辑器
 	EditorText     string
 	RestoreEditor  bool
 	EditorMessage  *llm.UserMessage
@@ -50,7 +49,7 @@ type OperationResult struct {
 	Err            error
 }
 
-// Operation 的完成信号晚于资源收尾和 App 所有权释放；可反复等待同一结果
+// Operation 的完成信号晚于资源收尾和 App 所有权释放，可反复等待同一结果
 type Operation struct {
 	ID      uint64
 	kind    OperationKind
@@ -65,12 +64,10 @@ func (o *Operation) Wait() OperationResult { <-o.done; return o.result }
 
 var ErrSteeringUnavailable = errors.New("app: steering is unavailable")
 
-// EnqueueSteering 接受运行中的一条 steering；压缩或操作收尾期间拒绝输入
 func (a *App) EnqueueSteering(input string) error {
 	return a.EnqueueSteeringMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-// EnqueueSteeringMessage 接受运行中的结构化用户输入
 func (a *App) EnqueueSteeringMessage(input llm.UserMessage) error {
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
@@ -103,7 +100,7 @@ func (a *App) Start(ctx context.Context, request OperationRequest) (*Operation, 
 	return op, nil
 }
 
-// Cancel 只发送信号；退出路径随后调用 Wait 等待流、工具与持久化收尾
+// Cancel 只发送信号，调用方需随后 Wait 等待收尾
 func (a *App) Cancel() {
 	a.operationMu.Lock()
 	op := a.active
@@ -218,7 +215,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			}
 		}
 	}
-	// 2.执行本次操作，运行中的核心只通过请求快照与提交边界读取宿主状态
+	// 2.执行本次操作
 	switch request.Kind {
 	case OperationRun:
 		if request.Message != nil && userMessageHasImages(*request.Message) && !a.CurrentModel().SupportsImages {
@@ -330,9 +327,8 @@ func (a *App) clearSession() error {
 	return nil
 }
 
-// rewindTree moves the in-memory leaf to the selected user parent and restores
-// the model settings projected by that branch. Any setup failure rolls the leaf
-// back so a failed UI operation cannot leave the app on a partial branch.
+// rewindTree 把内存 leaf 移到目标 user 的父节点并恢复该分支的模型设置，
+// 失败时回滚 leaf，避免留下部分生效的分支
 func (a *App) rewindTree(entryID string) (string, *llm.UserMessage, bool, error) {
 	previousLeaf := a.session.LeafID()
 	rewound, err := a.session.RewindUser(entryID)
@@ -348,7 +344,7 @@ func (a *App) rewindTree(entryID string) (string, *llm.UserMessage, bool, error)
 	return rewound.Text, rewound.Message, true, nil
 }
 
-// rewindTreeWithMode 把代码恢复放在上下文回滚之前，保证组合操作失败时不移动上下文。
+// rewindTreeWithMode 把代码恢复放在上下文回滚之前，保证组合操作失败时不移动上下文
 func (a *App) rewindTreeWithMode(entryID string, mode filehistory.RestoreMode) (OperationResult, error) {
 	if mode == "" {
 		mode = filehistory.RestoreContext
@@ -403,8 +399,7 @@ func (a *App) restoreLeaf(leafID string, keepIDs ...string) error {
 	return a.session.Branch(leafID, keepIDs...)
 }
 
-// restoreBranchSettings applies settings found on the newly active path and
-// falls back to the app defaults when the branch has no explicit setting.
+// restoreBranchSettings 应用新活跃路径上的设置，分支无显式设置时回退到 App 默认值
 func (a *App) restoreBranchSettings() error {
 	view := a.session.BuildContext()
 	provider, model := view.Provider, view.Model
@@ -434,7 +429,6 @@ func (a *App) restoreBranchSettings() error {
 	return nil
 }
 
-// restoreCommittedSettings 发布补写成功的设置，不追加第二条设置记录
 func (a *App) restoreCommittedSettings() error {
 	view := a.session.BuildContext()
 	if view.Provider != "" && view.Model != "" {

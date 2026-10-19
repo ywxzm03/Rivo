@@ -32,7 +32,6 @@ func (b *Bash) Parameters() map[string]any {
 	return shellParameters()
 }
 
-// Execute 执行 bash 命令并返回清洗、截断后的合并输出
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	return executeShellCommand(ctx, args, "bash", func(commandCtx context.Context, command string) (*exec.Cmd, error) {
 		bashPath, err := findBash()

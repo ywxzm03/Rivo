@@ -8,9 +8,8 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// ApplyOverrides 把 CLI 参数（--provider/--model/--thinking）覆盖到配置上，
-// 语义对齐 pi 的 resolveCliModel：--provider 必须与 --model 同给；
-// --thinking 校验七档等级；--model 支持 provider/model、精确/子串匹配与 :level 后缀
+// ApplyOverrides 把 CLI 参数覆盖到配置上：--provider 必须与 --model 同给，
+// --thinking 校验七档等级，--model 支持 provider/model、精确/子串匹配与 :level 后缀
 func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) error {
 	// 1.思考等级：CLI 显式指定优先于 pattern 后缀与 settings 默认
 	if thinking != "" {
@@ -25,7 +24,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 	if modelPattern == "" {
 		return nil
 	}
-	// 2.pattern 的 :level 后缀：合法等级直接作为思考等级（CLI --thinking 已设时忽略）
+	// 2.pattern 的 :level 后缀：合法等级直接作为思考等级
 	pattern := modelPattern
 	if i := strings.LastIndex(pattern, ":"); i >= 0 {
 		suffix := pattern[i+1:]
@@ -58,7 +57,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 			}
 		}
 	}
-	// 4.无 provider：先跨全注册表精确匹配（id 或 provider/id）
+	// 4.无 provider：先跨全注册表精确匹配
 	if spec.id == "" {
 		model, err := resolveExactAcrossProviders(cfg, pattern)
 		if err != nil {
@@ -69,7 +68,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 			return nil
 		}
 	}
-	// 5.域内子串匹配：多个命中按 id 字典序取「最新」（对齐 pi 1.A 决策）
+	// 5.域内子串匹配：多个命中按 id 字典序取「最新」
 	model := resolveSubstring(cfg, spec, pattern)
 	if model == nil {
 		return fmt.Errorf("model %q not found", modelPattern)
@@ -78,8 +77,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 	return nil
 }
 
-// stripProviderPrefix 去掉 pattern 中与 provider id 同名的前缀（大小写不敏感），
-// stripped 表示前缀确实存在；剩余部分可能为空（如 --model openai/）
+// stripProviderPrefix 去掉 pattern 中与 provider id 同名的前缀，返回剩余部分与是否命中
 func stripProviderPrefix(pattern, providerID string) (string, bool) {
 	prefix := providerID + "/"
 	if len(pattern) >= len(prefix) && strings.EqualFold(pattern[:len(prefix)], prefix) {
@@ -89,7 +87,7 @@ func stripProviderPrefix(pattern, providerID string) (string, bool) {
 }
 
 // resolveExactAcrossProviders 跨全注册表精确匹配 id 或 provider/id；
-// 无命中返回 (nil, nil)，跨 provider 歧义时返回错误（对齐 pi）
+// 无命中返回 (nil, nil)，歧义时返回错误
 func resolveExactAcrossProviders(cfg *Config, pattern string) (*llm.Model, error) {
 	lower := strings.ToLower(pattern)
 	var matches []llm.Model
@@ -115,8 +113,7 @@ func resolveExactAcrossProviders(cfg *Config, pattern string) (*llm.Model, error
 	}
 }
 
-// resolveSubstring 在 provider 域内（未指定 provider 时为全域）按子串匹配模型，
-// 多个命中按 id 字典序取最大（对齐 pi 的「取最新」策略）
+// resolveSubstring 在 provider 域内（未指定时为全域）按子串匹配模型，多个命中取 id 最大者
 func resolveSubstring(cfg *Config, spec providerSpec, pattern string) *llm.Model {
 	var candidates []llm.Model
 	if spec.id != "" {
