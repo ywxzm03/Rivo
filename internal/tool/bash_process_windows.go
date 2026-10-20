@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// findBash 按 PATH 和 Git for Windows 的默认安装位置查找 bash.exe
 func findBash() (string, error) {
 	if path, err := exec.LookPath("bash.exe"); err == nil {
 		return path, nil

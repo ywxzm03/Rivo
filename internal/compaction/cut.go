@@ -11,8 +11,7 @@ type CutPlan struct {
 }
 
 // FindCutPoint 从最新 entry 向前累计 token，预算用尽处就近定位合法切割点：
-// 切点只会落在 user/assistant entry 之前，落在工具结果或 system entry 时向后滑动；
-// 保留尾部以 assistant 开头说明该轮的 user entry 被划入摘要区，按 split turn 记录轮次起点
+// 切点只会落在 user/assistant entry 之前，保留尾部以 assistant 开头时按 split turn 记录轮次起点
 func FindCutPoint(entries []ContextEntry, start, keepRecentTokens int) CutPlan {
 	plan := CutPlan{CutIndex: start, TurnStartIndex: -1}
 	if start < 0 {
@@ -21,7 +20,7 @@ func FindCutPoint(entries []ContextEntry, start, keepRecentTokens int) CutPlan {
 	if start >= len(entries) {
 		return plan
 	}
-	// 1.收集区间内的合法切点：user/assistant entry 之前可以切
+	// 1.收集区间内的合法切点
 	var cuts []int
 	for i := start; i < len(entries); i++ {
 		if isCutBoundary(entries[i]) {
@@ -48,13 +47,12 @@ func FindCutPoint(entries []ContextEntry, start, keepRecentTokens int) CutPlan {
 			return plan
 		}
 	}
-	// 3.预算未用完时切在最早合法切点，摘要区为空时由调用方放弃本次压缩
+	// 3.预算未用完时切在最早合法切点
 	plan.CutIndex = cuts[0]
 	markSplitTurn(&plan, entries, start, cuts[0])
 	return plan
 }
 
-// markSplitTurn 保留尾部以 assistant 开头时定位被截断轮次的 user entry
 func markSplitTurn(plan *CutPlan, entries []ContextEntry, start, cut int) {
 	if cut >= len(entries) {
 		return
@@ -71,7 +69,6 @@ func markSplitTurn(plan *CutPlan, entries []ContextEntry, start, cut int) {
 	}
 }
 
-// entryTokens 估算一条上下文 entry 展开后的 token 数
 func entryTokens(entry ContextEntry) int {
 	total := 0
 	for _, message := range entry.Messages {
@@ -91,7 +88,6 @@ func entryRole(entry ContextEntry) llm.Role {
 	return ""
 }
 
-// isCutBoundary 判断 entry 处是否为合法切割点：user/assistant entry 之前可以切
 func isCutBoundary(entry ContextEntry) bool {
 	if entry.Kind == ContextCompaction {
 		return false

@@ -1,4 +1,4 @@
-// Package filehistory 保存按 user message 组织的文件快照，并把快照恢复到工作区。
+// Package filehistory 保存按 user message 组织的文件快照，并把快照恢复到工作区
 package filehistory
 
 import (
@@ -25,7 +25,7 @@ const (
 	MaxSnapshots = 100
 )
 
-// RestoreMode 是 tree 操作选择的恢复范围。
+// RestoreMode 是 tree 操作选择的恢复范围
 type RestoreMode string
 
 const (
@@ -34,7 +34,7 @@ const (
 	RestoreCodeAndContext RestoreMode = "code_and_context"
 )
 
-// Backup 描述一个路径在某个快照中的备份版本。BackupFileName 为空表示目标当时不存在。
+// Backup 描述一个路径在某个快照中的备份版本，BackupFileName 为空表示目标当时不存在
 type Backup struct {
 	BackupFileName *string   `json:"backupFileName"`
 	Version        int       `json:"version"`
@@ -43,7 +43,7 @@ type Backup struct {
 	RealParentDir  string    `json:"realParentDir,omitempty"`
 }
 
-// Snapshot 是某个 user turn 开始前的文件状态。
+// Snapshot 是某个 user turn 开始前的文件状态
 type Snapshot struct {
 	MessageID          string            `json:"messageId"`
 	TrackedFileBackups map[string]Backup `json:"trackedFileBackups"`
@@ -51,7 +51,7 @@ type Snapshot struct {
 	PreCheckpoint      bool              `json:"preCheckpoint,omitempty"`
 }
 
-// SnapshotRecord 是不参与会话树的 JSONL metadata record。
+// SnapshotRecord 是不参与会话树的 JSONL metadata record
 type SnapshotRecord struct {
 	Type          string   `json:"type"`
 	MessageID     string   `json:"messageId"`
@@ -59,7 +59,7 @@ type SnapshotRecord struct {
 	PreCheckpoint bool     `json:"preCheckpoint,omitempty"`
 }
 
-// DeltaRecord 记录一次文件首次被当前 user turn 修改前的备份。
+// DeltaRecord 记录一次文件首次被当前 user turn 修改前的备份
 type DeltaRecord struct {
 	Type              string    `json:"type"`
 	MessageID         string    `json:"messageId"`
@@ -69,13 +69,12 @@ type DeltaRecord struct {
 	Timestamp         time.Time `json:"timestamp"`
 }
 
-// Record 是可追加到会话 JSONL 的文件历史记录。
+// Record 是可追加到会话 JSONL 的文件历史记录
 type Record interface{ fileHistoryRecord() }
 
 func (SnapshotRecord) fileHistoryRecord() {}
 func (DeltaRecord) fileHistoryRecord()    {}
 
-// DecodeRecord 解析 file-history metadata；未知类型由 session 层继续按普通未知记录处理。
 func DecodeRecord(typ string, data []byte) (Record, error) {
 	switch typ {
 	case TypeSnapshot:
@@ -113,7 +112,7 @@ func DecodeRecord(typ string, data []byte) (Record, error) {
 	}
 }
 
-// RestoreResult 描述一次代码恢复的逐文件结果。
+// RestoreResult 描述一次代码恢复的逐文件结果
 type RestoreResult struct {
 	MessageID    string
 	FilesChanged []string
@@ -121,7 +120,7 @@ type RestoreResult struct {
 	FilesFailed  []string
 }
 
-// Store 管理一个 session 的备份文件和运行态快照。
+// Store 管理一个 session 的备份文件和运行态快照
 type Store struct {
 	mu           sync.Mutex
 	ioMu         sync.Mutex
@@ -132,7 +131,7 @@ type Store struct {
 	appendRecord func(Record) error
 }
 
-// New 从 JSONL records 重建 file-history 状态。activeIDs 为空时保留所有快照。
+// New 从 JSONL records 重建 file-history 状态，activeIDs 为空时保留所有快照
 func New(root, sessionID string, records []Record, activeIDs map[string]bool, appendRecord func(Record) error) *Store {
 	s := &Store{
 		root:         root,
@@ -149,12 +148,12 @@ func New(root, sessionID string, records []Record, activeIDs map[string]bool, ap
 	return s
 }
 
-// TrackEdit 在文件写入前保存当前内容，并把备份增量附加到最近 snapshot。
+// TrackEdit 在文件写入前保存当前内容，并把备份增量附加到最近 snapshot
 func (s *Store) TrackEdit(ctx context.Context, messageID, path string) error {
 	return s.trackEdit(ctx, messageID, path, nil, 0, false)
 }
 
-// TrackEditContent 使用调用方已经读取的内容生成备份，避免再次读取时出现竞态。
+// TrackEditContent 使用调用方已读取的内容生成备份，避免再次读取时出现竞态
 func (s *Store) TrackEditContent(ctx context.Context, messageID, path string, content []byte, mode os.FileMode) error {
 	data := append([]byte(nil), content...)
 	return s.trackEdit(ctx, messageID, path, data, mode, true)
@@ -236,7 +235,7 @@ func (s *Store) trackEdit(ctx context.Context, messageID, path string, content [
 	return nil
 }
 
-// MakeSnapshot 在 user turn 开始前记录所有已追踪文件的状态。
+// MakeSnapshot 在 user turn 开始前记录所有已追踪文件的状态
 func (s *Store) MakeSnapshot(messageID string) error {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
@@ -340,13 +339,13 @@ func (s *Store) MakeSnapshot(messageID string) error {
 	return errors.Join(errs...)
 }
 
-// Restore 把目标 user turn 开始前的文件状态恢复到工作区。
+// Restore 把目标 user turn 开始前的文件状态恢复到工作区
 func (s *Store) Restore(messageID string) (RestoreResult, error) {
 	result, _, err := s.restore(messageID)
 	return result, err
 }
 
-// RestoreWithRollback 恢复代码并返回一次性补偿函数，供组合恢复在上下文失败时撤销代码改动。
+// RestoreWithRollback 恢复代码并返回一次性补偿函数，供组合恢复在上下文失败时撤销代码改动
 func (s *Store) RestoreWithRollback(messageID string) (RestoreResult, func() error, error) {
 	result, plans, err := s.restore(messageID)
 	if err != nil {
@@ -436,7 +435,7 @@ func (s *Store) restore(messageID string) (RestoreResult, []restorePlan, error) 
 	return result, applied, errors.Join(errs...)
 }
 
-// PruneActiveBranch 丢弃不在当前 user 活跃路径上的运行态快照。
+// PruneActiveBranch 丢弃不在当前 user 活跃路径上的运行态快照
 func (s *Store) PruneActiveBranch(activeIDs map[string]bool) {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
@@ -445,7 +444,6 @@ func (s *Store) PruneActiveBranch(activeIDs map[string]bool) {
 	s.filterActive(activeIDs)
 }
 
-// Snapshots 返回防御性快照副本，供 session 测试和诊断使用。
 func (s *Store) Snapshots() []Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -822,8 +820,6 @@ func (s *Store) applyRestore(plan restorePlan) (bool, error) {
 	}
 	n, writeErr := file.Write(plan.data)
 	if writeErr == nil && n != len(plan.data) {
-		// File.Write is allowed to return a short write without an error.
-		// Rewriting a backup must never silently truncate the restored file.
 		writeErr = io.ErrShortWrite
 	}
 	chmodErr := file.Chmod(plan.mode)

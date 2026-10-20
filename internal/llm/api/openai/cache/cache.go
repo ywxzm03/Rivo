@@ -9,7 +9,7 @@ import (
 
 const PromptCacheTTL = "30m"
 
-// SupportsPromptCacheOptions 判断 OpenAI 模型是否支持 GPT-5.6+ 的 prompt_cache_options
+// SupportsPromptCacheOptions 判断 OpenAI 模型是否支持 prompt_cache_options
 func SupportsPromptCacheOptions(model llm.Model) bool {
 	if model.Provider != "openai" {
 		return false
@@ -18,7 +18,7 @@ func SupportsPromptCacheOptions(model llm.Model) bool {
 	return ok && (major > 5 || major == 5 && minor >= 6)
 }
 
-// PromptCacheKey 截断 OpenAI prompt cache key 到 64 个 Unicode code point
+// PromptCacheKey 截断 prompt cache key 到 64 个 Unicode code point
 func PromptCacheKey(sessionID string) string {
 	if len([]rune(sessionID)) <= 64 {
 		return sessionID
@@ -26,7 +26,7 @@ func PromptCacheKey(sessionID string) string {
 	return string([]rune(sessionID)[:64])
 }
 
-// GPTVersion 解析 gpt-主版本.次版本及其后缀
+// GPTVersion 解析 gpt-主版本.次版本
 func GPTVersion(id string) (major, minor int, ok bool) {
 	rest, ok := strings.CutPrefix(strings.ToLower(id), "gpt-")
 	if !ok {

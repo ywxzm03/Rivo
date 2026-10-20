@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,19 +15,21 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// summaryMaxRunes 限制会话列表摘要长度，超出按 rune 截断并追加省略号
+// summaryMaxRunes 限制会话列表摘要长度
 const summaryMaxRunes = 80
 
 // SessionInfo 描述一个可恢复的会话文件
 type SessionInfo struct {
 	Path    string
+	ID      string
+	Cwd     string
 	ModTime time.Time
 	Name    string
 	// Summary 为首条用户消息的截断摘要，无对话内容时为空
 	Summary string
 }
 
-// ListSessions 列出 cwd 对应默认会话目录下的全部会话文件，按修改时间倒序；目录不存在返回空列表
+// ListSessions 列出 cwd 对应默认会话目录下的全部会话文件，按修改时间倒序
 func ListSessions(cwd string) ([]SessionInfo, error) {
 	dir, err := DefaultDir(cwd)
 	if err != nil {
@@ -35,7 +38,50 @@ func ListSessions(cwd string) ([]SessionInfo, error) {
 	return listSessionsInDir(dir)
 }
 
-// listSessionsInDir 扫描目录下的 .jsonl 会话文件并按修改时间倒序返回
+// ListAllSessions 列出 agent 根目录下所有项目的会话
+func ListAllSessions() ([]SessionInfo, error) {
+	root, err := SessionsRoot()
+	if err != nil {
+		return nil, err
+	}
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("session: failed to read session root: %w", err)
+	}
+	var all []SessionInfo
+	var listErrs []error
+	for _, project := range projects {
+		if !project.IsDir() {
+			continue
+		}
+		infos, err := listSessionsInDir(filepath.Join(root, project.Name()))
+		if err != nil {
+			listErrs = append(listErrs, fmt.Errorf("%s: %w", project.Name(), err))
+			continue
+		}
+		all = append(all, infos...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ModTime.Equal(all[j].ModTime) {
+			return all[i].Path < all[j].Path
+		}
+		return all[i].ModTime.After(all[j].ModTime)
+	})
+	return all, errors.Join(listErrs...)
+}
+
+// SessionsRoot 返回按 cwd 分组的会话根目录
+func SessionsRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
+	}
+	return filepath.Join(home, ".rivo", "agent", "sessions"), nil
+}
+
 func listSessionsInDir(dir string) ([]SessionInfo, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
@@ -54,15 +100,17 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 			continue
 		}
 		path := filepath.Join(dir, f.Name())
-		name, summary := readSessionMetadata(path)
+		id, cwd, name, summary := readSessionMetadata(path)
 		infos = append(infos, SessionInfo{
 			Path:    path,
+			ID:      id,
+			Cwd:     cwd,
 			ModTime: info.ModTime(),
 			Name:    name,
 			Summary: summary,
 		})
 	}
-	// 1.修改时间倒序，最新的排最前，恢复取第一项；同时间戳按路径保证顺序确定
+	// 1.修改时间倒序，同时间戳按路径保证顺序确定
 	sort.Slice(infos, func(i, j int) bool {
 		if infos[i].ModTime.Equal(infos[j].ModTime) {
 			return infos[i].Path < infos[j].Path
@@ -72,15 +120,15 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 	return infos, nil
 }
 
-// summaryLineLimit 限制摘要扫描的单行缓冲；超长行（如内嵌 base64 图片的 user 消息）不进内存直接跳过
+// summaryLineLimit 限制摘要扫描的单行缓冲，超长行（如内嵌 base64 图片）直接跳过
 const summaryLineLimit = 1 << 20
 
-// readSessionMetadata 有界扫描会话文件，取最新名称与首条用户摘要；
-// 摘要确定后只解码名称记录，内存占用不随会话内容增长
-func readSessionMetadata(path string) (name, summary string) {
+// readSessionMetadata 有界扫描会话文件，取最新名称与首条用户摘要，
+// 内存占用不随会话内容增长
+func readSessionMetadata(path string) (id, cwd, name, summary string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", "", ""
 	}
 	defer f.Close()
 	reader := bufio.NewReader(f)
@@ -91,6 +139,12 @@ func readSessionMetadata(path string) (name, summary string) {
 			trimmed := bytes.TrimSpace(line)
 			var probe entryLine
 			if json.Unmarshal(trimmed, &probe) == nil {
+				if probe.Type == TypeSession {
+					var header Header
+					if json.Unmarshal(trimmed, &header) == nil {
+						id, cwd = header.ID, header.Cwd
+					}
+				}
 				switch probe.Type {
 				case TypeSessionInfo:
 					var info SessionInfoEntry
@@ -112,13 +166,12 @@ func readSessionMetadata(path string) (name, summary string) {
 			}
 		}
 		if readErr != nil {
-			return name, summary
+			return id, cwd, name, summary
 		}
 	}
 }
 
-// readBoundedLine 从 reader 读取一行；缓冲超过 summaryLineLimit 时放弃缓冲、
-// 继续消费到行尾并标记 oversize。oversize 为 true 时 line 无效
+// readBoundedLine 读取一行，缓冲超限时继续消费到行尾并标记 oversize
 func readBoundedLine(reader *bufio.Reader) (line []byte, oversize bool, err error) {
 	var buf []byte
 	for {
@@ -132,14 +185,12 @@ func readBoundedLine(reader *bufio.Reader) (line []byte, oversize bool, err erro
 			}
 		}
 		if readErr == bufio.ErrBufferFull {
-			// 1.行未结束：oversize 时继续空转消费直到行尾，未超限时继续累积
 			continue
 		}
 		return buf, oversize, readErr
 	}
 }
 
-// userText 拼接用户消息中的全部文本块
 func userText(msg llm.Message) string {
 	m, ok := msg.(llm.UserMessage)
 	if !ok {
@@ -154,7 +205,6 @@ func userText(msg llm.Message) string {
 	return strings.Join(texts, " ")
 }
 
-// truncateRunes 按 rune 截断文本，超长时追加省略号
 func truncateRunes(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {

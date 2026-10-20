@@ -54,19 +54,16 @@ func executableName() string {
 	return ripgrepBinary
 }
 
-// isExecutable 判断路径是否指向可执行文件
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0)
 }
 
-// offlineModeEnabled 判断是否启用离线模式
 func offlineModeEnabled() bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv("RIVO_OFFLINE")))
 	return value == "1" || value == "true" || value == "yes"
 }
 
-// assetName 根据平台生成 ripgrep 发布资产名
 func assetName(goos, goarch, version string) (string, error) {
 	var triple string
 	var extension string
@@ -117,7 +114,6 @@ func downloadRipgrep(ctx context.Context, cacheDir string) error {
 		return err
 	}
 	var binary []byte
-	// 1.按平台归档格式解包并提取 rg
 	if strings.HasSuffix(asset, ".tar.gz") {
 		binary, err = extractTarGz(archiveData, executableName())
 	} else {
@@ -155,7 +151,6 @@ func downloadRipgrep(ctx context.Context, cacheDir string) error {
 	return nil
 }
 
-// latestRipgrepVersion 从 GitHub Releases 重定向获取最新版本
 func latestRipgrepVersion(ctx context.Context) (string, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -201,7 +196,6 @@ func latestVersion(ctx context.Context, client *http.Client, releaseURL string) 
 	return strings.TrimPrefix(tag, "v"), nil
 }
 
-// downloadArchive 下载归档文件到指定路径
 func downloadArchive(ctx context.Context, downloadURL, destination string) error {
 	requestCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
@@ -226,7 +220,6 @@ func downloadArchive(ctx context.Context, downloadURL, destination string) error
 	return err
 }
 
-// extractTarGz 从 tar.gz 中提取指定二进制
 func extractTarGz(data []byte, binaryName string) ([]byte, error) {
 	reader, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
@@ -249,7 +242,6 @@ func extractTarGz(data []byte, binaryName string) ([]byte, error) {
 	return nil, fmt.Errorf("binary not found in archive: %s", binaryName)
 }
 
-// extractZip 从 zip 中提取指定二进制
 func extractZip(data []byte, binaryName string) ([]byte, error) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {

@@ -2,19 +2,17 @@ package llm
 
 import "strings"
 
-// SystemSectionOrder 分节渲染顺序的唯一来源：prompt 包构建分节与本包渲染都按它排序。
-// 声明为数组以表达不可变；需要切片时用 SystemSectionNames
+// SystemSectionOrder 是分节渲染顺序的唯一来源，声明为数组以表达不可变
 var SystemSectionOrder = [...]string{"preamble", "tools", "rules", "instructions", "skills", "cwd"}
 
-// SystemSectionNames 返回分节名列表，供需要切片或遍历的调用方使用
 func SystemSectionNames() []string {
 	names := make([]string, len(SystemSectionOrder))
 	copy(names, SystemSectionOrder[:])
 	return names
 }
 
-// CurrentSystemMessage 按消息序重放所有 system 消息：同名分节后者覆盖前者，空串表示该节被删除；
-// 消息序列中没有 system 消息时返回 nil
+// CurrentSystemMessage 按消息序重放所有 system 消息：同名分节后者覆盖前者，
+// 空串表示删除；没有 system 消息时返回 nil
 func CurrentSystemMessage(messages []Message) *SystemMessage {
 	sections := make(map[string]string)
 	found := false
@@ -38,8 +36,7 @@ func CurrentSystemMessage(messages []Message) *SystemMessage {
 	return &SystemMessage{Sections: sections}
 }
 
-// RenderSystemMessageText 按 SystemSectionOrder 拼接各节文本（节文本自带标签），
-// 供首条 system 消息的完整渲染与取旧值使用
+// RenderSystemMessageText 按 SystemSectionOrder 拼接各节文本，供首条 system 消息完整渲染
 func RenderSystemMessageText(msg SystemMessage) string {
 	var parts []string
 	for _, name := range SystemSectionOrder {
@@ -50,8 +47,7 @@ func RenderSystemMessageText(msg SystemMessage) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// RenderSystemMessageUpdate 把分节变更渲染为补丁框定文本，供中途的 system 消息使用；
-// 空串值渲染为删除文案
+// RenderSystemMessageUpdate 把分节变更渲染为补丁文本，空串值渲染为删除文案
 func RenderSystemMessageUpdate(msg SystemMessage) string {
 	var parts []string
 	for _, name := range SystemSectionOrder {

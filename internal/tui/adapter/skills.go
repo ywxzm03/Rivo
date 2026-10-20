@@ -18,7 +18,7 @@ type skillInput struct {
 
 var skillBlockPattern = regexp.MustCompile(`^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>(?:\n\n([\s\S]*))?$`)
 
-// expandSkillInput 只在 TUI 请求边界展开技能，持久化失败后的同一输入复用原正文
+// expandSkillInput 在 TUI 请求边界展开技能，持久化失败后的同一输入复用原正文
 func (r *Runtime) expandSkillInput(a *app.App, input string) (string, error) {
 	if !strings.HasPrefix(input, "/skill:") {
 		return input, nil
@@ -53,7 +53,6 @@ func (r *Runtime) expandSkillInput(a *app.App, input string) (string, error) {
 	return "", fmt.Errorf("Unknown skill: %s", name)
 }
 
-// skillInvocation 从历史文本恢复显示投影，解析失败保留普通用户消息
 func skillInvocation(text string) *tui.SkillInvocationView {
 	match := skillBlockPattern.FindStringSubmatch(text)
 	if match == nil {

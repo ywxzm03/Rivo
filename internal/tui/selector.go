@@ -178,7 +178,6 @@ func (s *selector) baseHeight(budget int) int {
 	return 12
 }
 
-// view 小窗口省略空白与详情，优先保留标题、搜索框和边框
 func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
@@ -218,7 +217,7 @@ func (s *selector) view(width, budget int) string {
 			color = accentColor
 		}
 		label := item.label
-		// 模型 provider 和 default 标记保持 muted，不给整行统一着色
+		// provider 与 default 标记保持 muted，不给整行统一着色
 		if s.kind == "model" {
 			if n := strings.LastIndex(label, " ["); n >= 0 {
 				label = colored(color, label[:n]) + colored(mutedColor, label[n:])
@@ -249,7 +248,7 @@ func (s *selector) view(width, budget int) string {
 	}
 	lines = append(lines, colored(dimColor, ansi.Truncate("  Enter to select · Escape/Ctrl+C to cancel", width, "…")), rule(width, "", borderColor, false))
 	if len(lines) > height {
-		// 极小窗口优先保留标题和搜索框，避免从底部裁掉固定 UI
+		// 极小窗口优先保留标题和搜索框
 		lines = lines[:height]
 	}
 	return strings.Join(lines, "\n")
@@ -325,7 +324,6 @@ func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode)
 	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
 }
 
-// updateSelectorInput forwards non-tree selector keys to the search input.
 func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
 	s := m.selector
 	before := s.input.Value()
@@ -338,8 +336,7 @@ func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-// moveTreeSelection skips descendants and moves to the next visible user at
-// the same depth, keeping one arrow press within the current tree level.
+// moveTreeSelection 跳过后代，移动到同层下一个可见 user
 func (s *selector) moveTreeSelection(direction int) {
 	if len(s.filtered) == 0 || direction == 0 {
 		return
@@ -353,20 +350,19 @@ func (s *selector) moveTreeSelection(direction int) {
 		}
 	}
 	if direction > 0 {
-		// The last sibling continues into its first child when no sibling remains.
+		// 没有下一个兄弟时进入首个子节点
 		s.moveTreeToFirstChild()
 		return
 	}
 	if current.depth == 0 {
-		// A root has no parent, so moving upward wraps to its last second-level child.
+		// 根节点无父节点，向上时绕到最后一个二级子节点
 		s.moveTreeToLastChild()
 		return
 	}
-	// The first non-root sibling moves back to its visible parent.
+	// 非根节点回到可见父节点
 	s.moveTreeToParent()
 }
 
-// moveTreeToParent returns to the visible user parent of the selected node.
 func (s *selector) moveTreeToParent() {
 	if len(s.filtered) == 0 {
 		return
@@ -384,7 +380,6 @@ func (s *selector) moveTreeToParent() {
 	}
 }
 
-// moveTreeToFirstChild enters the first visible child of the selected node.
 func (s *selector) moveTreeToFirstChild() {
 	if len(s.filtered) == 0 {
 		return
@@ -399,7 +394,6 @@ func (s *selector) moveTreeToFirstChild() {
 	}
 }
 
-// moveTreeToLastChild enters the last visible child of the selected node.
 func (s *selector) moveTreeToLastChild() {
 	if len(s.filtered) == 0 {
 		return

@@ -19,7 +19,6 @@ type Agent struct {
 	OnEvent      llm.AgentEventSink
 	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
 	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
-	// CommitMessages 在推进核心上下文前整体提交消息，返回稳定来源 ID
 	CommitMessages func([]llm.Message) ([]string, error)
 
 	runGuardOnce     sync.Once
@@ -81,7 +80,6 @@ func (a *Agent) Steer(input string) error {
 	return a.SteerMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-// SteerMessage 把带图片的用户输入加入当前运行的 steering 队列
 func (a *Agent) SteerMessage(message llm.UserMessage) error {
 	if len(message.Content) == 0 {
 		return errors.New("agent: steering input is empty")
@@ -93,14 +91,12 @@ func (a *Agent) SteerMessage(message llm.UserMessage) error {
 	return nil
 }
 
-// HasSteering 返回是否存在等待消费的 steering 输入
 func (a *Agent) HasSteering() bool {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
 	return len(a.steering) > 0
 }
 
-// SteeringMessages 返回等待消费的 steering 文本副本
 func (a *Agent) SteeringMessages() []string {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -111,7 +107,6 @@ func (a *Agent) SteeringMessages() []string {
 	return messages
 }
 
-// SteeringUserMessages 返回等待消费的结构化 steering 副本
 func (a *Agent) SteeringUserMessages() []llm.UserMessage {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -122,14 +117,13 @@ func (a *Agent) SteeringUserMessages() []llm.UserMessage {
 	return messages
 }
 
-// SteeringRevision 返回等待消费队列的单调版本
 func (a *Agent) SteeringRevision() uint64 {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
 	return a.steeringRevision
 }
 
-// TakeSteering 清空等待消费的 steering，并按 FIFO 返回消息文本
+// TakeSteering 清空等待消费的 steering，按 FIFO 返回消息文本
 func (a *Agent) TakeSteering() []string {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -144,7 +138,6 @@ func (a *Agent) TakeSteering() []string {
 	return messages
 }
 
-// TakeSteeringMessages 原子取出结构化 steering，供 TUI 撤回
 func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -159,12 +152,11 @@ func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
 	return messages
 }
 
-// AcknowledgeSteering 删除宿主提交失败后恢复、且已由会话补写的 steering
+// AcknowledgeSteering 确认宿主提交失败后恢复、且已由会话补写的 steering
 func (a *Agent) AcknowledgeSteering(input string) bool {
 	return a.acknowledgeSteering(func(message steeringMessage) bool { return message.input == input })
 }
 
-// AcknowledgeSteeringMessage 确认已由宿主补写的结构化 steering
 func (a *Agent) AcknowledgeSteeringMessage(input llm.UserMessage) bool {
 	return a.acknowledgeSteering(func(message steeringMessage) bool { return equalUserMessage(message.message, input) })
 }
@@ -182,7 +174,6 @@ func (a *Agent) acknowledgeSteering(match func(steeringMessage) bool) bool {
 	return false
 }
 
-// takeSteering 原子地认领队首，避免撤回和消费同时看到同一条消息
 func (a *Agent) takeSteering() (steeringMessage, bool) {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -195,7 +186,6 @@ func (a *Agent) takeSteering() (steeringMessage, bool) {
 	return message, true
 }
 
-// restoreSteering 把未被宿主接受的认领消息放回队首
 func (a *Agent) restoreSteering(message steeringMessage) {
 	a.steeringMu.Lock()
 	defer a.steeringMu.Unlock()
@@ -203,7 +193,7 @@ func (a *Agent) restoreSteering(message steeringMessage) {
 	a.steeringRevision++
 }
 
-// PreparedRequest 是一次模型请求的配置与上下文快照
+// PreparedRequest 是一次模型请求的配置与上下文快照；
 // Compacted 表示来源结构已重建，运行汇总从新快照的末尾开始
 type PreparedRequest struct {
 	Context   llm.Context
@@ -225,7 +215,7 @@ func (a *Agent) acquireRunGuard(ctx context.Context) (func(), error) {
 	a.runGuardOnce.Do(func() { a.runGuard = make(chan struct{}, 1) })
 	select {
 	case a.runGuard <- struct{}{}:
-		// 守卫就绪与 ctx 取消同时发生时 select 会随机选择分支，需复查取消避免已取消的运行抢占守卫
+		// select 在守卫就绪与 ctx 取消同时发生时随机选分支，需复查取消
 		select {
 		case <-ctx.Done():
 			<-a.runGuard
@@ -242,9 +232,8 @@ func (a *Agent) Run(ctx context.Context, input string) (*llm.AssistantMessage, e
 	return a.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-// RunMessage 运行一条包含文本和图片的用户消息
 func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*llm.AssistantMessage, error) {
-	// 同一 Agent 的多次运行在此排队串行执行，等待期间响应取消
+	// 同一 Agent 的多次运行在此排队串行执行
 	release, err := a.acquireRunGuard(ctx)
 	if err != nil {
 		return nil, err
@@ -276,7 +265,6 @@ func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*l
 	return a.runLoop(llm.WithCurrentUserMessageID(ctx, a.currentUserID), cancel, firstMessageIndex, nil)
 }
 
-// Continue 在不追加用户消息的情况下重入运行循环，供编排层在溢出恢复后重试该轮
 func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
 	return a.Resume(ctx, nil)
 }
@@ -286,7 +274,6 @@ func (a *Agent) ContinueSteering(ctx context.Context) (*llm.AssistantMessage, er
 	return a.resume(ctx, nil, true)
 }
 
-// Resume 续接已经提交的 assistant 或工具批次，已执行的工具不会再次运行
 func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	return a.resume(ctx, committed, false)
 }
@@ -347,12 +334,11 @@ func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, req
 	return a.runLoop(ctx, cancel, firstMessageIndex, initialSteering)
 }
 
-// ReplaceMessages 用编排层提供的投影消息替换内存消息序列（Tools 不变）
+// ReplaceMessages 用编排层提供的投影消息替换内存消息序列
 func (a *Agent) ReplaceMessages(messages []llm.Message) {
 	a.AgentContext.Messages = messages
 }
 
-// AppendMessage 把编排层产生的消息（如 system prompt 补丁）压入内存消息序列
 func (a *Agent) AppendMessage(msg llm.Message) {
 	a.AgentContext.Messages = append(a.AgentContext.Messages, msg)
 }
@@ -397,7 +383,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			}
 		}
 
-		// 1.请求准备只返回快照；摘要失败的降级与存储失败的停止由宿主判断
+		// 2.请求准备只返回快照，摘要失败的降级与存储失败的停止由宿主判断
 		if a.PrepareRequest != nil {
 			request, err := a.PrepareRequest(ctx, PreparedRequest{Context: a.AgentContext, Config: a.AgentConfig})
 			if err != nil {
@@ -411,12 +397,12 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				firstMessageIndex = len(a.AgentContext.Messages)
 			}
 		}
-		// 2.消费模型流并同步发出 assistant partial 更新
+		// 3.消费模型流并同步发出 assistant partial 更新
 		partial := a.newAssistantMessage()
 		if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
 			return nil, err
 		}
-		// 每轮单独派生 stream ctx：错误事件分支只取消它，运行级 ctx 保持存活
+		// 每轮单独派生 stream ctx，错误事件分支只取消它
 		streamCtx, streamCancel := context.WithCancel(ctx)
 		requestContext := contextForModel(a.AgentContext)
 		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{
@@ -430,7 +416,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		toolCallArguments := make(map[int]string)
 		if streamErr == nil {
 			for event := range events {
-				// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接并关闭
+				// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接
 				if eventErr != nil || streamErr != nil {
 					continue
 				}
@@ -461,7 +447,6 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					if streamErr == nil {
 						streamErr = errors.New("agent: model stream returned empty error")
 					}
-					// 流层区分取消与真实失败：aborted 走事件收场，error 保留错误上抛
 					streamReason = ev.Reason
 					if streamReason != llm.StopReasonAborted && streamReason != llm.StopReasonError {
 						streamReason = llm.StopReasonError
@@ -469,13 +454,11 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					if ev.Partial != nil {
 						partial = cloneAssistantMessage(*ev.Partial)
 					}
-					// 只取消本轮流，运行级 ctx 保持存活
 					streamCancel()
 				}
 			}
 		}
 		streamCause := streamCtx.Err()
-		// 本轮流已结束（正常关闭或已中止），统一收尾
 		streamCancel()
 		if streamErr != nil && ctx.Err() != nil {
 			streamReason = llm.StopReasonAborted
@@ -484,7 +467,6 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return nil, eventErr
 		}
 		if streamErr == nil && final == nil {
-			// 流层静默关闭（防御路径）：取消时以 aborted 收场，其余按真实缺陷报告
 			if errors.Is(streamCause, context.Canceled) || errors.Is(streamCause, context.DeadlineExceeded) {
 				streamReason = llm.StopReasonAborted
 			} else {
@@ -498,7 +480,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			}
 			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
-		// 3.提交最终 assistant 消息，并检查是否需要执行工具
+		// 4.提交最终 assistant 消息，并检查是否需要执行工具
 		setAssistantMetadata(final, a.AgentConfig.Model)
 		if final.Usage.Cost == nil {
 			final.Usage.Cost = llm.PriceUsage(a.AgentConfig.Model, final.Usage)
@@ -509,9 +491,8 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 
 		toolCalls := assistantToolCalls(*final)
-		// 3.5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
-		// 正常提交本轮后通知编排层驱动溢出恢复；未启用编排层时按旧语义继续执行工具；
-		// 达到上限的截断是正常输出限制
+		// 5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
+		// 正常提交本轮后由编排层驱动溢出恢复；达到上限的截断是正常输出限制
 		if a.PrepareRequest != nil && isRecoverableLength(*final, a.AgentConfig.Model) {
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
@@ -545,7 +526,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			continue
 		}
 
-		// 4.执行工具批次，结束当前 turn 后开始下一轮模型调用
+		// 6.执行工具批次，结束当前 turn 后开始下一轮模型调用
 		toolResults, err := a.executeToolBatch(ctx, toolCalls)
 		if err != nil {
 			cancel()
@@ -565,7 +546,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 	}
 }
 
-// contextForModel 过滤已经错误收尾的 assistant，避免取消/失败文本污染下一次请求
+// contextForModel 过滤已错误收尾的 assistant，避免取消/失败文本污染下一次请求
 func contextForModel(agentContext llm.Context) llm.Context {
 	messages := make([]llm.Message, 0, len(agentContext.Messages))
 	for _, message := range agentContext.Messages {
@@ -578,8 +559,7 @@ func contextForModel(agentContext llm.Context) llm.Context {
 	return agentContext
 }
 
-// isRecoverableLength 输出在达到模型输出上限之前被截断，说明截断来自上下文耗尽而非输出上限；
-// 输出上限未知的模型无法判定，不触发恢复
+// isRecoverableLength 输出在达到模型输出上限之前被截断，说明截断来自上下文耗尽而非输出上限
 func isRecoverableLength(message llm.AssistantMessage, model llm.Model) bool {
 	if message.StopReason != llm.StopReasonLength || model.MaxTokens <= 0 {
 		return false
@@ -598,14 +578,12 @@ func (a *Agent) newAssistantMessage() llm.AssistantMessage {
 	return message
 }
 
-// setAssistantMetadata 写入 assistant 消息的模型标识
 func setAssistantMetadata(message *llm.AssistantMessage, model llm.Model) {
 	message.API = model.API
 	message.Provider = model.Provider
 	message.Model = model.ID
 }
 
-// appendAssistantEvent 将无快照的模型事件累积到对应内容索引
 func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMessageEvent, toolCallArguments map[int]string) {
 	var index int
 	switch event := event.(type) {
@@ -642,7 +620,7 @@ func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMess
 		index = event.ContentIndex
 		toolCallArguments[index] += event.Delta
 		var arguments map[string]any
-		// delta事件发送的增量是多段的，是不完整的JSON；需要一直更新当前值，直到JSON反序列化成功，这就说明工具参数发送完整了，tool_call完整了
+		// delta 携带的是不完整的 JSON 片段，能反序列化成功才说明工具参数收全
 		if json.Unmarshal([]byte(toolCallArguments[index]), &arguments) == nil && ensureAssistantContentSlot(message, index) {
 			call, ok := message.Content[index].(llm.ToolCall)
 			if !ok {
@@ -699,8 +677,8 @@ func ensureAssistantContentSlot(message *llm.AssistantMessage, index int) bool {
 	return true
 }
 
-// finishModelFailure 将模型流终止记录为 assistant 消息并结束本次运行；
-// aborted 保留已收到的 partial 内容，error 记录错误文本（对齐 Pi 的 stopReason 语义）
+// finishModelFailure 将模型流终止记录为 assistant 消息并结束本次运行，
+// aborted 保留已收到的 partial 内容，error 记录错误文本
 func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason, err error, partial *llm.AssistantMessage) (*llm.AssistantMessage, error) {
 	message := a.newAssistantMessage()
 	message.StopReason = reason
@@ -729,13 +707,11 @@ func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason,
 		return nil, emitErr
 	}
 	if reason == llm.StopReasonAborted {
-		// 取消不是运行错误：事件收场后向调用方返回 nil 错误
 		return &message, nil
 	}
 	return &message, err
 }
 
-// emitAgentEnd 汇总本次运行新增的消息并发出 agent_end
 func (a *Agent) emitAgentEnd(firstMessageIndex int, cause ...error) error {
 	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
 	return a.emitAgentEndMessages(messages, cause...)
@@ -756,7 +732,6 @@ func (a *Agent) emitAgentEndMessages(messages []llm.Message, cause ...error) err
 	return a.emit(llm.AgentEndEvent{Messages: messages, Err: err})
 }
 
-// emit 同步调用事件消费者并包装其返回错误
 func (a *Agent) emit(event llm.AgentEvent) error {
 	if a.OnEvent == nil {
 		return nil
@@ -860,7 +835,7 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 			var result llm.ToolResult
 			var isError bool
 			if batchCtx.Err() != nil {
-				// 已取消：工具不再启动，以 aborted 结果收场（对齐 Pi 的启动前检查）
+				// 已取消：工具不再启动，以 aborted 结果收场
 				result, isError = abortedToolResult(), true
 			} else {
 				result, isError = executeToolCall(batchCtx, a, toolCall)
@@ -897,7 +872,6 @@ func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.Tool
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
-			// 取消是用户操作：统一为固定文案，与 Pi 的 createErrorToolResult("Operation aborted") 一致
 			result.Content = []llm.Content{llm.TextContent{Text: "Operation aborted"}}
 		} else {
 			result.Content = []llm.Content{llm.TextContent{Text: "tool error: " + err.Error()}}
@@ -907,7 +881,6 @@ func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.Tool
 	return result, result.IsError
 }
 
-// abortedToolResult 生成取消后未执行工具的结构化错误结果
 func abortedToolResult() llm.ToolResult {
 	return llm.ToolResult{
 		Content: []llm.Content{llm.TextContent{Text: "Operation aborted"}},
@@ -955,7 +928,7 @@ func (a *Agent) commitToolResults(results []llm.ToolResultMessage, notify bool) 
 	return errors.Join(a.commitMessagesWithNotify(messages, notify), eventErr)
 }
 
-// commitMessages 先提交宿主记录，再发布核心上下文和带来源的结束通知
+// commitMessages 先提交宿主记录，再发布核心上下文和结束通知
 func (a *Agent) commitMessages(messages []llm.Message) error {
 	_, err := a.commitMessagesWithIDs(messages)
 	return err
@@ -1018,7 +991,6 @@ func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {
 	return ids, nil
 }
 
-// assistantToolCalls 保留模型返回的工具调用顺序
 func assistantToolCalls(message llm.AssistantMessage) []llm.ToolCall {
 	var calls []llm.ToolCall
 	for _, content := range message.Content {

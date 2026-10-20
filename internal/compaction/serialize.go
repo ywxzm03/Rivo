@@ -35,7 +35,6 @@ func SerializeMessages(messages []llm.Message) string {
 					data, err := json.Marshal(c.Arguments)
 					rendered := string(data)
 					if err != nil {
-						// 不可序列化的参数以 fmt.Sprint 兜底标注，避免静默丢失
 						rendered = fmt.Sprint(c.Arguments)
 					}
 					calls = append(calls, c.Name+"("+rendered+")")
@@ -53,13 +52,11 @@ func SerializeMessages(messages []llm.Message) string {
 		case llm.ToolResultMessage:
 			writeLabeled(&b, "Tool result", m.ToolName+": "+truncateRunes(contentsText(m.Content), ToolResultCharLimit))
 		case llm.SystemMessage:
-			// system prompt 声明不进摘要文本：它是上下文前缀而非对话内容
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// contentsText 拼接内容块中的文本，图片以占位符标注
 func contentsText(contents []llm.Content) string {
 	var lines []string
 	for _, c := range contents {
@@ -75,7 +72,6 @@ func contentsText(contents []llm.Content) string {
 	return strings.Join(lines, "\n")
 }
 
-// writeLabeled 写入一行带标签的序列化文本
 func writeLabeled(b *strings.Builder, label, text string) {
 	if text == "" {
 		return
@@ -83,7 +79,6 @@ func writeLabeled(b *strings.Builder, label, text string) {
 	fmt.Fprintf(b, "[%s]: %s\n", label, text)
 }
 
-// truncateRunes 按字符数截断文本并标注省略长度
 func truncateRunes(text string, limit int) string {
 	runes := []rune(text)
 	if len(runes) <= limit {

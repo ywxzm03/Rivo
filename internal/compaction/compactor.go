@@ -8,7 +8,6 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// 压缩参数默认值：预留量防止下一次请求溢出，保留量决定近期消息原样保留多少
 const (
 	DefaultReserveTokens    = 16384
 	DefaultKeepRecentTokens = 20000
@@ -35,11 +34,11 @@ type Compactor struct {
 	StreamFn llm.StreamFn
 	Model    llm.Model
 	Config   Config
-	// Retry 为零值时不重试；摘要调用的瞬时错误经此策略有界重试
+	// Retry 为零值时不重试
 	Retry RetryPolicy
 }
 
-// Result 一次压缩的产出：FirstKeptSourceID 标记保留区首条 entry
+// Result 一次压缩的产出
 type Result struct {
 	Summary           string
 	FileLists         FileLists
@@ -50,7 +49,7 @@ type Result struct {
 	IsSplitTurn       bool
 }
 
-// Compact 对当前上下文视图执行一次压缩；compaction entry 作为 boundary，不参与新摘要素材
+// Compact 对当前上下文视图执行一次压缩，compaction entry 作为 boundary 不参与新摘要素材
 func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions string) (Result, error) {
 	messages := view.Messages()
 	tokensBefore := ContextTokens(messages)
@@ -76,7 +75,7 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 		}
 		var summary string
 		var usage llm.Usage
-		// 1.先摘历史；历史区为空时以上次摘要为合并基线，绝不丢弃已整合的历史
+		// 1.先摘历史；历史区为空时以上次摘要为合并基线
 		if len(history) > 0 {
 			historySummary, historyUsage, err := c.summarizeRegion(ctx, history, previousSummary, instructions, false)
 			if err != nil {
@@ -173,7 +172,7 @@ func summaryWithFileLists(summary string, previous *FileLists, regions ...[]llm.
 }
 
 // summarizeRegion 对一段消息生成摘要：turnPrefix 模式用轮次前缀提示词，
-// 有上次摘要时走增量更新，否则新写摘要
+// 有上次摘要时走增量更新
 func (c *Compactor) summarizeRegion(ctx context.Context, messages []llm.Message, previousSummary, instructions string, turnPrefix bool) (string, llm.Usage, error) {
 	conversation := SerializeMessages(messages)
 	var prompt string
@@ -189,8 +188,8 @@ func (c *Compactor) summarizeRegion(ctx context.Context, messages []llm.Message,
 }
 
 // summarizeOnce 发起一次无工具的独立 LLM 调用并取回完整文本；
-// 输出上限取 min(0.8 × ReserveTokens, Model.MaxTokens)，防止摘要跑满输出上限被截断；
-// 瞬时错误按重试策略退避重试，响应先经质量校验——截断、报错或携带工具调用的摘要绝不返回
+// 输出上限取 min(0.8 × ReserveTokens, Model.MaxTokens)；瞬时错误按重试策略退避重试，
+// 截断、报错或携带工具调用的摘要绝不返回
 func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, llm.Usage, error) {
 	modelCtx := llm.Context{
 		SystemPrompt: SummarizerSystemPrompt,
@@ -218,10 +217,9 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 				}
 			case llm.AssistantMessageErrorEvent:
 				if ev.Reason == llm.StopReasonAborted {
-					// 中止是终态：即使底层错误文本未包装 context.Canceled，也不得进入重试
+					// 中止是终态，不得进入重试
 					streamErr = fmt.Errorf("compaction: summary call aborted: %w", context.Canceled)
 				} else if ev.Err != nil {
-					// 上游中断必须显式报错，避免流关闭后被误报成「摘要为空」
 					streamErr = fmt.Errorf("compaction: summary call failed: %w", ev.Err)
 				} else {
 					streamErr = fmt.Errorf("compaction: summary call failed: model stream returned empty error")
@@ -235,7 +233,6 @@ func (c *Compactor) summarizeOnce(ctx context.Context, prompt string) (string, l
 		if final == nil {
 			return "", usage, fmt.Errorf("compaction: summary call failed: stream ended without a final message")
 		}
-		// 摘要质量校验：宁可放弃本次压缩，也不让坏摘要变成会话检查点
 		if err := validateSummary(final); err != nil {
 			return "", usage, err
 		}
@@ -260,7 +257,6 @@ func (c *Compactor) summaryMaxTokens() int {
 	return maxTokens
 }
 
-// summaryText 拼接摘要消息中的文本块
 func summaryText(contents []llm.Content) string {
 	var texts []string
 	for _, c := range contents {

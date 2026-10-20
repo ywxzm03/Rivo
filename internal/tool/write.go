@@ -9,7 +9,10 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Write struct{ History FileHistoryTracker }
+type Write struct {
+	History    FileHistoryTracker
+	WorkingDir string
+}
 
 func (w *Write) Name() string { return "write" }
 
@@ -42,7 +45,7 @@ func (w *Write) Parameters() map[string]any {
 	}
 }
 
-// Execute 创建或覆盖文件，并在需要时递归创建父目录
+// Execute 创建或覆盖文件，需要时递归创建父目录
 func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.读取必填参数，空内容也是合法写入
 	path, ok := args["path"].(string)
@@ -55,7 +58,7 @@ func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResul
 	}
 
 	// 2.解析路径并创建父目录
-	absPath, err := resolvePath(path)
+	absPath, err := resolvePathFrom(path, w.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

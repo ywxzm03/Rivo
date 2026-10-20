@@ -10,23 +10,22 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// 大粘贴折叠阈值，与 Pi v1.0.0 editor.ts 保持一致
+// 大粘贴折叠阈值
 const (
 	pasteMaxLines = 10
 	pasteMaxChars = 1000
 	pasteTabWidth = 4
 )
 
-// pasteMarkerRegexp 匹配带折叠统计的生成标记；不带统计的字面文本不展开
+// pasteMarkerRegexp 匹配带折叠统计的生成标记，不带统计的字面文本不展开
 var pasteMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]`)
 
-// pasteTailMarkerRegexp 匹配紧贴文本末尾的完整标记，用于光标整删判断；捕获组 1 是 id
+// pasteTailMarkerRegexp 匹配紧贴文本末尾的完整标记，用于整删判断，捕获组 1 是 id
 var pasteTailMarkerRegexp = regexp.MustCompile(`\[paste #(\d+)( \+\d+ lines| \d+ chars)\]$`)
 
 var imageMarkerRegexp = regexp.MustCompile(`\[Image #(\d+)\]`)
 var imageMarkerTailRegexp = regexp.MustCompile(`\[Image #(\d+)\]$`)
 
-// handlePaste 处理一次终端粘贴：超阈值折叠为标记，否则原样插入
 func (m *Model) handlePaste(text string) {
 	text = cleanPasteText(text)
 	if text == "" {
@@ -50,7 +49,6 @@ func (m *Model) handlePaste(text string) {
 	m.layout()
 }
 
-// handleImage 在编辑器中插入图片占位符，并把图片正文留在附件状态中
 func (m *Model) handleImage(image llm.ImageContent) {
 	if image.Data == "" || image.MIMEType == "" {
 		return
@@ -171,7 +169,6 @@ func (m *Model) restoreEditorMessage(message *llm.UserMessage, fallback string) 
 	m.completion, m.completionHidden = 0, true
 }
 
-// pasteMarker 返回注册内容对应的折叠标记
 func pasteMarker(id int, text string) string {
 	lines := strings.Count(text, "\n") + 1
 	if lines > pasteMaxLines {
@@ -180,7 +177,7 @@ func pasteMarker(id int, text string) string {
 	return "[paste #" + strconv.Itoa(id) + " " + strconv.Itoa(len([]rune(text))) + " chars]"
 }
 
-// cleanPasteText 规范换行、展开制表符并剔除控制字符（保留换行）
+// cleanPasteText 规范换行、展开制表符并剔除控制字符
 func cleanPasteText(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
@@ -194,7 +191,7 @@ func cleanPasteText(text string) string {
 	return b.String()
 }
 
-// expandPasteMarkers 把标记替换回注册表中的完整内容；无对应 id 的字面文本原样保留
+// expandPasteMarkers 把标记替换回注册表内容，无对应 id 的字面文本原样保留
 func (m *Model) expandPasteMarkers(text string) string {
 	if len(m.pastes) == 0 || !strings.Contains(text, "[paste #") {
 		return text
@@ -214,7 +211,6 @@ func (m *Model) expandPasteMarkers(text string) string {
 	})
 }
 
-// resetPastes 清空注册表；编辑器重置或提交后调用
 func (m *Model) resetPastes() {
 	m.pastes = nil
 	m.pasteCounter = 0
@@ -222,7 +218,7 @@ func (m *Model) resetPastes() {
 	m.imageCounter = 0
 }
 
-// backspaceAtMarker 判断光标是否紧邻标记尾部；是则整块删除标记并移除注册项
+// backspaceAtMarker 判断光标是否紧邻标记尾部，是则整块删除标记并移除注册项
 func (m *Model) backspaceAtMarker() bool {
 	if m.backspaceAtImageMarker() {
 		return true
@@ -238,7 +234,7 @@ func (m *Model) backspaceAtMarker() bool {
 	start := min(max(0, info.StartColumn), len(runes))
 	col := min(start+runeOffsetAtWidth(runes[start:], info.CharOffset), len(runes))
 	prefix := string(runes[:col])
-	// 锚定 prefix 末尾：光标左侧必须是一个完整标记；group 1 是 id
+	// 锚定 prefix 末尾：光标左侧必须是一个完整标记，group 1 是 id
 	loc := pasteTailMarkerRegexp.FindStringSubmatchIndex(prefix)
 	if loc == nil {
 		return false
@@ -292,7 +288,6 @@ func (m *Model) backspaceAtImageMarker() bool {
 	return true
 }
 
-// runeOffsetAtWidth 把软换行片段的显示列换算成 rune 偏移
 func runeOffsetAtWidth(runes []rune, width int) int {
 	if width < 0 {
 		return 0

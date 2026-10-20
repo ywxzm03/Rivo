@@ -9,12 +9,10 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// textContents 把一段文本包成工具结果的内容
 func textContents(text string) []llm.Content {
 	return []llm.Content{llm.TextContent{Text: text}}
 }
 
-// argInt 读取可选的整数参数，JSON 里的数字解出来是 float64
 func argInt(args map[string]any, key string) (int, bool) {
 	v, ok := args[key]
 	if !ok {
@@ -27,8 +25,12 @@ func argInt(args map[string]any, key string) (int, bool) {
 	return int(f), true
 }
 
-// resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对当前工作目录
+// resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对 cwd
 func resolvePath(path string) (string, error) {
+	return resolvePathFrom(path, "")
+}
+
+func resolvePathFrom(path, cwd string) (string, error) {
 	// 1.~ 与 ~/ 展开成用户主目录
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -39,9 +41,12 @@ func resolvePath(path string) (string, error) {
 	}
 	// 2.相对路径按当前工作目录解析
 	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				return "", err
+			}
 		}
 		path = filepath.Join(cwd, path)
 	}
@@ -104,7 +109,6 @@ func lineBytes(line string, i int) int {
 	return len(line) + 1
 }
 
-// formatSize 把字节数格式化成可读大小
 func formatSize(bytes int) string {
 	switch {
 	case bytes < 1024:
@@ -116,7 +120,6 @@ func formatSize(bytes int) string {
 	}
 }
 
-// splitLines 按换行切分，结尾换行带来的空串不算一行
 func splitLines(content string) []string {
 	if content == "" {
 		return nil
@@ -129,12 +132,10 @@ func splitLines(content string) []string {
 }
 
 // truncateHead 从头保留内容，行数与字节数两个上限先到先截，永不返回半行
-// 首行单独就超过字节上限时返回空内容并置 FirstLineExceedsLimit
 func truncateHead(content string, maxLines, maxBytes int) truncationResult {
 	lines := splitLines(content)
 	totalLines := len(lines)
 
-	// 1.两个上限都没触到就原样返回，字节数用与下面循环相同的计法
 	totalBytes := 0
 	for i, line := range lines {
 		totalBytes += lineBytes(line, i)
@@ -143,7 +144,7 @@ func truncateHead(content string, maxLines, maxBytes int) truncationResult {
 		return truncationResult{Content: content, TotalLines: totalLines, OutputLines: totalLines}
 	}
 
-	// 2.能走到这里 content 必非空，所以 lines 非空
+	// 1.能走到这里 content 必非空，所以 lines 非空
 	if len(lines[0]) > maxBytes {
 		return truncationResult{
 			Truncated:             true,
@@ -153,7 +154,7 @@ func truncateHead(content string, maxLines, maxBytes int) truncationResult {
 		}
 	}
 
-	// 3.逐行收，超过任一上限就停
+	// 2.逐行收，超过任一上限就停
 	kept := make([]string, 0, min(totalLines, maxLines))
 	used := 0
 	truncatedBy := truncatedByLines

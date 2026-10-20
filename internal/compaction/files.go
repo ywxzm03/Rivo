@@ -41,7 +41,6 @@ func fileOperationsFromLists(lists *FileLists) fileOperations {
 	return ops
 }
 
-// collectFileOperations 从内建文件工具调用中提取路径
 func collectFileOperations(messages []llm.Message, ops *fileOperations) {
 	for _, message := range messages {
 		assistant, ok := message.(llm.AssistantMessage)
@@ -92,7 +91,6 @@ func computeFileLists(ops fileOperations) FileLists {
 	return FileLists{ReadFiles: readFiles, ModifiedFiles: modifiedFiles}
 }
 
-// formatFileOperations 将路径集合渲染为模型可见的摘要分节
 func formatFileOperations(lists FileLists) string {
 	sections := make([]string, 0, 2)
 	if len(lists.ReadFiles) > 0 {

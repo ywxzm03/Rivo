@@ -22,7 +22,7 @@ const (
 	grepMaxLine      = 500
 )
 
-type Grep struct{}
+type Grep struct{ WorkingDir string }
 
 func (g *Grep) Name() string { return "grep" }
 
@@ -122,11 +122,11 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
-	absPath, isDirectory, err := resolveGrepPath(options.searchPath)
+	absPath, isDirectory, err := resolveGrepPath(options.searchPath, g.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	// 3.找rg安装路径，找不到就去Github Releases下
+	// 3.定位 rg，缺失时从 GitHub Releases 下载
 	rgPath, err := findRipgrep(ctx)
 	if err != nil {
 		return llm.ToolResult{}, err
@@ -138,7 +138,6 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	return llm.ToolResult{Content: formatGrepOutput(result, options.limit, options.contextLines, absPath, isDirectory)}, nil
 }
 
-// parseGrepArgs 读取 grep 参数并应用默认值
 func parseGrepArgs(args map[string]any) (grepOptions, error) {
 	pattern, ok := args["pattern"].(string)
 	if !ok {
@@ -175,8 +174,8 @@ func boolArg(args map[string]any, key string) bool {
 	return value
 }
 
-func resolveGrepPath(searchPath string) (string, bool, error) {
-	absPath, err := resolvePath(searchPath)
+func resolveGrepPath(searchPath, workingDir string) (string, bool, error) {
+	absPath, err := resolvePathFrom(searchPath, workingDir)
 	if err != nil {
 		return "", false, err
 	}
@@ -190,7 +189,6 @@ func resolveGrepPath(searchPath string) (string, bool, error) {
 	return absPath, info.IsDir(), nil
 }
 
-// buildRipgrepArgs 构造 rg 参数并把 pattern 放在 -- 之后
 func buildRipgrepArgs(options grepOptions, absPath string) []string {
 	args := []string{"--json", "--line-number", "--color=never", "--hidden"}
 	if options.ignoreCase {
@@ -207,7 +205,7 @@ func buildRipgrepArgs(options grepOptions, absPath string) []string {
 
 // runRipgrep 执行 rg，流式解析匹配和上下文事件
 func runRipgrep(ctx context.Context, rgPath string, args []string, absPath string, isDirectory bool, options grepOptions) (grepResult, error) {
-	// 1.执行rg命令
+	// 1.执行 rg 命令
 	command := exec.CommandContext(ctx, rgPath, args...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -272,7 +270,6 @@ func runRipgrep(ctx context.Context, rgPath string, args []string, absPath strin
 	return result, nil
 }
 
-// grepPathFormatter 创建搜索结果路径格式化函数
 func grepPathFormatter(absPath string, isDirectory bool) func(string) string {
 	return func(path string) string {
 		if isDirectory {
@@ -305,7 +302,6 @@ func ripgrepExitError(waitErr error, stderr string, killedDueToLimit bool) error
 	return errors.New(message)
 }
 
-// formatGrepOutput 应用字节截断并生成模型可读的提示
 func formatGrepOutput(result grepResult, limit, contextLines int, absPath string, isDirectory bool) []llm.Content {
 	if result.matchCount == 0 {
 		return textContents("No matches found")
@@ -370,7 +366,6 @@ func formatGrepOutput(result grepResult, limit, contextLines int, absPath string
 	return textContents(output)
 }
 
-// readGrepFileLines 读取文件并按统一换行符拆成行
 func readGrepFileLines(path string) ([]string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

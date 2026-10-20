@@ -9,7 +9,6 @@ type Cost struct {
 	Total      float64 `json:"total"`
 }
 
-// CostRates 保存模型每百万 token 的美元费率
 type CostRates struct {
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`
@@ -66,8 +65,8 @@ var builtinPricing = map[string]modelPricing{
 
 func ptrCostRates(rates costRates) *costRates { return &rates }
 
-// PriceUsage 根据 provider/model 和请求 usage 计算一次美元费用。
-// OpenAI 长上下文价格按整次请求的 prompt token 总量选择。
+// PriceUsage 根据模型与 usage 计算一次美元费用；OpenAI 长上下文价格
+// 按整次请求的 prompt token 总量选择
 func PriceUsage(model Model, usage Usage) *Cost {
 	if usage.ContextTokens() <= 0 {
 		return nil
@@ -77,7 +76,6 @@ func PriceUsage(model Model, usage Usage) *Cost {
 	var longContext *costRates
 	var longContextLimit int
 	if model.Cost != nil {
-		// 自定义费率完整覆盖内置表，并使用固定费率
 		rates = costRates{
 			input:      model.Cost.Input,
 			output:     model.Cost.Output,

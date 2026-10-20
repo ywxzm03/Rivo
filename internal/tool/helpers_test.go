@@ -1,9 +1,22 @@
 package tool
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestResolvePathFromUsesConfiguredWorkingDir(t *testing.T) {
+	workingDir := t.TempDir()
+	got, err := resolvePathFrom("relative/file.txt", workingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(workingDir, "relative", "file.txt")
+	if got != want {
+		t.Fatalf("resolvePathFrom() = %q, want %q", got, want)
+	}
+}
 
 func TestFormatSize(t *testing.T) {
 	tests := []struct {

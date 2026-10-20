@@ -271,15 +271,76 @@ func TestRunInvalidThinkingErrors(t *testing.T) {
 	}
 }
 
-func TestRunPositionalWithoutPrintErrors(t *testing.T) {
-	useTestEnv(t)
-	var stdout, stderr bytes.Buffer
-	code := Run([]string{"hello"}, strings.NewReader("/exit\n"), &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("Run() code = %d, want 2", code)
+func TestResolveSessionTargetDefaultsToNewSession(t *testing.T) {
+	target, err := resolveSessionTarget(t.TempDir(), "", "", false)
+	if err != nil || target.kind != targetNew {
+		t.Fatalf("resolveSessionTarget() = %+v, %v", target, err)
 	}
-	if !strings.Contains(stderr.String(), "unsupported argument") {
-		t.Errorf("stderr = %q, want unsupported argument error", stderr.String())
+}
+
+func TestResolveSessionTargetFindsLocalAndCrossProjectIDs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	dirA, err := session.DefaultDir(projectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirB, err := session.DefaultDir(projectB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := session.NewWithID(projectA, dirA, "local-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "local"}}}); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := session.NewWithID(projectB, dirB, "foreign-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := foreign.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "foreign"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{name: "local exact", arg: "local-session", want: local.Path()},
+		{name: "local prefix", arg: "local-sess", want: local.Path()},
+		{name: "foreign exact", arg: "foreign-session", want: foreign.Path()},
+		{name: "foreign prefix", arg: "foreign-sess", want: foreign.Path()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := resolveSessionTarget(projectA, tc.arg, "", false)
+			if err != nil || target.kind != targetPath || target.path != tc.want {
+				t.Fatalf("resolveSessionTarget() = %+v, %v, want %q", target, err, tc.want)
+			}
+		})
+	}
+
+	created, err := resolveSessionTarget(projectA, "", "missing-session", false)
+	if err != nil || created.kind != targetID || created.id != "missing-session" {
+		t.Fatalf("missing --session-id target = %+v, %v", created, err)
+	}
+}
+
+func TestRunRejectsInvalidSessionIDFlags(t *testing.T) {
+	useTestEnv(t)
+	for _, args := range [][]string{
+		{"--session-id", "bad/id"},
+		{"--session-id", "one", "--session", "two"},
+		{"--session-id", "one", "--continue"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, strings.NewReader(""), &stdout, &stderr); code != 2 {
+			t.Fatalf("Run(%q) code = %d, stderr = %q", args, code, stderr.String())
+		}
 	}
 }
 

@@ -84,7 +84,6 @@ func (m *Model) completionView() string {
 	return strings.Join(lines, "\n")
 }
 
-// handleKey 焦点优先级：选择器 → 补全 → 应用动作 → 编辑器
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
@@ -103,7 +102,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return nil
 	}
-	// 终端 bracketed paste 整段到达：只有粘贴走折叠路径，手动输入不经过这里
+	// 终端 bracketed paste 整段到达，只有粘贴走折叠路径
 	if msg.Paste {
 		m.handlePaste(string(msg.Runes))
 		return nil
@@ -207,8 +206,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	case "up":
-		// Some macOS terminals emit Option+Up as a plain Up sequence. If a
-		// steering is visible, prefer the PI dequeue action over history navigation.
+		// 部分 macOS 终端把 Option+Up 发成普通 Up，有可见 steering 时优先撤回
 		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy {
 			restored := m.restoreQueuedSteering()
 			if restored > 0 {

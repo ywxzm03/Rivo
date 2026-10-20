@@ -43,7 +43,7 @@ func fuzzyCommands(items []slashCommand, query string, bare bool) []slashCommand
 	return result
 }
 
-// fuzzyTokenScore 保留 PI 的字母数字顺序交换回退，优先使用原查询
+// fuzzyTokenScore 保留字母数字顺序交换回退，优先使用原查询
 func fuzzyTokenScore(query, text string) (int, bool) {
 	if score, ok := fuzzySubsequenceScore(query, text); ok {
 		return score, true
@@ -57,7 +57,7 @@ func fuzzyTokenScore(query, text string) (int, bool) {
 	return score + 50, ok
 }
 
-// fuzzySubsequenceScore 使用 PI 的连续匹配、词边界和间距权重，分值放大十倍以使用整数
+// fuzzySubsequenceScore 使用连续匹配、词边界和间距权重，分值放大十倍以使用整数
 func fuzzySubsequenceScore(query, text string) (int, bool) {
 	last, consecutive, score := -1, 0, 0
 	for i := 0; i < len(query); i++ {

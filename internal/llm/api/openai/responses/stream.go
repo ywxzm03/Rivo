@@ -58,14 +58,14 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	go func() {
 		defer close(events)
 		defer stream.Close()
-		// abortPartial 返回终止时携带已收到内容的 partial；对齐 Pi 保留 abort 时的部分输出
+		// abortPartial 返回终止时携带已收到内容的 partial
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
 		abortPartial := func(reason llm.StopReason) *llm.AssistantMessage {
 			snapshot := assistantMessageSnapshot(partial)
 			snapshot.StopReason = reason
 			return snapshot
 		}
-		// 终止事件用阻塞式发送保证必达；普通事件保留 select 以便取消时及时退出
+		// 终止事件用阻塞式发送保证必达，普通事件保留 select 以便取消时及时退出
 		abort := func(cause error) {
 			reason := classifyTerminalReason(ctx, cause)
 			sendTerminal(events, llm.AssistantMessageErrorEvent{
@@ -75,7 +75,7 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 			})
 		}
 		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: assistantMessageSnapshot(partial)}) {
-			// Start 事件被取消拦截时同样要送达终止事件；否则消费端只见通道关闭、无任何失败信息
+			// Start 事件被取消拦截时同样要送达终止事件，否则消费端只见通道关闭
 			cause := ctx.Err()
 			if cause == nil {
 				cause = context.Canceled
@@ -201,13 +201,12 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	return events, nil
 }
 
-// sendTerminal 保留终止 partial；消费端即使失败也排空通道，接收后生产者才能释放资源
+// sendTerminal 以阻塞发送保证终止事件必达
 func sendTerminal(events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) {
 	events <- event
 }
 
-// classifyTerminalReason 判断终止原因：取消/超时属于 aborted，其余按真实错误；
-// 与 Pi 的 options?.signal?.aborted ? "aborted" : "error" 语义一致
+// classifyTerminalReason 判断终止原因：取消/超时属于 aborted，其余按真实错误
 func classifyTerminalReason(ctx context.Context, err error) llm.StopReason {
 	if ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 		return llm.StopReasonAborted
@@ -215,7 +214,6 @@ func classifyTerminalReason(ctx context.Context, err error) llm.StopReason {
 	return llm.StopReasonError
 }
 
-// sendEvent 在上下文未取消时向模型事件通道发送事件
 func sendEvent(ctx context.Context, events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) bool {
 	select {
 	case events <- event:
@@ -298,14 +296,13 @@ func withEventPartial(event llm.AssistantMessageEvent, partial *llm.AssistantMes
 	}
 }
 
-// assistantMessageSnapshot 复制消息结构和内容切片，避免事件消费者读取生产中的消息
+// assistantMessageSnapshot 复制消息结构，避免消费者读取生产中的消息
 func assistantMessageSnapshot(message *llm.AssistantMessage) *llm.AssistantMessage {
 	snapshot := *message
 	snapshot.Content = append([]llm.Content(nil), message.Content...)
 	return &snapshot
 }
 
-// incompleteResponseError 将除输出长度限制外的 incomplete 响应转换为错误
 func incompleteResponseError(response responses.Response) error {
 	if response.Status != responses.ResponseStatusIncomplete || response.IncompleteDetails.Reason == "max_output_tokens" {
 		return nil
@@ -316,7 +313,6 @@ func incompleteResponseError(response responses.Response) error {
 	return fmt.Errorf("openai: response incomplete: %s", response.IncompleteDetails.Reason)
 }
 
-// addOutputSlot 为新增 output item 创建可持续更新的 assistant 内容块
 func addOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	idx := len(partial.Content)
 	switch item.Type {
@@ -369,7 +365,7 @@ func addContentPartSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 	return send(llm.AssistantMessageTextStartEvent{ContentIndex: idx})
 }
 
-// finishOutputSlot 用 output_item.done 的完整 item 固化内容并发出结束事件
+// finishOutputSlot 用 output_item.done 的完整 item 固化内容
 func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, item responses.ResponseOutputItemUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	slot, ok := slots[outputSlotKey{outputIndex: outputIndex}]
 	if !ok {
@@ -418,7 +414,6 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]out
 	}
 }
 
-// finishMessageSlots 按 message 的 content index 分别固化文本和拒答内容
 func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, outputIndex int64, contents []responses.ResponseOutputMessageContentUnion, send func(llm.AssistantMessageEvent) bool) bool {
 	if len(contents) == 0 {
 		slot, ok := slots[outputSlotKey{outputIndex: outputIndex}]
@@ -450,7 +445,6 @@ func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 	return true
 }
 
-// appendThinking 将 reasoning 增量追加到指定内容块
 func appendThinking(message *llm.AssistantMessage, index int, delta string) {
 	content, ok := message.Content[index].(llm.ThinkingContent)
 	if ok {
@@ -459,7 +453,6 @@ func appendThinking(message *llm.AssistantMessage, index int, delta string) {
 	}
 }
 
-// appendText 将文本增量追加到指定内容块
 func appendText(message *llm.AssistantMessage, index int, delta string) {
 	content, ok := message.Content[index].(llm.TextContent)
 	if ok {
@@ -468,7 +461,6 @@ func appendText(message *llm.AssistantMessage, index int, delta string) {
 	}
 }
 
-// updateToolArguments 用最新 JSON 参数替换工具调用参数
 func updateToolArguments(message *llm.AssistantMessage, index int, raw string) {
 	var args map[string]any
 	if json.Unmarshal([]byte(raw), &args) != nil {
@@ -488,17 +480,16 @@ func apiError(prefix, code, message string) error {
 	return fmt.Errorf("%s: %s", prefix, message)
 }
 
-// classifyAPIError 按错误码与消息给 API 错误分类，上下文溢出包上 ErrContextOverflow 供上层做压缩恢复
+// classifyAPIError 把上下文溢出包上 ErrContextOverflow 供上层做压缩恢复
 func classifyAPIError(prefix, code, message string) error {
 	err := apiError(prefix, code, message)
 	if isContextOverflowSignature(code, message) {
-		// 双重 %w 保留溢出标记与原始错误链，便于上游按错误码 errors.As 提取细节
+		// 双重 %w 同时保留溢出标记与原始错误链
 		return fmt.Errorf("%w: %w", llm.ErrContextOverflow, err)
 	}
 	return err
 }
 
-// classifyStreamError 给流中断错误分类，检测原始 API 错误文本中的溢出签名
 func classifyStreamError(prefix string, err error) error {
 	if isContextOverflowSignature("", err.Error()) {
 		return fmt.Errorf("%w: %s: %w", llm.ErrContextOverflow, prefix, err)
@@ -506,8 +497,8 @@ func classifyStreamError(prefix string, err error) error {
 	return fmt.Errorf("%s: %w", prefix, err)
 }
 
-// isContextOverflowSignature 判断错误码或消息是否为上下文溢出类签名。
-// 错误文本可能回显请求内容，因此只保留足够具体的签名，宽泛短语（如 "context window"）不参与匹配
+// isContextOverflowSignature 只匹配足够具体的溢出签名；错误文本可能回显请求内容，
+// 宽泛短语（如 "context window"）不参与匹配
 func isContextOverflowSignature(code, message string) bool {
 	text := strings.ToLower(code + " " + message)
 	for _, signature := range []string{

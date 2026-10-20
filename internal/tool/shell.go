@@ -33,6 +33,7 @@ func executeShellCommand(
 	ctx context.Context,
 	args map[string]any,
 	toolName string,
+	workingDir string,
 	buildCommand func(context.Context, string) (*exec.Cmd, error),
 ) (llm.ToolResult, error) {
 	command, timeout, err := parseShellArgs(args, toolName)
@@ -46,15 +47,17 @@ func executeShellCommand(
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return llm.ToolResult{}, err
+	if workingDir == "" {
+		workingDir, err = os.Getwd()
+		if err != nil {
+			return llm.ToolResult{}, err
+		}
 	}
 	cmd, err := buildCommand(commandCtx, command)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	cmd.Dir = cwd
+	cmd.Dir = workingDir
 	cmd.Env = shellEnvironment()
 	configureShellProcess(cmd)
 	output := newShellOutputAccumulator()
@@ -82,7 +85,6 @@ func executeShellCommand(
 	return output.result()
 }
 
-// shellErrorResult 把命令输出和失败状态组合成工具错误
 func shellErrorResult(output *shellOutputAccumulator, status string) (llm.ToolResult, error) {
 	result, err := output.result()
 	if err != nil {
@@ -95,7 +97,6 @@ func shellErrorResult(output *shellOutputAccumulator, status string) (llm.ToolRe
 	return llm.ToolResult{}, errors.New(text + "\n\n" + status)
 }
 
-// parseShellArgs 读取 shell 工具的命令和超时参数
 func parseShellArgs(args map[string]any, toolName string) (string, time.Duration, error) {
 	command, ok := args["command"].(string)
 	if !ok || command == "" {
@@ -115,7 +116,6 @@ func parseShellArgs(args map[string]any, toolName string) (string, time.Duration
 	return command, time.Duration(seconds * float64(time.Second)), nil
 }
 
-// shellEnvironment 继承当前环境并把 Rivo 缓存 bin 目录加入 PATH
 func shellEnvironment() []string {
 	env := append([]string(nil), os.Environ()...)
 	cacheDir, err := os.UserCacheDir()

@@ -13,19 +13,17 @@ import (
 // errUnknownRole 标记 message entry 携带了未知角色，上层将其降级为 UnknownEntry
 var errUnknownRole = errors.New("session: unknown message role")
 
-// entryLine 单行 entry 的探测结构，只取 type 字段
 type entryLine struct {
 	Type string `json:"type"`
 }
 
-// parseFile 解析会话文件内容，返回 header 与按文件序的 entry 列表；
-// 空行与解码失败的行跳过，首个有效行必须是合法的当前版本 header
+// parseFile 解析会话文件内容，返回 header 与按文件序的 entry 列表
 func parseFile(data []byte) (*Header, []Entry, error) {
 	header, entries, _, _, err := parseFileWithRecords(data)
 	return header, entries, err
 }
 
-// parseFileWithRecords 分离树 entry 与不参与树结构的 metadata record。
+// parseFileWithRecords 分离树 entry 与不参与树结构的 metadata record
 func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, []string, error) {
 	var header *Header
 	var entries []Entry
@@ -66,13 +64,11 @@ func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, 
 		entry, err := decodeEntry(probe.Type, string(line))
 		if err != nil {
 			if errors.Is(err, errUnknownRole) {
-				// 未知角色的 message 保留树结构字段，不产出消息
 				var base EntryBase
 				_ = json.Unmarshal(line, &base)
 				entries = append(entries, &UnknownEntry{EntryBase: base})
 				continue
 			}
-			// 单行解码失败按坏行跳过
 			continue
 		}
 		entries = append(entries, entry)
@@ -101,7 +97,6 @@ func decodeHeader(line []byte, typ string) (*Header, error) {
 	return &h, nil
 }
 
-// decodeEntry 按类型解码单行 entry；未知类型返回 UnknownEntry
 func decodeEntry(typ, line string) (Entry, error) {
 	switch typ {
 	case TypeMessage:
@@ -155,7 +150,6 @@ func decodeEntry(typ, line string) (Entry, error) {
 	}
 }
 
-// MarshalJSON 显式编码 message entry，消息体经 encodeMessage 转换
 func (e MessageEntry) MarshalJSON() ([]byte, error) {
 	raw, err := encodeMessage(e.Message)
 	if err != nil {
@@ -167,7 +161,6 @@ func (e MessageEntry) MarshalJSON() ([]byte, error) {
 	}{e.EntryBase, raw})
 }
 
-// UnmarshalJSON 显式解码 message entry；未知角色返回 errUnknownRole
 func (e *MessageEntry) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		EntryBase
@@ -185,7 +178,6 @@ func (e *MessageEntry) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON 显式编码 context_edit 的 replacement
 func (r Replacement) MarshalJSON() ([]byte, error) {
 	content, err := encodeContents(r.Content)
 	if err != nil {
@@ -196,7 +188,6 @@ func (r Replacement) MarshalJSON() ([]byte, error) {
 	}{content})
 }
 
-// UnmarshalJSON 显式解码 context_edit 的 replacement
 func (r *Replacement) UnmarshalJSON(data []byte) error {
 	var wire struct {
 		Content json.RawMessage `json:"content"`
@@ -212,7 +203,6 @@ func (r *Replacement) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// encodeContents 把 content 块编码为带类型判别的 JSON 数组
 func encodeContents(contents []llm.Content) (json.RawMessage, error) {
 	blocks := make([]json.RawMessage, 0, len(contents))
 	for _, c := range contents {
@@ -254,7 +244,7 @@ func encodeContents(contents []llm.Content) (json.RawMessage, error) {
 	return json.Marshal(blocks)
 }
 
-// decodeContents 解码 content JSON 数组；未知 content 块丢弃，不参与上下文
+// decodeContents 解码 content JSON 数组，未知 content 块丢弃
 func decodeContents(raw json.RawMessage) ([]llm.Content, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
@@ -309,13 +299,11 @@ func decodeContents(raw json.RawMessage) ([]llm.Content, error) {
 			}
 			out = append(out, llm.ToolCall{ID: wire.ID, Name: wire.Name, Arguments: wire.Arguments})
 		default:
-			// 未知 content 块丢弃
 		}
 	}
 	return out, nil
 }
 
-// messageRole 返回消息角色名，未知消息类型返回空串
 func messageRole(m llm.Message) string {
 	switch m.(type) {
 	case llm.UserMessage:
@@ -331,9 +319,7 @@ func messageRole(m llm.Message) string {
 	}
 }
 
-// encodeMessage 按角色把消息编码为 JSON
 func encodeMessage(m llm.Message) (json.RawMessage, error) {
-	// system 消息只承载分节，不带 content 块
 	if sys, ok := m.(llm.SystemMessage); ok {
 		return json.Marshal(struct {
 			Role     string            `json:"role"`
@@ -389,7 +375,6 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 	}
 }
 
-// decodeMessage 按角色解码消息；未知角色返回 errUnknownRole
 func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 	var probe struct {
 		Role string `json:"role"`
@@ -499,7 +484,6 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 	}
 }
 
-// messageContent 取消息的 content 块
 func messageContent(m llm.Message) []llm.Content {
 	switch m := m.(type) {
 	case llm.UserMessage:
@@ -513,7 +497,6 @@ func messageContent(m llm.Message) []llm.Content {
 	}
 }
 
-// usageWire 在 llm.Usage 与会话格式之间转换
 func usageWire(u llm.Usage) Usage {
 	return Usage{
 		InputTokens:        u.InputTokens,

@@ -7,8 +7,8 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
-// projectTree hides assistant/tool entries while retaining their parent links
-// so every visible user node stays under its nearest visible user ancestor.
+// projectTree 隐藏 assistant/tool entry 但保留其父链，
+// 使每个可见 user 节点都挂在最近的可见 user 祖先下
 func projectTree(snapshot session.TreeSnapshot) []tui.TreeNode {
 	entries := make(map[string]session.TreeEntry, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {

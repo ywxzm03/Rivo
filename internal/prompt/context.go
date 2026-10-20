@@ -12,7 +12,7 @@ type ContextFile struct {
 	Content string
 }
 
-// contextFileCandidates 每个目录内的候选文件名，按优先级排列；同目录取第一个存在的普通文件
+// contextFileCandidates 每个目录内的候选文件名，按优先级排列
 var contextFileCandidates = []string{"AGENTS.md", "AGENTS.MD"}
 
 // Loader 持有当前生效的 AGENTS.md 链与 skills，重读磁盘时整体替换
@@ -23,7 +23,6 @@ type Loader struct {
 	skills   []Skill
 }
 
-// NewLoader 创建资源加载器；首次装配也走 Reload
 func NewLoader(cwd, agentDir string) *Loader {
 	return &Loader{cwd: cwd, agentDir: agentDir}
 }
@@ -34,10 +33,8 @@ func (l *Loader) Reload() {
 	l.skills = discoverSkills(l.cwd, l.agentDir)
 }
 
-// ContextFiles 返回当前生效的 AGENTS.md 链
 func (l *Loader) ContextFiles() []ContextFile { return l.files }
 
-// Skills 返回当前生效的 skills
 func (l *Loader) Skills() []Skill { return l.skills }
 
 // discoverContextFiles 加载 AGENTS.md 链：全局文件优先，再从最外层祖先目录到 cwd 依次层叠
@@ -50,7 +47,7 @@ func discoverContextFiles(cwd, agentDir string) []ContextFile {
 		seen[global.Path] = true
 	}
 
-	// 祖先链从最外层向内收集，再追加到结果尾部，保证内层目录的内容更靠后
+	// 祖先链从最外层向内收集，再反转，保证内层目录的内容更靠后
 	var ancestors []ContextFile
 	shadowed := findShadowedContextFile(cwd)
 	current := cwd
@@ -74,7 +71,7 @@ func discoverContextFiles(cwd, agentDir string) []ContextFile {
 	return append(files, ancestors...)
 }
 
-// loadContextFileFromDir 取目录内第一个存在的候选文件；候选是目录时跳过
+// loadContextFileFromDir 取目录内第一个存在的普通文件
 func loadContextFileFromDir(dir string) *ContextFile {
 	for _, name := range contextFileCandidates {
 		path := filepath.Join(dir, name)
@@ -91,7 +88,7 @@ func loadContextFileFromDir(dir string) *ContextFile {
 	return nil
 }
 
-// findShadowedContextFile 复刻 PI 的嵌套 worktree 过滤：worktree 根有同名候选文件时，
+// findShadowedContextFile 处理嵌套 worktree：worktree 根有同名候选文件时，
 // 主仓中的同名文件被遮蔽，避免同一份说明出现两次
 func findShadowedContextFile(cwd string) string {
 	gitPaths := findGitPaths(cwd)
@@ -105,8 +102,8 @@ func findShadowedContextFile(cwd string) string {
 	if !strings.HasPrefix(worktreeRoot, mainRepoRoot+string(filepath.Separator)) {
 		return ""
 	}
-	// 主仓根下的 .git 与 commonGitDir 一致时才说明该目录本身是主工作树检出；
-	// 裸仓布局与 submodule 都不满足，因此不遮蔽
+	// 主仓根下的 .git 与 commonGitDir 一致时才说明该目录本身是主工作树检出，
+	// 裸仓布局与 submodule 都不满足
 	if canonicalizePath(filepath.Join(mainRepoRoot, ".git")) != commonGitDir {
 		return ""
 	}
@@ -119,13 +116,13 @@ func findShadowedContextFile(cwd string) string {
 
 // gitPaths 一个仓库的 git 目录信息
 type gitPaths struct {
-	// repoDir 含 .git 的工作目录
 	repoDir string
-	// commonGitDir 共享的 git 目录；worktree 下指向主仓
+	// commonGitDir 共享的 git 目录，worktree 下指向主仓
 	commonGitDir string
 }
 
-// findGitPaths 从 cwd 向上查找 .git：目录形态直接使用，文件形态（worktree/submodule）解析 gitdir 与 commondir
+// findGitPaths 从 cwd 向上查找 .git：目录形态直接使用，文件形态（worktree/submodule）
+// 解析 gitdir 与 commondir
 func findGitPaths(cwd string) *gitPaths {
 	dir := cwd
 	for {
@@ -170,7 +167,7 @@ func findGitPaths(cwd string) *gitPaths {
 	}
 }
 
-// canonicalizePath 解析符号链接；路径不存在时原样返回
+// canonicalizePath 解析符号链接，路径不存在时原样返回
 func canonicalizePath(path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -179,13 +176,11 @@ func canonicalizePath(path string) string {
 	return resolved
 }
 
-// exists 判断路径是否存在
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
 
-// stripBOM 去掉文件开头的 UTF-8 BOM
 func stripBOM(text string) string {
 	return strings.TrimPrefix(text, "\ufeff")
 }

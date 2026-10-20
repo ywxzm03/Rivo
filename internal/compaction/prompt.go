@@ -50,29 +50,25 @@ const summarizeUpdatePrompt = `The messages above are the conversation since the
 // turnPrefixPrompt split turn 轮次前缀的摘要提示词
 const turnPrefixPrompt = `The messages above are the beginning of the current conversation turn, which is too long to keep in context. Summarize what the user asked for at the start of this turn and what the assistant has done so far, including any intermediate results needed to continue the turn. Preserve exact file paths, function names, and error messages.`
 
-// compaction 摘要回插上下文时的包装文本，session 包复用同一常量保证回放一致
+// compactionSummaryPrefix 摘要回插上下文时的包装文本，session 包复用同一常量保证回放一致
 const (
 	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
 	compactionSummarySuffix = "\n</summary>"
 )
 
-// BuildSummarizePrompt 组装新写摘要的提示词；instructions 非空时追加为聚焦指令
 func BuildSummarizePrompt(conversation, instructions string) string {
 	return withFocus("<conversation>\n"+conversation+"\n</conversation>\n\n"+summarizeBasePrompt, instructions)
 }
 
-// BuildUpdatePrompt 组装增量更新摘要的提示词，上次摘要以 <previous-summary> 传入
 func BuildUpdatePrompt(previousSummary, conversation, instructions string) string {
 	base := "<conversation>\n" + conversation + "\n</conversation>\n\n<previous-summary>\n" + previousSummary + "\n</previous-summary>\n\n" + summarizeUpdatePrompt
 	return withFocus(base, instructions)
 }
 
-// BuildTurnPrefixPrompt 组装 split turn 轮次前缀的摘要提示词
 func BuildTurnPrefixPrompt(conversation string) string {
 	return "<conversation>\n" + conversation + "\n</conversation>\n\n" + turnPrefixPrompt
 }
 
-// withFocus 在提示词末尾追加用户聚焦指令
 func withFocus(prompt, instructions string) string {
 	if instructions == "" {
 		return prompt
@@ -80,12 +76,10 @@ func withFocus(prompt, instructions string) string {
 	return prompt + "\n\nAdditional focus: " + instructions
 }
 
-// MergeSummaries 合并历史摘要与 split turn 轮次前缀摘要
 func MergeSummaries(history, turnPrefix string) string {
 	return history + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefix
 }
 
-// WrappedSummary 把摘要包装成回插上下文的 user 消息文本
 func WrappedSummary(summary string) string {
 	return compactionSummaryPrefix + summary + compactionSummarySuffix
 }

@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,69 @@ func TestListSessionsUsesDefaultDir(t *testing.T) {
 	}
 	if len(infos) != 1 || !strings.Contains(infos[0].Summary, "entry point") {
 		t.Fatalf("ListSessions() = %+v, want the session under DefaultDir", infos)
+	}
+}
+
+func TestListAllSessionsIncludesProjectMetadata(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectA := filepath.Join(t.TempDir(), "project-a")
+	projectB := filepath.Join(t.TempDir(), "project-b")
+	dirA, err := DefaultDir(projectA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirB, err := DefaultDir(projectB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewWithID(projectA, dirA, "project-a-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AppendMessage(userMsg("a")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewWithID(projectB, dirB, "project-b-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AppendMessage(userMsg("b")); err != nil {
+		t.Fatal(err)
+	}
+	infos, err := ListAllSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]SessionInfo{}
+	for _, info := range infos {
+		seen[info.ID] = info
+	}
+	if seen["project-a-id"].Cwd != projectA || seen["project-b-id"].Cwd != projectB {
+		t.Fatalf("session metadata = %+v", seen)
+	}
+}
+
+func TestListAllSessionsReportsUnreadableProjectDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission model differs on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root, err := SessionsRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	badDir := filepath.Join(root, "unreadable")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badDir, 0o755) })
+	if _, err := ListAllSessions(); err == nil {
+		t.Fatal("ListAllSessions() error = nil, want unreadable directory error")
 	}
 }
 

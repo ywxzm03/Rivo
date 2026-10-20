@@ -20,7 +20,10 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Edit struct{ History FileHistoryTracker }
+type Edit struct {
+	History    FileHistoryTracker
+	WorkingDir string
+}
 
 type EditDetails struct {
 	Diff             string
@@ -86,7 +89,7 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolveEditPath(path)
+	absPath, err := resolveEditPathFrom(path, e.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -96,7 +99,6 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	})
 }
 
-// executeEdit 读取目标文件、应用替换并返回变更详情
 func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []textEdit) (llm.ToolResult, error) {
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
@@ -125,7 +127,7 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	}
 	// 3.记录已通过替换校验的文件，复用已读取内容避免备份竞态
 	trackFileEditContent(ctx, e.History, absPath, originalData, info.Mode().Perm())
-	// 4.恢复 BOM 与原行尾后写回，再生成供调用方使用的 diff 详情
+	// 4.恢复 BOM 与原行尾后写回，再生成 diff 详情
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
@@ -149,7 +151,7 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	}, nil
 }
 
-// parseEditArgs 兼容 pi 的多种输入形式，并统一行尾格式
+// parseEditArgs 兼容多种输入形式，并统一行尾格式
 func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
@@ -192,8 +194,12 @@ func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 	return path, edits, nil
 }
 
-// resolveEditPath 处理 pi 支持的路径前缀与空格变体
+// resolveEditPath 处理路径前缀与空格变体
 func resolveEditPath(path string) (string, error) {
+	return resolveEditPathFrom(path, "")
+}
+
+func resolveEditPathFrom(path, cwd string) (string, error) {
 	path = strings.Map(func(r rune) rune {
 		switch r {
 		case '\u00a0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
@@ -227,10 +233,19 @@ func resolveEditPath(path string) (string, error) {
 		}
 		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 	}
-	return filepath.Abs(path)
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Clean(filepath.Join(cwd, path)), nil
 }
 
-// isWindowsDrivePath 判断路径是否以 Windows 驱动器前缀开头
 func isWindowsDrivePath(path string) bool {
 	return ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':'
 }
@@ -399,7 +414,6 @@ func preserveUnchangedLines(original, base string, edits []matchedEdit) string {
 	return result.String()
 }
 
-// editDiff 生成带行号的展示 diff、统一补丁及首个变更行
 func editDiff(before, after, path string) (string, string, *int) {
 	edits := gotextdiff.LineEdits(before, myers.ComputeEdits("", before, after))
 	unified := gotextdiff.ToUnified(path, path, before, edits)
@@ -442,7 +456,7 @@ func editDiff(before, after, path string) (string, string, *int) {
 	return strings.TrimSuffix(display.String(), "\n"), patch, firstChanged
 }
 
-// extendUnifiedContext 将 gotextdiff 的三行上下文补到 pi 使用的四行
+// extendUnifiedContext 将 gotextdiff 的三行上下文补到四行
 func extendUnifiedContext(unified gotextdiff.Unified, content string) gotextdiff.Unified {
 	lines := make([]string, 0)
 	for _, span := range splitLineSpans(content) {

@@ -20,14 +20,14 @@ const (
 type providerSpec struct {
 	id           string
 	defaultModel string
-	// apiKey/baseURL 是解析后的凭据与端点；new 用它们装配协议客户端
+	// apiKey/baseURL 是解析后的凭据与端点
 	apiKey  string
 	baseURL string
 	models  []llm.Model
 	new     func(apiKey, baseURL string) ([]llm.Model, llm.StreamFn)
 }
 
-// builtinRegistry 返回内置 provider 注册表；凭据来自 <PROVIDER>_API_KEY 环境变量
+// builtinRegistry 返回内置 provider 注册表，凭据来自 <PROVIDER>_API_KEY 环境变量
 func builtinRegistry() map[string]providerSpec {
 	specs := map[string]providerSpec{
 		openai.ProviderID: {
@@ -49,7 +49,7 @@ func builtinRegistry() map[string]providerSpec {
 	}
 	for id, spec := range specs {
 		spec.apiKey = apiKeyFromEnv(id)
-		// 填充内置模型列表，供 settings 成对指定的模型校验使用（构造客户端为离线操作）
+		// 内置模型列表供 settings 成对指定的模型校验使用
 		if len(spec.models) == 0 {
 			if models, _ := spec.new(spec.apiKey, spec.baseURL); len(models) > 0 {
 				spec.models = models
@@ -60,7 +60,6 @@ func builtinRegistry() map[string]providerSpec {
 	return specs
 }
 
-// customSpec 把 models.json 的自定义 provider 条目转成 openai 兼容的 providerSpec
 func customSpec(id string, p config.Provider) (providerSpec, error) {
 	id = strings.ToLower(strings.TrimSpace(id))
 	if len(p.Models) == 0 {
@@ -94,7 +93,6 @@ func customSpec(id string, p config.Provider) (providerSpec, error) {
 	}, nil
 }
 
-// overlaySpec 在内置 provider 上叠加 models.json 配置
 func overlaySpec(base providerSpec, p config.Provider) (providerSpec, error) {
 	if err := validateModelOverrides(base.id, p.ModelOverrides); err != nil {
 		return providerSpec{}, err
@@ -208,7 +206,6 @@ func modelFromConfig(providerID string, provider config.Provider, definition con
 	return model, nil
 }
 
-// applyModelOverrides 将字段级覆盖应用到模型列表；未知模型 ID 忽略
 func applyModelOverrides(models []llm.Model, overrides map[string]config.ModelOverride) []llm.Model {
 	for i := range models {
 		override, ok := overrides[models[i].ID]
@@ -219,7 +216,6 @@ func applyModelOverrides(models []llm.Model, overrides map[string]config.ModelOv
 	return models
 }
 
-// applyModelOverride 应用单个模型的字段级覆盖
 func applyModelOverride(model llm.Model, override config.ModelOverride) llm.Model {
 	model = cloneModel(model)
 	if override.Name != nil {
@@ -323,7 +319,7 @@ func cloneParams(params map[string]any) map[string]any {
 	return cloned
 }
 
-// hasImageInput 兼容 PI models.json 的 input 能力声明
+// hasImageInput 兼容 models.json 的 input 能力声明
 func hasImageInput(inputs []string) bool {
 	for _, input := range inputs {
 		if strings.EqualFold(strings.TrimSpace(input), "image") {
@@ -333,7 +329,6 @@ func hasImageInput(inputs []string) bool {
 	return false
 }
 
-// thinkingLevelMap 把 config 的字符串映射转为 llm 的强类型映射
 func thinkingLevelMap(m map[string]*string) map[llm.ThinkingLevel]*llm.ReasoningEffort {
 	if m == nil {
 		return nil
@@ -350,7 +345,6 @@ func thinkingLevelMap(m map[string]*string) map[llm.ThinkingLevel]*llm.Reasoning
 	return out
 }
 
-// findModel 在模型列表中按 ID 查找
 func findModel(providerID string, models []llm.Model, modelID string) (llm.Model, error) {
 	for _, m := range models {
 		if m.ID == modelID {

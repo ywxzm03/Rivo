@@ -11,11 +11,10 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// DefaultMaxRetryDelay 单次重试延迟上限，对齐上游默认 60 秒
+// DefaultMaxRetryDelay 单次重试延迟上限
 const DefaultMaxRetryDelay = 60 * time.Second
 
-// RetryPolicy 摘要调用的有界重试策略：只重试瞬时错误，确定性错误（配额/账单耗尽）
-// 立即失败，用户中止是终态永不重试
+// RetryPolicy 摘要调用的有界重试策略：只重试瞬时错误，配额/账单类与用户中止永不重试
 type RetryPolicy struct {
 	Enabled    bool
 	MaxRetries int           // 最大重试次数，初次调用不计入
@@ -33,7 +32,7 @@ func DefaultRetryPolicy() RetryPolicy {
 	}
 }
 
-// retryDelayMs 计算第 attempt 次重试的退避延迟（attempt 从 1 开始）
+// retryDelayMs 计算第 attempt 次重试的退避延迟
 func retryDelayMs(policy RetryPolicy, attempt int) time.Duration {
 	maxDelay := policy.MaxDelay
 	if maxDelay <= 0 {
@@ -46,7 +45,7 @@ func retryDelayMs(policy RetryPolicy, attempt int) time.Duration {
 	return delay
 }
 
-// nonRetryableErrorPattern 配额/订阅/账单耗尽类错误，重试无意义，立即失败
+// nonRetryableErrorPattern 配额/订阅/账单耗尽类错误，重试无意义
 var nonRetryableErrorPattern = regexp.MustCompile(`(?i)` + strings.Join([]string{
 	"GoUsageLimitError",
 	"FreeUsageLimitError",
@@ -108,8 +107,8 @@ var retryableErrorPattern = regexp.MustCompile(`(?i)` + strings.Join([]string{
 	"subscription_sharing_user_unavailable",
 }, "|"))
 
-// isRetryableError 判断摘要调用错误是否为可重试的瞬时错误：
-// 先排除配额/账单类确定性错误，再匹配瞬时签名；上下文中止与超时是终态，永不重试
+// isRetryableError 判断错误是否为可重试的瞬时错误：先排除配额/账单类，再匹配瞬时签名，
+// 上下文中止与超时是终态
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
@@ -124,8 +123,8 @@ func isRetryableError(err error) bool {
 	return retryableErrorPattern.MatchString(message)
 }
 
-// retrySummarize 以有界重试执行 produce：成功立即返回；中止是终态；确定性错误快速失败；
-// 瞬时错误按指数退避重试至多 MaxRetries 次，退避期间响应取消
+// retrySummarize 以有界重试执行 produce：成功立即返回，中止是终态，确定性错误快速失败，
+// 瞬时错误按指数退避重试至多 MaxRetries 次
 func retrySummarize(ctx context.Context, policy RetryPolicy, produce func() (string, llm.Usage, error)) (string, llm.Usage, error) {
 	maxAttempts := 0
 	if policy.Enabled {
@@ -136,7 +135,6 @@ func retrySummarize(ctx context.Context, policy RetryPolicy, produce func() (str
 		if err == nil {
 			return text, usage, nil
 		}
-		// 中止是终态，静默返回；确定性错误或重试预算耗尽立即失败
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", usage, err
 		}
@@ -152,7 +150,7 @@ func retrySummarize(ctx context.Context, policy RetryPolicy, produce func() (str
 	}
 }
 
-// validateSummary 在持久化前校验摘要响应：截断的摘要只有部分文本，绝不能变成会话检查点
+// validateSummary 在持久化前校验摘要响应，截断或携带工具调用的摘要不能变成会话检查点
 func validateSummary(message *llm.AssistantMessage) error {
 	if message == nil {
 		return fmt.Errorf("compaction: empty summary response")

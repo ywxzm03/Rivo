@@ -239,13 +239,11 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 		r.setToolGroupLocked(group)
 	}
 	if len(blocks) > 0 && group == nil {
-		// A provider may deliver the completed assistant snapshot without a
-		// separate thinking update; preserve that reasoning block for the transcript.
+		// provider 可能只给完成后的 assistant 快照，没有独立的 thinking 更新
 		group = r.ensureToolGroupLocked(id)
 	}
 	if stream == nil && text == "" && len(blocks) == 0 && len(calls) == 0 && group == nil {
-		// Keep a visible working block while the provider has opened an assistant
-		// turn but has not emitted its first thinking, text, or tool event yet.
+		// provider 已开启 assistant turn 但还没有任何可见事件，保留一个工作块
 		group = r.ensureToolGroupLocked(id)
 	}
 	if stream == nil && len(blocks) > 0 {
@@ -275,8 +273,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 			if r.messages[index].ID == id {
 				converted.ToolGroup = cloneToolGroup(current)
 			} else if strings.TrimSpace(text) == "" {
-				// 连续 assistant turn 属于同一个紧凑工具组，thinking 流更新继续写入原锚点
-				// 避免为下一轮模型输出创建不可见的重复消息
+				// 连续 assistant turn 属于同一个紧凑工具组，thinking 流继续写入原锚点
 				converted = r.messages[index]
 				converted.ToolGroup = cloneToolGroup(current)
 			}
@@ -347,7 +344,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 		group, groupIndex = nil, -1
 	}
 	for _, entry := range view.Entries {
-		// 压缩快照与摘要只供模型使用，不进入显示投影
+		// 压缩快照与摘要只供模型使用
 		if entry.Kind == compaction.ContextCompaction {
 			continue
 		}
@@ -420,7 +417,6 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 	return projected
 }
 
-// thinkingPolicy 显式保留实时更新与历史重放的显示差异
 type thinkingPolicy bool
 
 const (

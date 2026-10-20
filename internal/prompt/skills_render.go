@@ -10,13 +10,13 @@ type Skill struct {
 	Description string
 	// FilePath 是 SKILL.md 的绝对路径，作为清单里的 location
 	FilePath string
-	// BaseDir 是 skill 目录（SKILL.md 的父目录），供相对路径引用解析
+	// BaseDir 供相对路径引用解析
 	BaseDir string
 	// DisableModelInvocation 为真时该 skill 不进入清单
 	DisableModelInvocation bool
 }
 
-// formatSkills 渲染 skills 清单；无可见 skill 时返回空串表示该节不出现
+// formatSkills 渲染 skills 清单，无可见 skill 时返回空串
 func formatSkills(skills []Skill) string {
 	var visible []Skill
 	for _, s := range skills {
@@ -45,7 +45,6 @@ func formatSkills(skills []Skill) string {
 	return b.String()
 }
 
-// escapeXML 转义 XML 特殊字符，避免 skill 元数据破坏标签结构
 func escapeXML(text string) string {
 	replacer := strings.NewReplacer(
 		"&", "&amp;",

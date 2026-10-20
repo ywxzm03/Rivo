@@ -2,7 +2,7 @@ package session
 
 import "github.com/ywxzm03/Rivo/internal/llm"
 
-// UsageTotals 汇总会话中所有持久化 entry 的 token usage。
+// UsageTotals 汇总会话中所有持久化 entry 的 token usage
 type UsageTotals struct {
 	InputTokens        int
 	OutputTokens       int
@@ -15,7 +15,7 @@ type UsageTotals struct {
 	UnknownCostEntries int
 }
 
-// Add 累加一条 usage；reasoning 和 cacheWrite1h 是其它字段的子集，不重复计入 total。
+// Add 累加一条 usage；reasoning 与 cacheWrite1h 是其它字段的子集，不重复计入 total
 func (t *UsageTotals) Add(usage llm.Usage) {
 	t.InputTokens += usage.InputTokens
 	t.OutputTokens += usage.OutputTokens
@@ -35,7 +35,7 @@ func (t *UsageTotals) Add(usage llm.Usage) {
 	}
 }
 
-// UsageTotals 汇总全部 session entries，包括已压缩历史和非 active branch。
+// UsageTotals 汇总全部 session entries，包括已压缩历史和非 active branch
 func (m *SessionManager) UsageTotals() UsageTotals {
 	var totals UsageTotals
 	for _, entry := range m.entries {

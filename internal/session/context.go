@@ -51,7 +51,6 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 				kept = true
 			}
 			if kept {
-				// compaction 快照已替代边界前的 system entry，避免旧 prompt 重复进入模型上下文
 				if message, ok := e.(*MessageEntry); ok {
 					if _, isSystem := message.Message.(llm.SystemMessage); isSystem {
 						continue
@@ -82,8 +81,7 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 			latestInvalidatingIdx = i
 		}
 	}
-	// lastAssistantStale 记录最后一条 assistant 的 usage 是否早于最近一次会改变 projection 的 entry，
-	// 与消息在投影中的先后无关（保留尾部的 assistant 在投影里排在摘要之后）
+	// lastAssistantStale 记录最后一条 assistant 的 usage 是否早于最近一次会改变 projection 的 entry
 	lastAssistantStale := false
 	for _, e := range selected {
 		switch e := e.(type) {
@@ -107,12 +105,10 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 				lastAssistantStale = latestInvalidatingIdx >= 0 && pathIdx[e.base().ID] < latestInvalidatingIdx
 			}
 		case *CompactionEntry:
-			// 保留区间内可能残留更早的 compaction，只有最新的这个产出快照与摘要
 			if compaction != nil && e != compaction {
 				continue
 			}
-			// 压缩快照位于摘要之前：它把压缩边界处的 system prompt 合并为一条，
-			// 保留区内的 system 条目由此被取代
+			// 压缩快照位于摘要之前，保留区内的 system 条目由此被取代
 			messages := make([]llm.Message, 0, 2)
 			if e.SystemMessage != nil {
 				messages = append(messages, *e.SystemMessage)
@@ -133,7 +129,7 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 	return ctx
 }
 
-// activePath 从 leaf 沿 parentId 回溯到根并反转；父链断裂时在断点停止
+// activePath 从 leaf 沿 parentId 回溯到根并反转，父链断裂时在断点停止
 func (m *SessionManager) activePath() []Entry {
 	if m.leafID == "" {
 		return nil
@@ -154,7 +150,6 @@ func (m *SessionManager) activePath() []Entry {
 	return path
 }
 
-// withReplacedContent 返回仅替换了 content 的消息副本
 func withReplacedContent(msg llm.Message, content []llm.Content) llm.Message {
 	switch m := msg.(type) {
 	case llm.UserMessage:

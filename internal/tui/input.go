@@ -21,9 +21,8 @@ var sgrMouse = regexp.MustCompile(`\x1b?\[<([0-9]+);[0-9]+;[0-9]+[mM]`)
 
 const escapeWait = 25 * time.Millisecond
 
-// mouseReportEnd validates the numeric SGR mouse grammar and returns the byte
-// after a complete report. An incomplete numeric prefix is kept for the next
-// read; ordinary bracket text is reported as invalid and remains untouched.
+// mouseReportEnd 解析 SGR 鼠标报告的数字语法，返回完整报告之后的偏移；
+// 不完整的数字前缀留给下次读取，普通方括号文本按非法处理
 func mouseReportEnd(value string, payload int) (end int, complete, incomplete bool) {
 	start := payload
 	readNumber := func(index int) (int, bool, bool) {
@@ -85,8 +84,7 @@ func mouseCandidate(value string, index int) (payload int, prefix int, ok bool) 
 	}
 }
 
-// NewInputReader delivers complete mouse reports to Bubble Tea and removes
-// reports lacking ESC. Close releases the reader without closing the terminal.
+// NewInputReader 把完整的鼠标报告交给 Bubble Tea，并剔除缺少 ESC 的报告
 func NewInputReader(source io.Reader) io.ReadCloser {
 	cancelable, err := cancelreader.NewReader(source)
 	reader := &inputReader{source: cancelable, err: err}
@@ -111,13 +109,12 @@ type inputRead struct {
 	err  error
 }
 
-// Read drains a complete input packet before fetching more terminal bytes
 func (r *inputReader) Read(dst []byte) (int, error) {
 	if len(dst) == 0 {
 		return 0, nil
 	}
 	for {
-		// 1. Keep packet leftovers separate from unfinished reports
+		// 1.已解析的包剩余字节优先交出
 		if len(r.ready) > 0 {
 			count := copy(dst, r.ready)
 			r.ready = r.ready[count:]
@@ -136,7 +133,7 @@ func (r *inputReader) Read(dst []byte) (int, error) {
 			}
 			return 0, r.err
 		}
-		// 2. A lone ESC may be a key or the first byte of a mouse report
+		// 2.孤立的 ESC 可能是按键，也可能是鼠标报告的首字节
 		if r.reads == nil {
 			reads := make(chan inputRead, 1)
 			r.reads = reads
@@ -186,19 +183,18 @@ func (r *inputReader) Close() error {
 		return nil
 	}
 	if r.source.Cancel() {
-		// Let the active read consume cancellation before releasing its resources
+		// 等待进行中的读取感知取消后再释放资源
 		r.readMu.Lock()
 		defer r.readMu.Unlock()
 	}
 	return r.source.Close()
 }
 
-// stripMalformedMouse returns one input packet and retains unfinished prefixes
 func stripMalformedMouse(data []byte) ([]byte, []byte) {
 	value := string(data)
 	var clean []byte
 	for i := 0; i < len(value); {
-		// Keep the introducer together, including a split bracketed paste prefix
+		// 保留引导符整体，包含被拆开的 bracketed paste 前缀
 		if value[i:] == "\x1b" || value[i:] == "\x1b[" || strings.HasPrefix("\x1b[200~", value[i:]) {
 			return clean, data[i:]
 		}
@@ -222,7 +218,7 @@ func stripMalformedMouse(data []byte) ([]byte, []byte) {
 				return clean, data[i:]
 			}
 			if complete {
-				// One report per packet avoids splitting it at Bubble Tea's buffer edge
+				// 一个包只交出一份报告，避免在 Bubble Tea 的缓冲边界被拆开
 				return data[i:end], data[end:]
 			}
 		}
@@ -246,8 +242,6 @@ func stripMalformedMouse(data []byte) ([]byte, []byte) {
 	return clean, nil
 }
 
-// filterMouseRunes removes SGR mouse reports that Bubble Tea may deliver as
-// ordinary rune messages when a terminal splits the escape sequence.
 func filterMouseRunes(value string, pending *string) (string, bool) {
 	hadPending := pending != nil && *pending != ""
 	if pending != nil && *pending != "" {
@@ -263,8 +257,7 @@ func filterMouseRunes(value string, pending *string) (string, bool) {
 			i++
 			continue
 		}
-		// A real ESC-prefixed report is Bubble Tea's normal input. Leave it
-		// intact; the raw reader only removes reports lacking the escape byte.
+		// 带 ESC 前缀的报告是 Bubble Tea 的正常输入，原样保留
 		if i > 0 && value[i-1] == '\x1b' {
 			clean.WriteString(value[i : i+prefix])
 			i += prefix
@@ -306,13 +299,11 @@ func (m *Model) filterMouseKey(msg tea.KeyMsg) (string, bool) {
 	}
 	value := string(msg.Runes)
 	if sgrMouse.FindString(value) == value {
-		// Let the normal raw-wheel path consume a complete report.
 		return value, false
 	}
 	return filterMouseRunes(value, &m.mouseFragment)
 }
 
-// rawMouseWheel recognizes mouse reports that escaped Bubble Tea's parser.
 func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 	if msg.Type != tea.KeyRunes || msg.Paste {
 		return 0, false
@@ -333,7 +324,7 @@ func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 	return 0, false
 }
 
-// isSteeringDequeueKey 接受 Bubble Tea 的标准键值和常见 Alt CSI 片段
+// isSteeringDequeueKey 接受标准键值和常见 Alt CSI 片段
 func isSteeringDequeueKey(msg tea.KeyMsg) bool {
 	if msg.String() == "alt+up" {
 		return true
@@ -349,7 +340,6 @@ func isSteeringDequeueKey(msg tea.KeyMsg) bool {
 	}
 }
 
-// isTerminalControlKey prevents incomplete CSI/SGR reports from becoming text.
 func isTerminalControlKey(msg tea.KeyMsg) bool {
 	if msg.Type != tea.KeyRunes || msg.Paste {
 		return false
@@ -363,7 +353,7 @@ func isTerminalControlKey(msg tea.KeyMsg) bool {
 			return true
 		}
 	}
-	// X10 鼠标报告没有 ESC 前缀时固定为 [M 加三个编码字节；只识别完整报告，
+	// X10 鼠标报告无 ESC 前缀时固定为 [M 加三个编码字节，只识别完整报告，
 	// 避免把 [Markdown] 等普通文本误判为终端控制序列
 	return strings.HasPrefix(value, "[M") && len([]rune(value)) == 5
 }

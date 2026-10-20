@@ -16,8 +16,8 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// SessionManager 管理一个树形 JSONL 会话：entry 按文件序追加，leaf 指向当前分支位置，
-// 设置先留在内存，首条对话消息发布 JSONL；持久化成功后才推进内存
+// SessionManager 管理一个树形 JSONL 会话：entry 按文件序追加，leaf 指向当前分支位置；
+// 设置先留在内存，首条对话消息发布 JSONL，持久化成功后才推进内存
 type SessionManager struct {
 	header      Header
 	entries     []Entry
@@ -29,7 +29,7 @@ type SessionManager struct {
 	pending     []Entry
 	// repairOffset 在追加回退失败时保留原长度，下次提交先修复再补写
 	repairOffset *int64
-	// needsNewline 表示会话文件末尾缺少换行（加载残行文件后为 true），追加前先补写
+	// needsNewline 表示会话文件末尾缺少换行，追加前先补写
 	needsNewline bool
 	// fileHistoryRecords 保留 JSONL 中不参与树结构的文件历史记录
 	fileHistoryRecords []filehistory.Record
@@ -59,12 +59,24 @@ func dirName(cwd string) string {
 	return "--" + replacer.Replace(trimmed) + "--"
 }
 
-// New 在 dir 下创建新会话；header 只在内存，正式发布延迟到首条对话消息
+// New 在 dir 下创建新会话，header 只在内存，正式发布延迟到首条对话消息
 func New(cwd, dir string) *SessionManager {
+	return newWithID(cwd, dir, newSessionID())
+}
+
+// NewWithID 创建指定 ID 且延迟发布的会话
+func NewWithID(cwd, dir, id string) (*SessionManager, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	return newWithID(cwd, dir, id), nil
+}
+
+func newWithID(cwd, dir, id string) *SessionManager {
 	header := Header{
 		Type:      TypeSession,
 		Version:   CurrentVersion,
-		ID:        newSessionID(),
+		ID:        id,
 		Timestamp: nowRFC3339(),
 		Cwd:       cwd,
 	}
@@ -77,8 +89,8 @@ func New(cwd, dir string) *SessionManager {
 	}
 }
 
-// Open 加载指定会话文件；加载成功即视为已完成首次 flush，后续追加直接落盘。
-// 0 字节文件按新会话处理并保留显式路径；文件末尾缺换行时补写一个，防止追加与残行粘连
+// Open 加载指定会话文件，加载成功即视为已完成首次 flush；
+// 0 字节文件按新会话处理，文件末尾缺换行时补写一个，防止追加与残行粘连
 func Open(path, cwd string) (*SessionManager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -87,7 +99,6 @@ func Open(path, cwd string) (*SessionManager, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		m := New(cwd, filepath.Dir(path))
 		m.sessionFile = path
-		// 空文件不含任何内容，移除后再发布，避免残留空文件阻塞首次提交
 		_ = os.Remove(path)
 		return m, nil
 	}
@@ -114,7 +125,6 @@ func Open(path, cwd string) (*SessionManager, error) {
 	return m, nil
 }
 
-// LastEntryID 返回最近追加的 entry ID；还没有任何 entry 时返回空串
 func (m *SessionManager) LastEntryID() string {
 	if len(m.entries) == 0 {
 		return ""
@@ -122,17 +132,14 @@ func (m *SessionManager) LastEntryID() string {
 	return m.entries[len(m.entries)-1].base().ID
 }
 
-// AppendMessage 追加一条消息，以当前 leaf 为父节点并推进 leaf
 func (m *SessionManager) AppendMessage(msg llm.Message) error {
 	return m.appendEntry(&MessageEntry{Message: priceMessage(msg)})
 }
 
-// AppendModelChange 记录中途切换模型
 func (m *SessionManager) AppendModelChange(provider, modelID string) error {
 	return m.appendEntry(&ModelChangeEntry{Provider: provider, ModelID: modelID})
 }
 
-// AppendThinkingLevelChange 记录思考级别变化
 func (m *SessionManager) AppendThinkingLevelChange(level string) error {
 	return m.appendEntry(&ThinkingLevelChangeEntry{ThinkingLevel: level})
 }
@@ -156,7 +163,6 @@ func (m *SessionManager) Name() string {
 	return ""
 }
 
-// AppendUsage 记录不依附消息的模型用量，note 为空时不写入
 func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usage, note string) error {
 	if usage.Cost == nil {
 		usage.Cost = llm.PriceUsage(llm.Model{Provider: provider, ID: model}, usage)
@@ -170,12 +176,11 @@ func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usa
 	})
 }
 
-// AppendCompaction 追加不带文件列表的压缩点；firstKeptEntryID 为空时存自身 ID 表示零保留
+// AppendCompaction 追加不带文件列表的压缩点，firstKeptEntryID 为空时存自身 ID 表示零保留
 func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage) error {
 	return m.AppendCompactionWithDetails(summary, firstKeptEntryID, tokensBefore, systemMessage, usage, nil)
 }
 
-// AppendCompactionWithDetails 追加带结构化文件列表的压缩点
 func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *compact.FileLists) error {
 	e := &CompactionEntry{
 		Summary:          summary,
@@ -218,7 +223,7 @@ func (m *SessionManager) AppendContextEdit(targetID string, replacement *Replace
 	return m.appendEntry(&ContextEditEntry{TargetID: targetID, Replacement: replacement})
 }
 
-// Branch 只移动内存 leaf 到指定 entry，下一次追加形成新分支，不改写文件
+// Branch 只移动内存 leaf 到指定 entry，下一次追加形成新分支
 func (m *SessionManager) Branch(entryID string, keepIDs ...string) error {
 	if m.HasPending() {
 		return &CommitError{Err: errors.New("session: retry pending submission before branching")}
@@ -231,16 +236,15 @@ func (m *SessionManager) Branch(entryID string, keepIDs ...string) error {
 	return nil
 }
 
-// CommitError 表示待提交记录未落盘，调用者必须停止模型与工具的后续推进
+// CommitError 表示待提交记录未落盘，调用者必须停止后续推进
 type CommitError struct{ Err error }
 
 func (e *CommitError) Error() string { return e.Err.Error() }
 func (e *CommitError) Unwrap() error { return e.Err }
 
-// Path 返回会话路径；未命名且无对话时正式文件尚不存在
+// Path 返回会话路径，正式文件在首次发布前尚不存在
 func (m *SessionManager) Path() string { return m.sessionFile }
 
-// Delete 删除当前会话的正式文件与未发布草稿
 func (m *SessionManager) Delete() error {
 	var errs []error
 	for _, path := range []string{m.sessionFile, m.sessionFile + ".draft"} {
@@ -251,17 +255,17 @@ func (m *SessionManager) Delete() error {
 	return errors.Join(errs...)
 }
 
-// ID 返回会话命名空间
 func (m *SessionManager) ID() string { return m.header.ID }
 
-// Warnings 返回加载或运行期间记录的降级警告。
+// Cwd 返回会话 header 记录的工作目录
+func (m *SessionManager) Cwd() string { return m.header.Cwd }
+
 func (m *SessionManager) Warnings() []string {
 	m.persistMu.Lock()
 	defer m.persistMu.Unlock()
 	return append([]string(nil), m.warnings...)
 }
 
-// AddWarning 记录一个不阻止会话继续运行的降级警告。
 func (m *SessionManager) AddWarning(warning string) {
 	if warning == "" {
 		return
@@ -288,16 +292,14 @@ func boundedWarnings(warnings []string) []string {
 	return append([]string(nil), warnings[len(warnings)-maxSessionWarnings:]...)
 }
 
-// AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来。
+// AttachFileHistory 把当前 session 的 JSONL metadata 与备份目录连接起来
 func (m *SessionManager) AttachFileHistory(root string) {
-	// 恢复会话时只让当前活跃路径参与新快照，避免旧分支的文件集合污染当前 turn。
+	// 恢复会话时只让当前活跃路径参与新快照，避免旧分支的文件集合污染当前 turn
 	m.fileHistory = filehistory.New(root, m.ID(), m.fileHistoryRecords, m.activeUserIDs(), m.appendFileHistoryRecord)
 }
 
-// FileHistory 返回当前 session 的文件历史；未装配时返回 nil。
 func (m *SessionManager) FileHistory() *filehistory.Store { return m.fileHistory }
 
-// MakeFileHistorySnapshot 在 user entry 成功持久化后建立 turn 起点快照。
 func (m *SessionManager) MakeFileHistorySnapshot(messageID string) error {
 	if m.fileHistory == nil {
 		return nil
@@ -305,7 +307,6 @@ func (m *SessionManager) MakeFileHistorySnapshot(messageID string) error {
 	return m.fileHistory.MakeSnapshot(messageID)
 }
 
-// PruneFileHistoryToActiveBranch 丢弃当前上下文回滚后不再活跃的运行态追踪。
 func (m *SessionManager) PruneFileHistoryToActiveBranch(keepIDs ...string) {
 	if m.fileHistory != nil {
 		m.fileHistory.PruneActiveBranch(m.activeUserIDs(keepIDs...))
@@ -327,10 +328,9 @@ func (m *SessionManager) activeUserIDs(keepIDs ...string) map[string]bool {
 	return ids
 }
 
-// HasPending 表示存在尚未成功落盘的候选记录
 func (m *SessionManager) HasPending() bool { return len(m.pending) > 0 }
 
-// PendingMessages 返回待写批次的消息副本，宿主据此续接提交之后的工作
+// PendingMessages 返回待写批次的消息副本
 func (m *SessionManager) PendingMessages() []llm.Message {
 	var messages []llm.Message
 	for _, e := range m.pending {
@@ -341,7 +341,6 @@ func (m *SessionManager) PendingMessages() []llm.Message {
 	return messages
 }
 
-// PendingContextEdit 返回待写批次中的上下文编辑；没有则返回 nil
 func (m *SessionManager) PendingContextEdit() *ContextEditEntry {
 	for _, e := range m.pending {
 		if edit, ok := e.(*ContextEditEntry); ok {
@@ -387,7 +386,6 @@ func priceMessage(message llm.Message) llm.Message {
 	}
 }
 
-// appendEntry 准备候选记录，写入失败时保留它供显式重试
 func (m *SessionManager) appendEntry(e Entry) error { return m.appendEntries([]Entry{e}) }
 
 func (m *SessionManager) appendEntries(entries []Entry) error {
@@ -414,7 +412,6 @@ func (m *SessionManager) appendEntries(entries []Entry) error {
 	return m.RetryPending()
 }
 
-// RetryPending 原样补写候选记录；成功前 entries、索引与 leaf 都保持原值
 func (m *SessionManager) RetryPending() error {
 	if !m.HasPending() {
 		return nil
@@ -437,7 +434,7 @@ func (m *SessionManager) RetryPending() error {
 	return nil
 }
 
-// persist 先编码整个批次，首次发布直接创建正式文件，后续追加在失败时回退长度
+// persist 先编码整个批次，首次发布创建正式文件，后续追加在失败时回退长度
 func (m *SessionManager) persist(entries []Entry) error {
 	m.persistMu.Lock()
 	defer m.persistMu.Unlock()
@@ -529,7 +526,7 @@ func (m *SessionManager) persist(entries []Entry) error {
 	return nil
 }
 
-// appendFileHistoryRecord 追加 metadata，不改变 entries、leaf 或树父链。
+// appendFileHistoryRecord 追加 metadata，不改变 entries、leaf 或树父链
 func (m *SessionManager) appendFileHistoryRecord(record filehistory.Record) error {
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -585,7 +582,6 @@ func (m *SessionManager) appendFileHistoryRecord(record filehistory.Record) erro
 	return nil
 }
 
-// entryTypeName 返回 entry 对应的类型常量
 func entryTypeName(e Entry) string {
 	switch e.(type) {
 	case *MessageEntry:
@@ -607,7 +603,7 @@ func entryTypeName(e Entry) string {
 	}
 }
 
-// shouldPublish 产生首条对话后发布正式会话，其余设置只留在内存
+// shouldPublish 产生首条对话后发布正式会话
 func shouldPublish(entries []Entry) bool {
 	for _, e := range entries {
 		me, ok := e.(*MessageEntry)
@@ -622,7 +618,6 @@ func shouldPublish(entries []Entry) bool {
 	return false
 }
 
-// onActiveBranch 判断 entry 是否在当前 leaf 的路径上
 func (m *SessionManager) onActiveBranch(entryID string) bool {
 	current := m.leafID
 	for current != "" {
@@ -642,7 +637,6 @@ func (m *SessionManager) onActiveBranch(entryID string) bool {
 	return false
 }
 
-// newEntryID 生成不与现有索引冲突的 entry ID
 func (m *SessionManager) newEntryID() string {
 	for {
 		id := randomHexID()
