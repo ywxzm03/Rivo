@@ -153,7 +153,7 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 		aborted = !wait(ctx, 40*time.Millisecond)
 	}
 	if !aborted {
-		message.Divider = &tui.TurnDividerView{Elapsed: time.Since(start)}
+		message.Divider = &tui.TurnDividerView{Elapsed: time.Since(start), FinishedAt: time.Now()}
 	}
 	if aborted {
 		// 与真实行为一致：partial 正文 + 消息级取消标记
@@ -253,7 +253,7 @@ func main() {
 		if *scene == "markdown" {
 			answer = exampleMarkdown
 		}
-		assistant := tui.Message{ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Divider: &tui.TurnDividerView{Elapsed: 12 * time.Second}}
+		assistant := tui.Message{ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Divider: &tui.TurnDividerView{Elapsed: 12 * time.Second, FinishedAt: time.Now()}}
 		if *scene == "conversation" || *scene == "model" {
 			assistant.ToolGroup = exampleToolGroup()
 		}

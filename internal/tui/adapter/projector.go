@@ -373,7 +373,7 @@ func (r *Runtime) addDividerLocked() int {
 		return -1
 	}
 	index := r.lastAssistantIndex
-	r.messages[index].Divider = &tui.TurnDividerView{Elapsed: elapsed}
+	r.messages[index].Divider = &tui.TurnDividerView{Elapsed: elapsed, FinishedAt: time.Now()}
 	r.messages[index].Revision++
 	return index
 }

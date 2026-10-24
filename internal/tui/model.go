@@ -97,9 +97,10 @@ type ToolGroupView struct {
 	Sealed   bool
 }
 
-// TurnDividerView 标记一个 turn 的最终工作耗时
+// TurnDividerView 标记一个 turn 的最终工作耗时与结束时刻
 type TurnDividerView struct {
-	Elapsed time.Duration
+	Elapsed    time.Duration
+	FinishedAt time.Time
 }
 
 // Message 是显示投影，ID 在流式更新中保持稳定

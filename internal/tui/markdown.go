@@ -2,7 +2,6 @@ package tui
 
 import (
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/glamour"
 	style "github.com/charmbracelet/glamour/ansi"
@@ -152,7 +151,7 @@ func (m *Model) renderMessage(message Message) string {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
 	if message.Role == "divider" && message.Divider != nil {
-		return dividerLine(m.width, message.Divider.Elapsed)
+		return dividerLine(m.width, message.Divider)
 	}
 	if message.ToolGroup != nil {
 		group := m.renderToolGroup(message.ToolGroup, width)
@@ -167,7 +166,7 @@ func (m *Model) renderMessage(message Message) string {
 			return strings.Join(parts, "\n\n")
 		}
 		if message.Divider != nil && message.Text != "" {
-			parts = append(parts, dividerLine(m.width, message.Divider.Elapsed))
+			parts = append(parts, dividerLine(m.width, message.Divider))
 		}
 		return strings.Join(parts, "\n\n")
 	}
@@ -233,14 +232,19 @@ func (m *Model) renderMessage(message Message) string {
 		parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 	}
 	if message.Divider != nil && message.Text != "" {
-		parts = append(parts, dividerLine(m.width, message.Divider.Elapsed))
+		parts = append(parts, dividerLine(m.width, message.Divider))
 	}
 	return strings.Join(parts, "\n\n")
 }
 
-// dividerLine 输出回合结束行：耗时，纯文字不带分隔线
-func dividerLine(width int, elapsed time.Duration) string {
-	return colored(mutedColor, ansi.Truncate(indent("Worked for "+formatElapsed(elapsed)), width, "…"))
+// dividerLine 输出回合结束行：耗时与结束时刻，纯文字不带分隔线
+func dividerLine(width int, divider *TurnDividerView) string {
+	label := "Worked for " + formatElapsed(divider.Elapsed)
+	if !divider.FinishedAt.IsZero() {
+		label += " • " + divider.FinishedAt.Format("15:04")
+	}
+	// 比正文多缩进一列，与正文块拉开一点距离
+	return colored(mutedColor, ansi.Truncate(" "+indent(label), width, "…"))
 }
 
 func indent(text string) string { return " " + strings.ReplaceAll(text, "\n", "\n ") }
