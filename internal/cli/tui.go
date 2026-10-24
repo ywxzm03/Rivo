@@ -40,12 +40,18 @@ func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, s
 	runtime.Attach(a)
 	output := newSerializedOutput(stdout)
 	model := tui.NewWithInitialPrompt(runtime.Snapshot(), tui.Handlers{
-		Request:           runtime.Request,
-		Context:           runtime.Context,
-		Cancel:            runtime.Cancel,
-		EnqueueSteering:   runtime.EnqueueSteering,
-		RestoreSteering:   runtime.RestoreSteering,
-		ReadClipboardData: readClipboardData,
+		Request:                 runtime.Request,
+		Context:                 runtime.Context,
+		Cancel:                  runtime.Cancel,
+		EnqueueSteering:         runtime.EnqueueSteering,
+		EnqueueSteeringMessage:  runtime.EnqueueSteeringMessage,
+		RestoreSteering:         runtime.RestoreSteering,
+		RestoreSteeringMessages: runtime.RestoreSteeringMessages,
+		EnqueueFollowUp:         runtime.EnqueueFollowUp,
+		EnqueueFollowUpMessage:  runtime.EnqueueFollowUpMessage,
+		RestoreFollowUpMessages: runtime.RestoreFollowUpMessages,
+		ClearFollowUp:           runtime.ClearFollowUp,
+		ReadClipboardData:       readClipboardData,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil

@@ -25,9 +25,15 @@ type queuedRunner interface {
 	ContinueSteering(context.Context) (*llm.AssistantMessage, error)
 }
 
+type followUpRunner interface {
+	ContinueFollowUp(context.Context) (*llm.AssistantMessage, error)
+}
+
 var ErrSteeringDuringCompaction = errors.New("app: steering is unavailable during context compaction")
 
-var ErrQueuedRunnerUnavailable = errors.New("app: queued steering runner is unavailable")
+var ErrFollowUpDuringCompaction = errors.New("app: follow-up is unavailable during context compaction")
+
+var ErrQueuedRunnerUnavailable = errors.New("app: queued runner is unavailable")
 
 // 压缩原因，随 compaction 事件暴露给消费者
 const (
@@ -94,6 +100,32 @@ func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 		return errors.New("app: runner does not support structured image steering")
 	}
 	return c.Agent.Steer(userMessageText(input))
+}
+
+func (c *Coordinator) EnqueueFollowUp(input string) error {
+	return c.EnqueueFollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// EnqueueFollowUpMessage 在压缩状态锁内接受一条 follow-up
+func (c *Coordinator) EnqueueFollowUpMessage(input llm.UserMessage) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.compacting {
+		return ErrFollowUpDuringCompaction
+	}
+	if c.Agent == nil {
+		return errors.New("app: follow-up runner is unavailable")
+	}
+	if runner, ok := c.Agent.(interface{ FollowUpMessage(llm.UserMessage) error }); ok {
+		return runner.FollowUpMessage(input)
+	}
+	if userMessageHasImages(input) {
+		return errors.New("app: runner does not support structured image follow-up")
+	}
+	if runner, ok := c.Agent.(interface{ FollowUp(string) error }); ok {
+		return runner.FollowUp(userMessageText(input))
+	}
+	return errors.New("app: follow-up runner is unavailable")
 }
 
 // SetPromptSections 设置基线分节；加锁与 preparePrompt 的读取互斥，避免并发路径下数据竞争
@@ -240,6 +272,16 @@ func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage
 	return c.finishRun(ctx, reply, runErr)
 }
 
+func (c *Coordinator) ContinueFollowUp(ctx context.Context) (*llm.AssistantMessage, error) {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	if runner, ok := c.Agent.(followUpRunner); ok {
+		reply, runErr := runner.ContinueFollowUp(ctx)
+		return c.finishRun(ctx, reply, runErr)
+	}
+	return nil, ErrQueuedRunnerUnavailable
+}
+
 // finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
 func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage, runErr error) (*llm.AssistantMessage, error) {
 	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
@@ -346,6 +388,8 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态
 	rebuilt := c.m.BuildContext()
+	// 结束事件表示 compaction 边界已关闭：先解除 compacting，TUI 才能按原序转发暂存输入
+	c.setCompacting(false)
 	_ = c.emit(llm.CompactionEndEvent{
 		Reason:           reason,
 		Summary:          result.Summary,
@@ -355,6 +399,13 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 		Usage:            result.Usage,
 	})
 	return nil
+}
+
+// setCompacting 更新压缩状态，供入队边界与结束事件共享同一临界区
+func (c *Coordinator) setCompacting(value bool) {
+	c.stateMu.Lock()
+	c.compacting = value
+	c.stateMu.Unlock()
 }
 
 // omitLastAttempt 为最后落盘的失败尝试追加 context_edit 省略

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
@@ -211,6 +212,55 @@ func TestInputReaderRoutesAltUpToDequeue(t *testing.T) {
 				t.Fatalf("editor = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestNormalizeAltArrows(t *testing.T) {
+	for _, test := range []struct {
+		in, out string
+	}{
+		{"\x1b[1;9B", "\x1b[1;3B"},
+		{"\x1b[1;9b", "\x1b[1;3B"},
+		{"\x1b[1;9A", "\x1b[1;3A"},
+		{"\x1b[1;3b", "\x1b[1;3B"},
+		{"\x1b[1;5B", "\x1b[1;5B"},
+		{"plain", "plain"},
+		// bracketed paste 载荷必须逐字节保留
+		{"\x1b[200~\x1b[1;9B\x1b[201~", "\x1b[200~\x1b[1;9B\x1b[201~"},
+	} {
+		if got := string(normalizeAltArrows([]byte(test.in))); got != test.out {
+			t.Fatalf("normalizeAltArrows(%q) = %q, want %q", test.in, got, test.out)
+		}
+	}
+}
+
+func TestInputReaderRoutesMetaAltDownToFollowUp(t *testing.T) {
+	model := testModel(80, 24)
+	restored := 0
+	model.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		restored++
+		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// Meta 变体不会由 Bubble Tea 直接识别，必须在读取器内规范化
+	reader := NewInputReader(strings.NewReader("draft\x1b[1;9B\r"))
+	defer reader.Close()
+	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
+				return tea.QuitMsg{}
+			}
+			return msg
+		}))
+	if _, err := program.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 {
+		t.Fatalf("restore calls = %d, want one", restored)
+	}
+	if got, want := model.editor.Value(), "queued follow-up\n\ndraft"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
 	}
 }
 

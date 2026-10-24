@@ -288,6 +288,27 @@ func (a *App) TakeSteeringMessages() []llm.UserMessage {
 	return a.agent.TakeSteeringMessages()
 }
 
+func (a *App) TakeFollowUp() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeFollowUp()
+}
+
+func (a *App) TakeFollowUpMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeFollowUpMessages()
+}
+
+func (a *App) ClearFollowUp() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.ClearFollowUp()
+}
+
 // Skills 返回当前已发现技能的副本
 func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
 
@@ -315,6 +336,27 @@ func (a *App) SteeringRevision() uint64 {
 		return 0
 	}
 	return a.agent.SteeringRevision()
+}
+
+func (a *App) FollowUpMessages() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.FollowUpMessages()
+}
+
+func (a *App) FollowUpUserMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.FollowUpUserMessages()
+}
+
+func (a *App) FollowUpRevision() uint64 {
+	if a == nil || a.agent == nil {
+		return 0
+	}
+	return a.agent.FollowUpRevision()
 }
 
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
