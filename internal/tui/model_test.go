@@ -95,14 +95,15 @@ func press(m *Model, key tea.KeyType) tea.Cmd {
 // assertFrame 检查组件原始高度，避免最终截断掩盖布局溢出
 func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
-	dock := m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems()))
+	dock := 1 + m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems())) + m.subagentRows()
 	if m.selector != nil {
-		dock = len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
-		if dock != m.selector.height(m.height-2) {
-			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), dock)
+		selectorRows := len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
+		dock = 1 + selectorRows + m.subagentRows()
+		if selectorRows != m.selector.height(m.height-2) {
+			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), selectorRows)
 		}
 	}
-	if got := m.viewport.Height + dock + 1; got != m.height {
+	if got := m.viewport.Height + dock; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
 	}
 	lines := strings.Split(m.View(), "\n")
@@ -114,8 +115,9 @@ func assertFrame(t *testing.T, m *Model) {
 			t.Fatalf("line %d width = %d, want <= %d", i, width, m.width)
 		}
 	}
-	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "/project/Rivo") {
-		t.Fatal("cwd footer moved or disappeared")
+	statusIndex := len(lines) - 1 - m.subagentRows()
+	if statusIndex < 0 || !strings.Contains(ansi.Strip(lines[statusIndex]), "/project/Rivo") {
+		t.Fatal("cwd status bar moved or disappeared")
 	}
 }
 
@@ -741,27 +743,24 @@ func TestStreamingUpsertFlushAndScroll(t *testing.T) {
 
 func TestFooterSingleLine(t *testing.T) {
 	m := testModel(120, 30)
-	footer := ansi.Strip(m.footer())
-	if strings.Count(footer, "\n") != 0 {
-		t.Fatalf("footer should be a single line: %q", footer)
+	status := ansi.Strip(m.statusBar())
+	if strings.Count(status, "\n") != 0 {
+		t.Fatalf("status bar should be a single line: %q", status)
 	}
-	if ansi.StringWidth(footer) != 120 {
-		t.Fatalf("footer width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(footer), footer)
+	if ansi.StringWidth(status) != 120 {
+		t.Fatalf("status bar width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(status), status)
 	}
-	if !strings.HasPrefix(footer, "/project/Rivo [feat(tui)/fullscreen-tui]") {
-		t.Fatalf("footer should start with cwd [branch]: %q", footer)
-	}
-	if !strings.HasSuffix(footer, "model-00 • high") {
-		t.Fatalf("footer should end with model and thinking: %q", footer)
+	if !strings.HasPrefix(status, "/project/Rivo [feat(tui)/fullscreen-tui]") || !strings.HasSuffix(status, "model-00 • high") {
+		t.Fatalf("status bar should align cwd and model/thinking: %q", status)
 	}
 }
 
 func TestFooterWithoutBranch(t *testing.T) {
 	m := testModel(120, 30)
 	m.state.Branch = ""
-	footer := ansi.Strip(m.footer())
-	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "[") {
-		t.Fatalf("empty branch should drop brackets: %q", footer)
+	status := ansi.Strip(m.statusBar())
+	if !strings.HasPrefix(status, "/project/Rivo") || strings.Contains(status, "[") {
+		t.Fatalf("empty branch should drop brackets: %q", status)
 	}
 }
 
@@ -773,18 +772,18 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatal("snapshot aliases nested slices")
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(m.footer()), "(provider-0)") {
-		t.Fatal("wide footer should include provider")
+	if !strings.Contains(ansi.Strip(m.statusBar()), "(provider-0)") {
+		t.Fatal("wide status bar should include provider")
 	}
 	s = testState()
 	s.ModelKey, s.Thinking = s.Models[3].Key(), "low"
 	m.Update(OperationDoneMsg{Snapshot: &s})
-	if !strings.Contains(ansi.Strip(m.footer()), "model-03 • low") {
-		t.Fatalf("snapshot footer = %q", ansi.Strip(m.footer()))
+	if !strings.Contains(ansi.Strip(m.statusBar()), "model-03 • low") {
+		t.Fatalf("snapshot status bar = %q", ansi.Strip(m.statusBar()))
 	}
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
-	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
-		t.Fatal("narrow footer should omit provider")
+	if strings.Contains(ansi.Strip(m.statusBar()), "(provider-") {
+		t.Fatal("narrow status bar should omit provider")
 	}
 }
 

@@ -68,6 +68,18 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 			edits[ce.TargetID] = ce
 		}
 	}
+	if len(edits) > 0 {
+		ctx.ContentReplacements = make(map[string][]llm.Content, len(edits))
+		for targetID, edit := range edits {
+			if edit.Replacement == nil {
+				ctx.ContentReplacements[targetID] = nil
+				continue
+			}
+			content := make([]llm.Content, len(edit.Replacement.Content))
+			copy(content, edit.Replacement.Content)
+			ctx.ContentReplacements[targetID] = content
+		}
+	}
 
 	// 4.生成上下文条目：compaction 与被省略的目标有特殊处理，其余类型不产出条目
 	pathIdx := make(map[string]int, len(path))

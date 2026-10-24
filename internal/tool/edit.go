@@ -86,7 +86,7 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolveEditPath(path)
+	absPath, err := resolveEditPathContext(ctx, path)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -193,6 +193,10 @@ func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 
 // resolveEditPath 处理路径前缀与空格变体
 func resolveEditPath(path string) (string, error) {
+	return resolveEditPathContext(context.Background(), path)
+}
+
+func resolveEditPathContext(ctx context.Context, path string) (string, error) {
 	path = strings.Map(func(r rune) rune {
 		switch r {
 		case '\u00a0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
@@ -226,7 +230,18 @@ func resolveEditPath(path string) (string, error) {
 		}
 		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 	}
-	return filepath.Abs(path)
+	if !filepath.IsAbs(path) {
+		cwd := llm.CurrentWorkingDir(ctx)
+		if cwd == "" {
+			var err error
+			cwd, err = os.Getwd()
+			if err != nil {
+				return "", err
+			}
+		}
+		path = filepath.Join(cwd, path)
+	}
+	return filepath.Clean(path), nil
 }
 
 func isWindowsDrivePath(path string) bool {

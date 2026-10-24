@@ -95,6 +95,8 @@ func (m *Model) updateCursorPosition() {
 	}
 	info := m.editor.LineInfo()
 	visibleRow := min(max(0, info.RowOffset), max(0, m.editor.Height()-1))
+	// The cwd/branch status bar is below the input editor, so the editor starts
+	// immediately after the transcript viewport.
 	m.cursorRow.Store(int64(m.viewport.Height + 2 + visibleRow))
 	m.cursorColumn.Store(int64(3 + info.CharOffset))
 }

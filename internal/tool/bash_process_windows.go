@@ -49,7 +49,9 @@ func configureShellProcess(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		_ = killShellProcess(cmd.Process.Pid)
+		if err := killShellProcess(cmd.Process.Pid); err != nil {
+			return err
+		}
 		return os.ErrProcessDone
 	}
 	cmd.WaitDelay = 500 * time.Millisecond

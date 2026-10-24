@@ -345,6 +345,9 @@ func isTerminalControlKey(msg tea.KeyMsg) bool {
 		return false
 	}
 	value := string(msg.Runes)
+	if value == "\x1b" {
+		return false
+	}
 	if strings.ContainsRune(value, '\x1b') {
 		return true
 	}

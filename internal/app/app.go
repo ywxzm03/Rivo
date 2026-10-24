@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/subagent"
 	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
@@ -29,9 +32,10 @@ type App struct {
 	cfg            Config
 	onEvent        llm.AgentEventSink
 	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
-	loader *prompt.Loader
-	cwd    string
-	tools  []llm.Tool
+	loader    *prompt.Loader
+	cwd       string
+	tools     []llm.Tool
+	subagents *subagent.Manager
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
@@ -154,12 +158,29 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 	sm.AttachFileHistory(agentDir)
 
-	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}}
+	manager := subagent.NewManager(subagent.NewStore(), nil)
+	var notificationMu sync.Mutex
+	var notificationBatch int
+	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{Background: tool.NewBackgroundBashRunner(manager.Store())}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}, manager.AgentTool(), manager.SendMessageTool(), manager.TaskStopTool()}
 	if runtime.GOOS == "windows" {
 		tools = append(tools, &tool.PowerShell{})
 	}
 
 	coord := NewCoordinator(sm, onEvent)
+	coord.SetTransientMessages(func() []llm.Message {
+		notifications := manager.Store().PeekNotifications()
+		notificationMu.Lock()
+		notificationBatch = len(notifications)
+		notificationMu.Unlock()
+		return subagentNotificationMessages(notifications)
+	})
+	coord.SetTransientAck(func() {
+		notificationMu.Lock()
+		count := notificationBatch
+		notificationBatch = 0
+		notificationMu.Unlock()
+		manager.Store().AckNotifications(count)
+	})
 	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
@@ -189,9 +210,22 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		streamFn,
 		coord.Handle,
 	)
+	ag.WorkingDir = cwd
 	ag.PrepareRequest = coord.PrepareRequest
 	ag.CommitMessages = coord.CommitMessages
 	coord.Agent = ag
+	manager.SetFactory(newSubagentFactory(subagentFactoryConfig{
+		ParentCwd:   cwd,
+		SessionDir:  filepath.Dir(sm.Path()),
+		AgentDir:    agentDir,
+		ParentModel: model,
+		Thinking:    cfg.ThinkingLevel,
+		StreamFn:    streamFn,
+		ParentTools: tools,
+		TaskStore:   manager.Store(),
+		OnEvent:     onEvent,
+	}))
+	manager.SetResumeResolver(subagentResumeResolver(filepath.Dir(sm.Path())))
 	return &App{
 		agent:       ag,
 		session:     sm,
@@ -201,7 +235,74 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		loader:      loader,
 		cwd:         cwd,
 		tools:       tools,
+		subagents:   manager,
 	}, nil
+}
+
+func subagentNotificationMessages(notifications []subagent.TaskNotification) []llm.Message {
+	if len(notifications) == 0 {
+		return nil
+	}
+	result := make([]llm.Message, 0, len(notifications))
+	for _, notification := range notifications {
+		payload, err := json.Marshal(notification)
+		if err != nil {
+			continue
+		}
+		result = append(result, llm.UserMessage{Content: []llm.Content{llm.TextContent{
+			Text: "<task-notification>\n" + string(payload) + "\n</task-notification>",
+		}}})
+	}
+	return result
+}
+
+// SubagentStore exposes the root task store for TUI task projections and controls.
+func (a *App) SubagentStore() *subagent.Store {
+	if a.subagents == nil {
+		return nil
+	}
+	return a.subagents.Store()
+}
+
+func (a *App) EnterSubagentView(taskID string) bool {
+	store := a.SubagentStore()
+	return store != nil && store.EnterView(taskID)
+}
+
+func (a *App) ExitSubagentView() {
+	if store := a.SubagentStore(); store != nil {
+		store.ExitView()
+	}
+}
+
+func (a *App) EvictSubagent(taskID string) bool {
+	store := a.SubagentStore()
+	return store != nil && store.Evict(taskID)
+}
+
+func (a *App) StopSubagent(taskID string) error {
+	store := a.SubagentStore()
+	if store == nil {
+		return fmt.Errorf("app: subagent manager is unavailable")
+	}
+	_, err := (&subagent.TaskStopTool{Store: store}).Execute(context.Background(), map[string]any{"task_id": taskID})
+	return err
+}
+
+// ContinueSubagent resumes a terminal child while keeping its stable task ID.
+func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (subagent.AgentToolLaunched, error) {
+	if a.subagents == nil {
+		return subagent.AgentToolLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
+	}
+	return a.subagents.Continue(ctx, taskID, prompt)
+}
+
+// QueueSubagentMessage adds structured input to a running child FIFO.
+func (a *App) QueueSubagentMessage(taskID string, message llm.UserMessage) error {
+	if a.subagents == nil {
+		return fmt.Errorf("app: subagent manager is unavailable")
+	}
+	return a.subagents.Store().EnqueuePendingMessage(taskID, message)
 }
 
 // Run 经编排层驱动一次运行

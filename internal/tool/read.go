@@ -91,7 +91,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 
 	// 1.解析路径后整读
-	absPath, err := resolvePath(path)
+	absPath, err := resolvePathContext(ctx, path)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

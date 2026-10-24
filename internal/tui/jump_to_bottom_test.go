@@ -33,7 +33,7 @@ func TestJumpToBottomPillUsesClaudeLabelAndOverlay(t *testing.T) {
 	}
 	bounds, ok := m.jumpPillBounds()
 	if !ok || bounds.y != m.viewport.Height-1 {
-		t.Fatalf("pill bounds = %+v, visible=%v, want last viewport row", bounds, ok)
+		t.Fatalf("pill bounds = %+v, visible=%v, want last transcript row", bounds, ok)
 	}
 	assertFrame(t, m)
 }

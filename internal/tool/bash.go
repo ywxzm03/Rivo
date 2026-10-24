@@ -14,7 +14,64 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Bash struct{}
+type Bash struct {
+	Background BackgroundRunner
+}
+
+// ReadOnlyBash keeps the Bash schema available to Explore/Plan while rejecting
+// commands that can mutate files or launch an unrestricted interpreter.
+type ReadOnlyBash struct{ Bash *Bash }
+
+func NewReadOnlyBash(bash *Bash) *ReadOnlyBash { return &ReadOnlyBash{Bash: bash} }
+
+func (b *ReadOnlyBash) Name() string { return b.Bash.Name() }
+func (b *ReadOnlyBash) Description() string {
+	return b.Bash.Description() + " Read-only mode permits inspection commands only."
+}
+func (b *ReadOnlyBash) Parameters() map[string]any { return b.Bash.Parameters() }
+func (b *ReadOnlyBash) PromptSnippet() string      { return b.Bash.PromptSnippet() }
+func (b *ReadOnlyBash) PromptGuidelines() []string {
+	return append(b.Bash.PromptGuidelines(), "In read-only mode, use Bash only for inspection commands.")
+}
+func (b *ReadOnlyBash) ExecutionMode() llm.ToolExecutionMode { return b.Bash.ExecutionMode() }
+
+func (b *ReadOnlyBash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
+	command, _ := args["command"].(string)
+	if !readOnlyShellCommand(command) || args["run_in_background"] == true {
+		return llm.ToolResult{}, fmt.Errorf("bash: command is unavailable in read-only mode")
+	}
+	return b.Bash.Execute(ctx, args)
+}
+
+func readOnlyShellCommand(command string) bool {
+	if strings.TrimSpace(command) == "" || strings.ContainsAny(command, ";|&><`$(){}\r\n") {
+		return false
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	allowed := map[string]bool{"ls": true, "pwd": true, "cat": true, "head": true, "tail": true, "grep": true, "rg": true, "git": true, "wc": true, "file": true, "stat": true}
+	if strings.ContainsAny(fields[0], "/\\") || !allowed[fields[0]] {
+		return false
+	}
+	if fields[0] == "git" && len(fields) > 1 {
+		gitReadOnly := map[string]bool{"status": true, "log": true, "diff": true, "show": true, "branch": true, "rev-parse": true, "ls-files": true}
+		if !gitReadOnly[fields[1]] {
+			return false
+		}
+		for _, field := range fields[2:] {
+			if strings.Contains(field, "output") || field == "-o" || strings.Contains(field, "exec") || strings.Contains(field, "external-diff") || field == "--ext-diff" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type BackgroundRunner interface {
+	RunBackground(context.Context, map[string]any) (llm.ToolResult, error)
+}
 
 func (b *Bash) Name() string { return "bash" }
 
@@ -25,14 +82,20 @@ func (b *Bash) PromptSnippet() string { return "Execute bash commands (ls, grep,
 func (b *Bash) PromptGuidelines() []string { return nil }
 
 func (b *Bash) Description() string {
-	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", defaultMaxLines, defaultMaxBytes/1024)
+	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds or run_in_background=true to start a BashTask and return its task ID.", defaultMaxLines, defaultMaxBytes/1024)
 }
 
 func (b *Bash) Parameters() map[string]any {
-	return shellParameters()
+	return bashParameters()
 }
 
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
+	if background, ok := args["run_in_background"].(bool); ok && background {
+		if b.Background == nil {
+			return llm.ToolResult{}, fmt.Errorf("bash: background execution is unavailable")
+		}
+		return b.Background.RunBackground(ctx, args)
+	}
 	return executeShellCommand(ctx, args, "bash", func(commandCtx context.Context, command string) (*exec.Cmd, error) {
 		bashPath, err := findBash()
 		if err != nil {

@@ -53,6 +53,10 @@ type Coordinator struct {
 	recovered bool
 	// promptSections 是当前基线分节，请求前与重放结果 diff
 	promptSections prompt.Sections
+	// transientMessages are request-only attachments such as subagent
+	// task-notifications; they are never committed to the session.
+	transientMessages func() []llm.Message
+	transientAck      func()
 	// mu 只保护基线分节；runMu 串行化编排
 	mu         sync.Mutex
 	runMu      sync.Mutex
@@ -107,6 +111,31 @@ func (c *Coordinator) PromptSections() prompt.Sections {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.promptSections
+}
+
+// SetTransientMessages installs a request-time message provider. The provider
+// is called after the persisted session projection is rebuilt and before the
+// model request is sent.
+func (c *Coordinator) SetTransientMessages(provider func() []llm.Message) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transientMessages = provider
+}
+
+func (c *Coordinator) SetTransientAck(ack func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transientAck = ack
+}
+
+func (c *Coordinator) takeTransientMessages() []llm.Message {
+	c.mu.Lock()
+	provider := c.transientMessages
+	c.mu.Unlock()
+	if provider == nil {
+		return nil
+	}
+	return provider()
 }
 
 // preparePrompt 在进入 Agent 之前对齐 system prompt：有差异时先落盘再压入内存，
@@ -178,6 +207,10 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 		}
 	}
 	current.Context.Messages = c.m.BuildContext().Messages()
+	current.Context.Messages = append(current.Context.Messages, c.takeTransientMessages()...)
+	c.mu.Lock()
+	current.TransientAck = c.transientAck
+	c.mu.Unlock()
 	current.Compacted = compacted
 	return current, nil
 }

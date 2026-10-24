@@ -122,7 +122,7 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
-	absPath, isDirectory, err := resolveGrepPath(options.searchPath)
+	absPath, isDirectory, err := resolveGrepPath(ctx, options.searchPath)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -174,8 +174,8 @@ func boolArg(args map[string]any, key string) bool {
 	return value
 }
 
-func resolveGrepPath(searchPath string) (string, bool, error) {
-	absPath, err := resolvePath(searchPath)
+func resolveGrepPath(ctx context.Context, searchPath string) (string, bool, error) {
+	absPath, err := resolvePathContext(ctx, searchPath)
 	if err != nil {
 		return "", false, err
 	}

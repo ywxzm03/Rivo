@@ -74,7 +74,7 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolvePath(options.searchPath)
+	absPath, err := resolvePathContext(ctx, options.searchPath)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

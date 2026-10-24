@@ -20,7 +20,7 @@ type jumpPillBounds struct {
 	left, right, y int
 }
 
-// layout 先为 footer 和输入坞分配高度，再把剩余空间交给消息视口
+// layout 先为底部状态区和输入坞分配高度，再把剩余空间交给消息视口
 func (m *Model) layout() {
 	if m.width == 0 {
 		return
@@ -53,15 +53,16 @@ func (m *Model) layout() {
 	if previousWidth != m.editor.Width() || previousHeight != m.editor.Height() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
-	dock := m.pendingRows() + m.editor.Height() + 2
+	// Reserve one row for the combined cwd/model status bar in the bottom status area.
+	dock := 1 + m.pendingRows() + m.editor.Height() + 2 + m.subagentRows()
 	if m.selector != nil {
 		m.selector.input.Width = max(1, m.width-3)
-		dock = m.selector.height(max(1, m.height-2))
+		dock = 1 + m.selector.height(max(1, m.height-2)) + m.subagentRows()
 	} else {
 		dock += m.completionRows(len(m.completionItems()))
 	}
 	m.viewport.Width = m.width
-	m.viewport.Height = max(0, m.height-1-dock)
+	m.viewport.Height = max(0, m.height-dock)
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -127,6 +128,7 @@ func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
 		return jumpPillBounds{}, false
 	}
 	left := (m.width - width) / 2
+	// The transcript starts at the first frame row; overlay its last visible row.
 	return jumpPillBounds{left: left, right: left + width, y: m.viewport.Height - 1}, true
 }
 
@@ -170,21 +172,28 @@ func (m *Model) jumpToBottom() {
 }
 
 func (m *Model) frameLines() []string {
-	var lines []string
+	lines := make([]string, 0, m.height)
 	if m.viewport.Height > 0 {
 		lines = append(lines, splitFrameLines(m.viewport.View())...)
 	}
 	if m.selector != nil {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
-		lines = append(lines, m.pendingLines()...)
+		if m.viewingTaskID == "" {
+			lines = append(lines, m.pendingLines()...)
+		}
 		label := ""
 		if m.busy {
 			label = m.spinner.View() + " " + m.status
 		} else if m.status != "" {
 			label = m.status
 		}
-		border := rule(m.width, label, inputBorder, false)
+		borderColor := inputBorder
+		if m.viewingTaskID != "" {
+			label = m.subagentDetailHeader()
+			borderColor = blueColor
+		}
+		border := rule(m.width, label, borderColor, false)
 		if m.copyNotice {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
@@ -199,17 +208,22 @@ func (m *Model) frameLines() []string {
 			lines = append(lines, splitFrameLines(completions)...)
 		}
 	}
-	lines = append(lines, splitFrameLines(m.footer())...)
+	// Keep cwd/branch and model/thinking on the same row at the top of the bottom status area.
+	lines = append(lines, m.statusBar())
+	if m.taskSelector {
+		lines = append(lines, colored(dimColor, "↑/↓ to select"))
+	}
+	lines = append(lines, m.taskRows()...)
 	return lines
 }
 
 // pendingRows 返回队列区域占用的行数
 func (m *Model) pendingRows() int {
-	if m.selector != nil || len(m.state.Steering) == 0 {
+	if m.viewingTaskID != "" || m.selector != nil || len(m.state.Steering) == 0 {
 		return 0
 	}
 	rows := len(m.state.Steering) + 2
-	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems())))
+	available := max(0, m.height-(m.editor.Height()+2)-m.completionRows(len(m.completionItems()))-1-m.subagentRows())
 	return min(rows, available)
 }
 
@@ -294,8 +308,40 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-// footer 输出单行状态栏：左侧工作目录与分支，右侧模型与思考等级，两端对齐
-func (m *Model) footer() string {
+// statusBar 在输入框下方同时显示工作目录、分支、模型和 thinking
+func (m *Model) statusBar() string {
+	left := m.cwdLabel()
+	right := m.modelStatus()
+	if m.width <= 0 {
+		return ""
+	}
+	left = ansi.Truncate(left, m.width, "…")
+	right = ansi.Truncate(right, max(0, m.width-ansi.StringWidth(left)-1), "…")
+	if ansi.StringWidth(left)+ansi.StringWidth(right) >= m.width {
+		left = truncateCwdLabel(left, max(0, m.width-ansi.StringWidth(right)-1))
+		right = ansi.Truncate(right, max(0, m.width-ansi.StringWidth(left)-1), "…")
+	}
+	gap := max(0, m.width-ansi.StringWidth(left)-ansi.StringWidth(right))
+	return colored(dimColor, left) + strings.Repeat(" ", gap) + colored(dimColor, right)
+}
+
+func truncateCwdLabel(label string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	branchStart := strings.LastIndex(label, " [")
+	if branchStart < 0 || !strings.HasSuffix(label, "]") {
+		return ansi.Truncate(label, width, "…")
+	}
+	branch := label[branchStart:]
+	branchWidth := ansi.StringWidth(branch)
+	if branchWidth >= width {
+		return ansi.Truncate(branch, width, "…")
+	}
+	return ansi.Truncate(label[:branchStart], width-branchWidth, "…") + branch
+}
+
+func (m *Model) cwdLabel() string {
 	cwd := m.state.Cwd
 	if home, err := os.UserHomeDir(); err == nil {
 		if cwd == home {
@@ -307,7 +353,10 @@ func (m *Model) footer() string {
 	if m.state.Branch != "" {
 		cwd += " [" + m.state.Branch + "]"
 	}
-	left := colored(dimColor, ansi.Truncate(cwd, m.width, "…"))
+	return cwd
+}
+
+func (m *Model) modelStatus() string {
 	model := m.currentModel()
 	right := model.ID
 	if len(model.Levels) > 1 {
@@ -317,18 +366,15 @@ func (m *Model) footer() string {
 		}
 		right += " • " + level
 	}
-	available := m.width - ansi.StringWidth(ansi.Strip(left))
 	withProvider := "(" + model.Provider + ") " + right
-	if len(m.state.Models) > 1 {
+	if m.width >= 60 && len(m.state.Models) > 1 {
 		providers := make(map[string]bool)
 		for _, model := range m.state.Models {
 			providers[model.Provider] = true
 		}
-		if len(providers) > 1 && ansi.StringWidth(withProvider) <= available {
+		if len(providers) > 1 && ansi.StringWidth(withProvider) <= m.width {
 			right = withProvider
 		}
 	}
-	right = colored(dimColor, ansi.Truncate(right, max(0, available), "…"))
-	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(ansi.Strip(left))-ansi.StringWidth(ansi.Strip(right))))
-	return left + gap + right
+	return right
 }

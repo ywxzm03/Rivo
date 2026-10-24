@@ -28,6 +28,16 @@ func shellParameters() map[string]any {
 	}
 }
 
+func bashParameters() map[string]any {
+	parameters := shellParameters()
+	properties := parameters["properties"].(map[string]any)
+	properties["run_in_background"] = map[string]any{
+		"type":        "boolean",
+		"description": "Run the command in the background and return a task ID",
+	}
+	return parameters
+}
+
 // executeShellCommand 执行 shell 命令并统一处理取消、超时、退出码和输出
 func executeShellCommand(
 	ctx context.Context,
@@ -46,9 +56,13 @@ func executeShellCommand(
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return llm.ToolResult{}, err
+	cwd := llm.CurrentWorkingDir(ctx)
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return llm.ToolResult{}, err
+		}
 	}
 	cmd, err := buildCommand(commandCtx, command)
 	if err != nil {

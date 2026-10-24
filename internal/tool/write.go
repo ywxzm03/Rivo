@@ -55,7 +55,7 @@ func (w *Write) Execute(ctx context.Context, args map[string]any) (llm.ToolResul
 	}
 
 	// 2.解析路径并创建父目录
-	absPath, err := resolvePath(path)
+	absPath, err := resolvePathContext(ctx, path)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

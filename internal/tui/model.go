@@ -129,6 +129,7 @@ type Snapshot struct {
 	Steering         []string
 	SteeringInputs   []llm.UserMessage
 	SteeringRevision uint64
+	Subagents        SubagentSnapshot
 }
 
 // ClipboardData 是系统剪贴板的一次读取结果
@@ -161,6 +162,8 @@ type Handlers struct {
 	ReadClipboard           func() (string, error)
 	ReadClipboardData       func() (ClipboardData, error)
 	WriteClipboard          func(string) error
+	SubagentRequest         func(SubagentRequest) tea.Cmd
+	SubagentSnapshot        func() tea.Cmd
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -232,53 +235,60 @@ type cachedMessage struct {
 
 // Model 独占全部显示状态
 type Model struct {
-	messageIndex     map[string]int
-	operationID      uint64
-	state            Snapshot
-	handlers         Handlers
-	width, height    int
-	editor           textarea.Model
-	viewport         viewport.Model
-	spinner          spinner.Model
-	selector         *selector
-	completion       int
-	completionHidden bool
-	history          []string
-	historyMessages  []llm.UserMessage
-	historyPos       int
-	draft            string
-	draftMessage     *llm.UserMessage
-	busy, closing    bool
-	steeringRestored bool
-	canceling        bool
-	compacting       bool
-	status           string
-	hideThinking     bool
-	showAllTools     bool
-	lastCtrlC        time.Time
-	flushPending     bool
-	cache            map[string]cachedMessage
-	steeringRevision uint64
-	markdownPreview  map[string]string
-	markdown         markdownRenderer
-	clock            func() time.Time
-	selectionAnchor  screenPoint
-	selectionFocus   screenPoint
-	selecting        bool
-	lastClick        screenPoint
-	lastClickAt      time.Time
-	mousePosition    screenPoint
-	mousePositionSet bool
-	mouseFragment    string
-	copyNoticeSeq    uint64
-	copyNotice       bool
-	contextNoticeSeq uint64
-	pastes           map[int]string
-	pasteCounter     int
-	images           map[int]llm.ImageContent
-	imageCounter     int
-	cursorRow        atomic.Int64
-	cursorColumn     atomic.Int64
+	messageIndex           map[string]int
+	operationID            uint64
+	state                  Snapshot
+	mainMessages           []Message
+	viewingTaskID          string
+	selectedTaskID         string
+	mainSelected           bool
+	taskSelector           bool
+	handlers               Handlers
+	width, height          int
+	editor                 textarea.Model
+	viewport               viewport.Model
+	spinner                spinner.Model
+	spinnerRunning         bool
+	subagentRefreshRunning bool
+	selector               *selector
+	completion             int
+	completionHidden       bool
+	history                []string
+	historyMessages        []llm.UserMessage
+	historyPos             int
+	draft                  string
+	draftMessage           *llm.UserMessage
+	busy, closing          bool
+	steeringRestored       bool
+	canceling              bool
+	compacting             bool
+	status                 string
+	hideThinking           bool
+	showAllTools           bool
+	lastCtrlC              time.Time
+	flushPending           bool
+	cache                  map[string]cachedMessage
+	steeringRevision       uint64
+	markdownPreview        map[string]string
+	markdown               markdownRenderer
+	clock                  func() time.Time
+	selectionAnchor        screenPoint
+	selectionFocus         screenPoint
+	selecting              bool
+	lastClick              screenPoint
+	lastClickAt            time.Time
+	mousePosition          screenPoint
+	mousePositionSet       bool
+	mouseFragment          string
+	copyNoticeSeq          uint64
+	copyNotice             bool
+	contextNoticeSeq       uint64
+	pastes                 map[int]string
+	pasteCounter           int
+	images                 map[int]llm.ImageContent
+	imageCounter           int
+	cursorRow              atomic.Int64
+	cursorColumn           atomic.Int64
 }
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
@@ -305,7 +315,24 @@ func New(state Snapshot, handlers Handlers) *Model {
 	return m
 }
 
-func (m *Model) Init() tea.Cmd { return textarea.Blink }
+func (m *Model) Init() tea.Cmd {
+	commands := []tea.Cmd{textarea.Blink}
+	if m.busy || hasRunningSubagent(m.state.Subagents.Tasks) {
+		commands = append(commands, m.startSpinner())
+	}
+	if m.handlers.SubagentSnapshot != nil {
+		commands = append(commands, m.handlers.SubagentSnapshot())
+	}
+	return tea.Batch(commands...)
+}
+
+func (m *Model) startSpinner() tea.Cmd {
+	if m.spinnerRunning {
+		return nil
+	}
+	m.spinnerRunning = true
+	return m.spinner.Tick
+}
 
 // Update 处理事件，不读取或修改后台运行器的状态
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -314,7 +341,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = max(1, msg.Width), max(1, msg.Height)
 		m.layout()
 		m.refreshTranscript()
+	case SubagentSnapshotMsg:
+		if msg.Err != nil {
+			if msg.RestoreMessage != nil && m.viewingTaskID != "" {
+				m.restoreEditorMessage(msg.RestoreMessage, "")
+			}
+			m.notice("Subagent view unavailable: " + msg.Err.Error())
+			m.layout()
+		} else if msg.Snapshot.Revision >= m.state.Subagents.Revision {
+			m.applySubagentSnapshot(msg.Snapshot)
+			return m, m.startSubagentRefresh()
+		}
+	case subagentRefreshMsg:
+		m.subagentRefreshRunning = false
+		if m.handlers.SubagentSnapshot == nil || !hasRunningSubagent(m.state.Subagents.Tasks) {
+			return m, nil
+		}
+		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链
+		m.subagentRefreshRunning = true
+		return m, tea.Batch(m.handlers.SubagentSnapshot(), m.startSpinner(), subagentRefreshTick())
 	case tea.KeyMsg:
+		if msg.Type == tea.KeyRunes && !msg.Paste && string(msg.Runes) == "\x1b" {
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		}
 		if filtered, handled := m.filterMouseKey(msg); handled {
 			if filtered == "" {
 				return m, nil
@@ -332,12 +381,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m, m.handleMouse(msg)
 	case MessageMsg:
-		m.upsertMessage(Message(msg))
+		message := Message(msg)
+		if m.viewingTaskID != "" {
+			// 主 Agent 的流式消息属于 main transcript;child 视图不显示它,
+			// 因此只缓存,不触发 viewport 重建
+			m.upsertMainMessage(message)
+			return m, nil
+		}
+		m.upsertMessage(message)
 		if !m.flushPending {
 			m.flushPending = true
 			return m, tea.Tick(time.Second/60, func(time.Time) tea.Msg { return flushMsg{} })
 		}
 	case MessageCommittedMsg:
+		if m.viewingTaskID != "" {
+			m.replaceMainMessage(msg.PreviousID, msg.Message)
+			return m, nil
+		}
 		if index, ok := m.messageIndex[msg.PreviousID]; ok {
 			delete(m.messageIndex, msg.PreviousID)
 			m.messageIndex[msg.Message.ID] = index
@@ -365,7 +425,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice("Error: " + msg.Err.Error())
 		} else {
 			m.contextNoticeSeq++
-			m.upsertMessage(Message{ID: "context", Revision: m.contextNoticeSeq, Role: "context", Text: formatContextUsage(msg)})
+			message := Message{ID: "context", Revision: m.contextNoticeSeq, Role: "context", Text: formatContextUsage(msg)}
+			if m.viewingTaskID != "" {
+				m.upsertMainMessage(message)
+			} else {
+				m.upsertMessage(message)
+			}
 			m.refreshTranscript()
 		}
 	case SteeringResultMsg:
@@ -373,11 +438,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Err != nil {
-			if msg.Message != nil && strings.TrimSpace(m.editor.Value()) == "" {
-				m.restoreEditorMessage(msg.Message, msg.Value)
-			} else if strings.TrimSpace(m.editor.Value()) == "" {
-				m.editor.SetValue(msg.Value)
-				m.editor.CursorEnd()
+			if m.viewingTaskID == "" {
+				if msg.Message != nil && strings.TrimSpace(m.editor.Value()) == "" {
+					m.restoreEditorMessage(msg.Message, msg.Value)
+				} else if strings.TrimSpace(m.editor.Value()) == "" {
+					m.editor.SetValue(msg.Value)
+					m.editor.CursorEnd()
+				}
 			}
 			m.completion, m.completionHidden = 0, true
 			m.notice("Error: " + msg.Err.Error())
@@ -442,12 +509,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markdownPreview = make(map[string]string)
 		}
 		if msg.Tail != nil {
-			m.replaceTail(*msg.Tail)
+			if m.viewingTaskID != "" {
+				m.replaceMainTail(*msg.Tail)
+			} else {
+				m.replaceTail(*msg.Tail)
+			}
 		}
 		for _, change := range msg.Changes {
-			m.upsertMessage(change)
+			if m.viewingTaskID != "" {
+				m.upsertMainMessage(change)
+			} else {
+				m.upsertMessage(change)
+			}
 		}
-		if msg.RestoreEditor {
+		if msg.RestoreEditor && m.viewingTaskID == "" {
 			m.resetPastes()
 			editorValue := msg.EditorValue
 			if msg.EditorMessage != nil {
@@ -465,12 +540,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.refreshTranscript()
 	case spinner.TickMsg:
-		if m.busy {
+		if m.busy || hasRunningSubagent(m.state.Subagents.Tasks) {
+			m.spinnerRunning = true
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
-			m.refreshTranscript()
+			if m.transcriptAnimationNeeded() {
+				m.refreshTranscript()
+			}
 			return m, cmd
 		}
+		m.spinnerRunning = false
 	case clipboardReadMsg:
 		if msg.err != nil {
 			m.notice("Clipboard paste failed: " + msg.err.Error())
@@ -520,38 +599,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applySnapshot(s Snapshot) {
+	viewingTaskID := m.viewingTaskID
 	m.applyMetadata(s)
+	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
 	m.steeringRestored = false
-	m.messageIndex = make(map[string]int, len(s.Messages))
-	for i, message := range s.Messages {
-		m.messageIndex[message.ID] = i
+	m.mainMessages = cloneMessages(s.Messages)
+	if viewingTaskID == "" {
+		m.state.Messages = cloneMessages(s.Messages)
+	} else if task, ok := findSubagentTask(s.Subagents.Tasks, viewingTaskID); ok {
+		m.state.Messages = cloneMessages(task.Messages)
+	} else {
+		m.exitSubagentView()
 	}
-	m.state.Messages = append([]Message(nil), s.Messages...)
-	for i := range m.state.Messages {
-		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
-		if skill := m.state.Messages[i].Skill; skill != nil {
-			copy := *skill
-			m.state.Messages[i].Skill = &copy
-		}
-		if divider := m.state.Messages[i].Divider; divider != nil {
-			copy := *divider
-			m.state.Messages[i].Divider = &copy
-		}
-	}
-	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
-	m.state.Tree = append([]TreeNode(nil), s.Tree...)
-	m.state.Models = append([]ModelOption(nil), s.Models...)
-	for i := range m.state.Models {
-		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
-	}
-	// 快照可能切换了会话，丢弃已不在显示投影中的渲染缓存
-	keep := make(map[string]cachedMessage, len(s.Messages))
-	for _, message := range s.Messages {
-		if cached, ok := m.cache[message.ID]; ok {
-			keep[message.ID] = cached
+	m.rebuildMessageIndex()
+}
+
+func hasRunningSubagent(tasks []SubagentTaskView) bool {
+	for _, task := range tasks {
+		if task.Status == "running" {
+			return true
 		}
 	}
-	m.cache = keep
+	return false
 }
 
 func (m *Model) currentModel() ModelOption {
@@ -592,7 +661,7 @@ func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) te
 		m.compacting = true
 	}
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
+	return tea.Batch(m.startSpinner(), m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
 }
 
 func (m *Model) dispatchSteering(value string) tea.Cmd {
@@ -775,12 +844,21 @@ func (m *Model) restoreQueuedSteering() int {
 }
 
 func (m *Model) notice(value string) {
-	m.upsertMessage(Message{ID: fmt.Sprintf("notice-%d", len(m.state.Messages)), Role: "notice", Text: value})
+	message := Message{ID: fmt.Sprintf("notice-%d", len(m.mainMessages)), Role: "notice", Text: value}
+	if m.viewingTaskID != "" {
+		m.upsertMainMessage(message)
+	} else {
+		m.upsertMessage(message)
+	}
 	m.refreshTranscript()
 }
 
 // resetSessionUI 在新会话切换成功后恢复编辑器与显示偏好的初始状态
 func (m *Model) resetSessionUI() {
+	m.viewingTaskID, m.selectedTaskID = "", ""
+	m.mainSelected = false
+	m.taskSelector = false
+	m.mainMessages = nil
 	m.editor.Reset()
 	m.resetPastes()
 	m.history, m.draft, m.draftMessage = nil, "", nil
@@ -801,6 +879,15 @@ func (m *Model) resetSessionUI() {
 	m.copyNotice = false
 	m.lastCtrlC = time.Time{}
 	m.viewport.GotoTop()
+}
+
+func (m *Model) transcriptAnimationNeeded() bool {
+	for _, message := range m.state.Messages {
+		if _, _, working := groupState(message.ToolGroup); working {
+			return true
+		}
+	}
+	return false
 }
 
 // refreshTranscript 仅重渲染内容/宽度/思考可见性发生变化的消息
@@ -837,6 +924,69 @@ func (m *Model) upsertMessage(message Message) {
 	m.state.Messages = append(m.state.Messages, message)
 }
 
+func (m *Model) upsertMainMessage(message Message) {
+	for index := range m.mainMessages {
+		if m.mainMessages[index].ID == message.ID {
+			m.mainMessages[index] = message
+			return
+		}
+	}
+	m.mainMessages = append(m.mainMessages, message)
+}
+
+func (m *Model) replaceMainMessage(previousID string, message Message) {
+	for index := range m.mainMessages {
+		if m.mainMessages[index].ID == previousID {
+			m.mainMessages[index] = message
+			return
+		}
+	}
+	m.upsertMainMessage(message)
+}
+
+func (m *Model) replaceMainTail(tail MessageTail) {
+	start := 0
+	if tail.AfterID != "" {
+		start = -1
+		for index := range m.mainMessages {
+			if m.mainMessages[index].ID == tail.AfterID {
+				start = index + 1
+				break
+			}
+		}
+		if start < 0 {
+			return
+		}
+	}
+	m.mainMessages = append(m.mainMessages[:start:start], cloneMessages(tail.Messages)...)
+}
+
+func cloneMessage(message Message) Message {
+	copy := message
+	copy.ToolGroup = cloneToolGroup(message.ToolGroup)
+	if message.Skill != nil {
+		skill := *message.Skill
+		copy.Skill = &skill
+	}
+	if message.Divider != nil {
+		divider := *message.Divider
+		copy.Divider = &divider
+	}
+	copy.Images = append([]ImageView(nil), message.Images...)
+	return copy
+}
+
+func cloneMessages(messages []Message) []Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	result := make([]Message, len(messages))
+	for index, message := range messages {
+		result[index] = cloneMessage(message)
+	}
+	return result
+}
+
 func (m *Model) applyMetadata(s Snapshot) {
 	messages := m.state.Messages
 	steering := append([]string(nil), m.state.Steering...)
@@ -844,6 +994,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	steeringRevision := m.steeringRevision
 	m.state = s
 	m.state.Messages = messages
+	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)

@@ -88,6 +88,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
+	// Leaving a subagent view always wins over transcript navigation. Otherwise
+	// Escape can be consumed by the jump-to-bottom pill and strand the user in
+	// the child transcript until it happens to be at the bottom.
+	if msg.String() == "esc" && m.viewingTaskID != "" {
+		if m.handlers.SubagentRequest != nil {
+			cmd := m.handlers.SubagentRequest(SubagentRequest{Kind: "exit", TaskID: m.viewingTaskID})
+			m.exitSubagentView()
+			return cmd
+		}
+		m.exitSubagentView()
+		return nil
+	}
 	if msg.String() == "esc" && m.jumpPillVisible() && !(m.busy && len(m.state.Steering) > 0) {
 		m.jumpToBottom()
 		return nil
@@ -95,7 +107,45 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.selector != nil {
 		return m.selectorKey(msg)
 	}
+	if msg.String() == "esc" && m.taskSelector {
+		m.taskSelector = false
+		m.selectedTaskID = ""
+		m.mainSelected = false
+		m.layout()
+		return nil
+	}
+	if msg.String() == "x" && (m.viewingTaskID != "" || m.editor.Value() == "") {
+		if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
+			kind := "evict"
+			if task.Status == "running" {
+				kind = "stop"
+			}
+			return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
+		}
+	}
+	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
+		switch msg.String() {
+		case "up":
+			m.taskSelector = true
+			if m.selectSubagent(-1) {
+				return nil
+			}
+		case "down":
+			m.taskSelector = true
+			if m.selectSubagent(1) {
+				return nil
+			}
+		case "enter":
+			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
+				return nil
+			}
+			return m.enterSelectedSubagent()
+		}
+	}
 	if isSteeringDequeueKey(msg) {
+		if m.viewingTaskID != "" {
+			return nil
+		}
 		if m.restoreQueuedSteering() == 0 {
 			m.status = "No queued messages to restore"
 		}
@@ -207,7 +257,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "up":
 		// 部分 macOS 终端把 Option+Up 发成普通 Up，有可见 steering 时优先撤回
-		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy {
+		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy && m.viewingTaskID == "" {
 			restored := m.restoreQueuedSteering()
 			if restored > 0 {
 				m.layout()
@@ -229,6 +279,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	if m.editor.Value() != before {
+		m.taskSelector = false
 		m.clearSelection()
 		m.completion, m.completionHidden = 0, false
 		m.layout()
@@ -284,6 +335,25 @@ func (m *Model) submit() tea.Cmd {
 	hasImages := messageHasImages(message)
 	if !hasMessage {
 		return nil
+	}
+	if m.viewingTaskID != "" {
+		if m.handlers.SubagentRequest == nil {
+			return nil
+		}
+		messageCopy := cloneUserMessage(message)
+		task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
+		if !ok {
+			m.notice("Subagent task is no longer available")
+			return nil
+		}
+		kind := "continue"
+		if task.Status == "running" {
+			kind = "queue"
+		}
+		m.editor.Reset()
+		m.resetPastes()
+		m.layout()
+		return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID, Message: &messageCopy})
 	}
 	if hasImages && !m.currentModel().SupportsImages {
 		m.notice("The current model does not support image input.")

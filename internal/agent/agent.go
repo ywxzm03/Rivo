@@ -15,6 +15,8 @@ import (
 type Agent struct {
 	AgentConfig  llm.AgentConfig
 	AgentContext llm.Context
+	WorkingDir   string
+	MaxTurns     int
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
 	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
@@ -28,6 +30,8 @@ type Agent struct {
 	steeringRevision uint64
 	currentUserID    string
 }
+
+var ErrMaxTurns = errors.New("agent: maximum turns reached")
 
 type steeringMessage struct {
 	input     string
@@ -196,9 +200,10 @@ func (a *Agent) restoreSteering(message steeringMessage) {
 // PreparedRequest 是一次模型请求的配置与上下文快照；
 // Compacted 表示来源结构已重建，运行汇总从新快照的末尾开始
 type PreparedRequest struct {
-	Context   llm.Context
-	Config    llm.AgentConfig
-	Compacted bool
+	Context      llm.Context
+	Config       llm.AgentConfig
+	Compacted    bool
+	TransientAck func()
 }
 
 func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
@@ -345,7 +350,9 @@ func (a *Agent) AppendMessage(msg llm.Message) {
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
 func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int, initialSteering *steeringMessage) (*llm.AssistantMessage, error) {
+	turns := 0
 	for {
+		turns++
 		// 1.先原子认领一条 steering，撤回只能取得尚未认领的消息
 		var pending steeringMessage
 		var ok bool
@@ -384,6 +391,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 
 		// 2.请求准备只返回快照，摘要失败的降级与存储失败的停止由宿主判断
+		var acknowledgeTransient func()
 		if a.PrepareRequest != nil {
 			request, err := a.PrepareRequest(ctx, PreparedRequest{Context: a.AgentContext, Config: a.AgentConfig})
 			if err != nil {
@@ -393,6 +401,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				return nil, err
 			}
 			a.AgentContext, a.AgentConfig = request.Context, request.Config
+			acknowledgeTransient = request.TransientAck
 			if request.Compacted {
 				firstMessageIndex = len(a.AgentContext.Messages)
 			}
@@ -488,6 +497,23 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		if err := a.commitMessages([]llm.Message{*final}); err != nil {
 			cancel()
 			return nil, err
+		}
+		if acknowledgeTransient != nil {
+			acknowledgeTransient()
+		}
+		if a.MaxTurns > 0 && turns >= a.MaxTurns {
+			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
+				cancel()
+				return nil, err
+			}
+			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+				cancel()
+				return nil, err
+			}
+			if len(assistantToolCalls(*final)) > 0 {
+				return final, ErrMaxTurns
+			}
+			return final, nil
 		}
 
 		toolCalls := assistantToolCalls(*final)
@@ -869,6 +895,8 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 }
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
+	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.AgentContext, Config: a.AgentConfig})
+	ctx = llm.WithWorkingDir(ctx, a.WorkingDir)
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {

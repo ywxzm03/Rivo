@@ -52,6 +52,7 @@ type Runtime struct {
 	compactionNotice    *tui.Message
 	compactionNoticeSeq uint64
 	pendingSkillInput   *skillInput
+	subagentRevision    uint64
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {
@@ -416,6 +417,12 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 		for _, message := range notifications {
 			send(message)
 		}
+		// Agent/Bash tools can outlive the parent turn. Publish the root-store
+		// task projection as soon as a parent event may have changed it; the
+		// TUI then keeps polling only while a task remains running.
+		if _, ok := event.(llm.ToolExecutionEndEvent); ok {
+			send(tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot()})
+		}
 	}
 	return nil
 }
@@ -592,8 +599,16 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	steering := r.app.SteeringMessages()
 	steeringInputs := r.app.SteeringUserMessages()
+	var tasks []tui.SubagentTaskView
+	viewingTaskID := ""
+	if store := r.app.SubagentStore(); store != nil {
+		viewingTaskID = store.ViewingTaskID()
+		tasks = projectSubagentTasks(store.Snapshot(), viewingTaskID)
+	}
+	r.subagentRevision++
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision(),
+		Subagents: tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}}
 }
 
 func listSessionOptions(cwd string) []tui.SessionOption {

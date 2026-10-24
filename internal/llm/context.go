@@ -4,6 +4,37 @@ import "context"
 
 type userMessageContextKey struct{}
 
+type toolContextKey struct{}
+type workingDirKey struct{}
+
+// ToolContext carries the executing agent's context to tools that need to spawn
+// or coordinate child work without exposing the Agent implementation.
+type ToolContext struct {
+	Context Context
+	Config  AgentConfig
+}
+
+func WithToolContext(ctx context.Context, toolContext ToolContext) context.Context {
+	return context.WithValue(ctx, toolContextKey{}, toolContext)
+}
+
+func CurrentToolContext(ctx context.Context) (ToolContext, bool) {
+	value, ok := ctx.Value(toolContextKey{}).(ToolContext)
+	return value, ok
+}
+
+func WithWorkingDir(ctx context.Context, dir string) context.Context {
+	if dir == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, workingDirKey{}, dir)
+}
+
+func CurrentWorkingDir(ctx context.Context) string {
+	dir, _ := ctx.Value(workingDirKey{}).(string)
+	return dir
+}
+
 // WithCurrentUserMessageID 把当前 tool turn 关联到已持久化的 user entry
 func WithCurrentUserMessageID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, userMessageContextKey{}, id)

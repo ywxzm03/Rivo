@@ -64,7 +64,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, 
 	}
 
 	// 2.解析路径并确认是目录
-	absPath, err := resolvePath(path)
+	absPath, err := resolvePathContext(ctx, path)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

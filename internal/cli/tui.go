@@ -44,6 +44,8 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 		EnqueueSteering:   runtime.EnqueueSteering,
 		RestoreSteering:   runtime.RestoreSteering,
 		ReadClipboardData: readClipboardData,
+		SubagentRequest:   runtime.SubagentRequest,
+		SubagentSnapshot:  runtime.SubagentSnapshot,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil
