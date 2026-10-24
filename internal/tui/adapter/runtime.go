@@ -113,6 +113,22 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			}
 		}
 	}
+	// 记录操作前设置，完成后只在值真正变化时输出提示
+	previousModel, previousThinking, previousName := "", "", ""
+	if activeApp != nil {
+		switch req.Kind {
+		case "model":
+			model := activeApp.CurrentModel()
+			previousModel = model.Provider + "/" + model.ID
+		case "thinking":
+			previousThinking = string(activeApp.CurrentThinkingLevel())
+			if previousThinking == "" {
+				previousThinking = string(llm.ThinkingLevelOff)
+			}
+		case "rename":
+			previousName = activeApp.SessionName()
+		}
+	}
 	r.mu.Lock()
 	if req.Kind == "run" {
 		r.messageIndexLocked("")
@@ -223,8 +239,16 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		var notice string
 		switch req.Kind {
 		case "rename":
-			if result.Err == nil {
-				notice = "Session renamed: " + snapshot.SessionName
+			if result.Err == nil && snapshot.SessionName != previousName {
+				notice = "Thread name changed to " + snapshot.SessionName
+			}
+		case "model":
+			if result.Err == nil && snapshot.CurrentModel.Key() != previousModel {
+				notice = "Model changed to " + snapshot.CurrentModel.ID
+			}
+		case "thinking":
+			if result.Err == nil && snapshot.Thinking != previousThinking {
+				notice = "Thinking changed to " + snapshot.Thinking
 			}
 		case "new":
 			if result.Err == nil {
