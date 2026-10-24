@@ -1010,8 +1010,8 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatal("snapshot aliases nested slices")
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(m.footer()), "(provider-0)") {
-		t.Fatal("wide footer should include provider")
+	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
+		t.Fatalf("footer should never show the provider: %q", ansi.Strip(m.footer()))
 	}
 	s = testState()
 	s.ModelKey, s.Thinking = s.Models[3].Key(), "low"
@@ -1020,8 +1020,8 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatalf("snapshot footer = %q", ansi.Strip(m.footer()))
 	}
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
-	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
-		t.Fatal("narrow footer should omit provider")
+	if strings.Contains(ansi.Strip(m.footer()), "provider-") {
+		t.Fatal("narrow footer should still omit provider")
 	}
 }
 

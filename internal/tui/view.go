@@ -345,16 +345,6 @@ func (m *Model) footer() string {
 		right += " • " + level
 	}
 	available := m.width - ansi.StringWidth(ansi.Strip(left))
-	withProvider := "(" + model.Provider + ") " + right
-	if len(m.state.Models) > 1 {
-		providers := make(map[string]bool)
-		for _, model := range m.state.Models {
-			providers[model.Provider] = true
-		}
-		if len(providers) > 1 && ansi.StringWidth(withProvider) <= available {
-			right = withProvider
-		}
-	}
 	right = colored(dimColor, ansi.Truncate(right, max(0, available), "…"))
 	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(ansi.Strip(left))-ansi.StringWidth(ansi.Strip(right))))
 	return left + gap + right
