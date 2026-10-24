@@ -113,6 +113,22 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			}
 		}
 	}
+	// 记录操作前设置，完成后只在值真正变化时输出提示
+	previousModel, previousThinking, previousName := "", "", ""
+	if activeApp != nil {
+		switch req.Kind {
+		case "model":
+			model := activeApp.CurrentModel()
+			previousModel = model.Provider + "/" + model.ID
+		case "thinking":
+			previousThinking = string(activeApp.CurrentThinkingLevel())
+			if previousThinking == "" {
+				previousThinking = string(llm.ThinkingLevelOff)
+			}
+		case "rename":
+			previousName = activeApp.SessionName()
+		}
+	}
 	r.mu.Lock()
 	if req.Kind == "run" {
 		r.messageIndexLocked("")
@@ -223,8 +239,16 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		var notice string
 		switch req.Kind {
 		case "rename":
-			if result.Err == nil {
-				notice = "Session renamed: " + snapshot.SessionName
+			if result.Err == nil && snapshot.SessionName != previousName {
+				notice = "Thread name changed to " + snapshot.SessionName
+			}
+		case "model":
+			if result.Err == nil && snapshot.CurrentModel.Key() != previousModel {
+				notice = "Model changed to " + snapshot.CurrentModel.ID
+			}
+		case "thinking":
+			if result.Err == nil && snapshot.Thinking != previousThinking {
+				notice = "Thinking changed to " + snapshot.Thinking
 			}
 		case "new":
 			if result.Err == nil {
@@ -772,17 +796,27 @@ func (r *Runtime) EnqueueFollowUpMessage(value llm.UserMessage) error {
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }
 func (r *Runtime) Request(request tui.Request) tea.Cmd    { return r.request(request) }
 
-// Context 返回只读的 context 查询命令，不创建 App operation
-func (r *Runtime) Context() tea.Cmd {
+// Status 返回只读的会话状态命令，不创建 App operation
+func (r *Runtime) Status() tea.Cmd {
 	return func() tea.Msg {
 		r.mu.Lock()
 		activeApp := r.app
 		r.mu.Unlock()
 		if activeApp == nil {
-			return tui.ContextUsageMsg{Err: errors.New("context usage is unavailable")}
+			return tui.SessionStatusMsg{Err: errors.New("status is unavailable")}
 		}
+		model := activeApp.CurrentModel()
 		usage := activeApp.ContextUsage()
-		return tui.ContextUsageMsg{Tokens: usage.Tokens, ContextWindow: usage.ContextWindow, Available: usage.Available}
+		return tui.SessionStatusMsg{
+			Model:         model.ID,
+			Provider:      model.Provider,
+			ThreadName:    activeApp.SessionName(),
+			SessionID:     activeApp.SessionID(),
+			Transcript:    activeApp.SessionPath(),
+			Tokens:        usage.Tokens,
+			ContextWindow: usage.ContextWindow,
+			Available:     usage.Available,
+		}
 	}
 }
 func (r *Runtime) Cancel()                { r.cancelCurrent() }

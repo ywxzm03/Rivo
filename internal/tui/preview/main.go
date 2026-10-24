@@ -78,15 +78,19 @@ func (p *preview) request(request tui.Request) tea.Cmd {
 	p.cancel = cancel
 	return func() tea.Msg {
 		defer cancel()
+		var notice string
 		switch request.Kind {
 		case "run":
 			return p.run(ctx, request.Value)
 		case "model":
+			previous := p.state.ModelKey
 			p.state.ModelKey = request.Value
+			changed := ""
 			for _, model := range p.state.Models {
 				if model.Key() != request.Value {
 					continue
 				}
+				changed = model.ID
 				found := false
 				for _, level := range model.Levels {
 					if level == p.state.Thinking {
@@ -97,8 +101,21 @@ func (p *preview) request(request tui.Request) tea.Cmd {
 					p.state.Thinking = model.Levels[len(model.Levels)-1]
 				}
 			}
+			if p.state.ModelKey != previous {
+				notice = "Model changed to " + changed
+			}
 		case "thinking":
+			previous := p.state.Thinking
 			p.state.Thinking = request.Value
+			if p.state.Thinking != previous {
+				notice = "Thinking changed to " + request.Value
+			}
+		case "rename":
+			previous := p.state.SessionName
+			p.state.SessionName = request.Value
+			if p.state.SessionName != previous {
+				notice = "Thread name changed to " + p.state.SessionName
+			}
 		case "resume":
 			for _, session := range p.state.Sessions {
 				if session.Path == request.Value {
@@ -113,7 +130,7 @@ func (p *preview) request(request tui.Request) tea.Cmd {
 			p.sequence++
 			p.state.Messages = append(p.state.Messages, tui.Message{ID: fmt.Sprintf("summary-%d", p.sequence), Role: "summary", Text: "Context compacted. The conversation is ready to continue."})
 		}
-		return tui.OperationDoneMsg{Snapshot: &p.state}
+		return tui.OperationDoneMsg{Snapshot: &p.state, Notice: notice}
 	}
 }
 

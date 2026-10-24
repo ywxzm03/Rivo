@@ -144,11 +144,20 @@ func containsInt(values []int, value int) bool {
 
 func (m *Model) renderMessage(message Message) string {
 	width := max(1, m.width-2)
-	if message.Role == "context" {
-		return colored(textColor, ansi.Wrap(message.Text, width, ""))
+	if message.Role == "command" {
+		return colored(accentColor, ansi.Wrap(message.Text, width, ""))
 	}
-	if message.Role == "notice" || message.Role == "summary" {
+	if message.Role == "status" {
+		// 状态块整体右移两格，与顶格的命令回显区分
+		return colored(textColor, "  "+strings.ReplaceAll(ansi.Wrap(message.Text, max(1, width-2), ""), "\n", "\n  "))
+	}
+	if message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
+	}
+	if message.Role == "notice" {
+		// 提示行的圆点与中断提示的方块对齐，正文从第三列开始；换行后保持相同缩进
+		wrapped := ansi.Wrap(message.Text, max(1, width-3), "")
+		return colored(mutedColor, " • "+strings.ReplaceAll(wrapped, "\n", "\n   "))
 	}
 	if message.Role == "divider" && message.Divider != nil {
 		return dividerLine(m.width, message.Divider)
@@ -161,8 +170,8 @@ func (m *Model) renderMessage(message Message) string {
 			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 		}
 		if message.Aborted {
-			// 取消是用户操作，正文后追加固定红色提示
-			parts = append(parts, colored(redColor, "Operation aborted"))
+			// 取消是用户操作，正文后追加固定中断提示
+			parts = append(parts, abortNotice())
 			return strings.Join(parts, "\n\n")
 		}
 		if message.Divider != nil && message.Text != "" {
@@ -171,12 +180,12 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(parts, "\n\n")
 	}
 	if message.Aborted {
-		// 取消是用户操作，partial 正文后追加固定红色提示
+		// 取消是用户操作，partial 正文后追加固定中断提示
 		parts := []string{}
 		if trimmed := strings.TrimSpace(message.Text); trimmed != "" {
 			parts = append(parts, m.markdown.render(trimmed, "assistant", width))
 		}
-		parts = append(parts, colored(redColor, "Operation aborted"))
+		parts = append(parts, abortNotice())
 		return strings.Join(parts, "\n")
 	}
 	if message.Role == "user" {
@@ -248,3 +257,8 @@ func dividerLine(width int, divider *TurnDividerView) string {
 }
 
 func indent(text string) string { return " " + strings.ReplaceAll(text, "\n", "\n ") }
+
+// abortNotice 输出中断提示：实心方块缩进一格起首，文字用更淡的灰，与普通提示区分
+func abortNotice() string {
+	return colored(faintColor, " ■ Conversation interrupted")
+}

@@ -28,7 +28,7 @@ var commands = []slashCommand{
 	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
 	{"clear-follow-up", "Clear queued follow-up messages"},
-	{"context", "Show current context usage"},
+	{"status", "Show model, context usage and session info"},
 	{"exit", "Exit Rivo"},
 }
 
@@ -373,7 +373,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 			return m.dispatchSteering(input)
 		}
 	}
-	if !m.busy && m.handlers.Request == nil && m.handlers.Context == nil {
+	if !m.busy && m.handlers.Request == nil && m.handlers.Status == nil {
 		if hasImages {
 			return nil
 		}
@@ -452,16 +452,16 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 		count := m.clearQueuedFollowUp()
 		m.notice(fmt.Sprintf("Cleared %d follow-up message(s)", count))
 		return nil
-	case "/context":
+	case "/status":
 		if arg != "" {
-			m.notice("Usage: /context")
+			m.notice("Usage: /status")
 			return nil
 		}
-		if m.handlers.Context == nil {
-			m.notice("Context usage is unavailable")
+		if m.handlers.Status == nil {
+			m.notice("Status is unavailable")
 			return nil
 		}
-		return m.handlers.Context()
+		return m.handlers.Status()
 	case "/rename":
 		if arg == "" {
 			m.notice("Usage: /rename <new Name>")
