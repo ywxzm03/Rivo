@@ -164,9 +164,9 @@ type Request struct {
 // Handlers 由运行适配器提供，命令在 tea.Cmd 中执行，取消只发信号而不阻塞 Update
 type Handlers struct {
 	Request func(Request) tea.Cmd
-	// Context 查询当前已提交 context usage，不启动模型 operation
-	Context func() tea.Cmd
-	Cancel  func()
+	// Status 查询模型、用量与会话文件，不启动模型 operation
+	Status func() tea.Cmd
+	Cancel func()
 	// EnqueueSteering 同步接受一条 steering，避免撤回与异步入队竞态
 	EnqueueSteering        func(string) error
 	EnqueueSteeringMessage func(llm.UserMessage) error
@@ -192,11 +192,12 @@ type MessageCommittedMsg struct {
 }
 
 type StatusMsg string
-type ContextUsageMsg struct {
-	Tokens        int
-	ContextWindow int
-	Available     bool
-	Err           error
+type SessionStatusMsg struct {
+	Model, Provider, ThreadName string
+	SessionID, Transcript       string
+	Tokens, ContextWindow       int
+	Available                   bool
+	Err                         error
 }
 type SteeringResultMsg struct {
 	ID       uint64
@@ -313,7 +314,7 @@ type Model struct {
 	mouseFragment            string
 	copyNoticeSeq            uint64
 	copyNotice               bool
-	contextNoticeSeq         uint64
+	statusNoticeSeq          uint64
 	pastes                   map[int]string
 	pasteCounter             int
 	images                   map[int]llm.ImageContent
@@ -423,12 +424,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.compacting = false
 			m.restoreCompactionMessages(m.compactionQueuedMessages)
 		}
-	case ContextUsageMsg:
+	case SessionStatusMsg:
 		if msg.Err != nil {
 			m.notice("Error: " + msg.Err.Error())
 		} else {
-			m.contextNoticeSeq++
-			m.upsertMessage(Message{ID: "context", Revision: m.contextNoticeSeq, Role: "context", Text: formatContextUsage(msg)})
+			// 每次执行都追加一组命令回显与状态块，重复查询保留历史
+			m.statusNoticeSeq++
+			seq := m.statusNoticeSeq
+			m.upsertMessage(Message{ID: fmt.Sprintf("status-command/%d", seq), Role: "command", Text: "/status"})
+			m.upsertMessage(Message{ID: fmt.Sprintf("status/%d", seq), Role: "status", Text: formatStatus(msg)})
 			m.refreshTranscript()
 		}
 	case SteeringResultMsg:
@@ -1328,7 +1332,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 func (m *Model) lastMessageID() string {
 	for i := len(m.state.Messages) - 1; i >= 0; i-- {
 		message := m.state.Messages[i]
-		if message.Role == "notice" || message.Role == "summary" || message.Role == "context" {
+		if message.Role == "notice" || message.Role == "summary" || message.Role == "status" || message.Role == "command" {
 			continue
 		}
 		return message.ID
@@ -1352,7 +1356,8 @@ func cloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
 	return out
 }
 
-// replaceTail 只替换当前操作产生的尾部，旧历史的身份与缓存保持不变
+// replaceTail 只替换当前操作产生的尾部，旧历史的身份与缓存保持不变；
+// 状态行不属于会话投影，原位保留在本次新增消息之前
 func (m *Model) replaceTail(tail MessageTail) {
 	start := 0
 	if index, ok := m.messageIndex[tail.AfterID]; ok {
@@ -1360,11 +1365,23 @@ func (m *Model) replaceTail(tail MessageTail) {
 	} else if tail.AfterID != "" {
 		return
 	}
+	var kept []Message
 	for _, message := range m.state.Messages[start:] {
 		delete(m.messageIndex, message.ID)
+		if isStatusRow(message) {
+			kept = append(kept, message)
+		}
 	}
 	m.state.Messages = m.state.Messages[:start]
+	for _, message := range kept {
+		m.upsertMessage(message)
+	}
 	for _, message := range tail.Messages {
 		m.upsertMessage(message)
 	}
+}
+
+// isStatusRow 标记 /status 的显示层行，既不进入会话投影也不被尾部替换删除
+func isStatusRow(message Message) bool {
+	return message.Role == "status" || message.Role == "command"
 }
