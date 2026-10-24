@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/subagent"
+	"github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
@@ -100,7 +100,7 @@ func taskMessageText(message llm.UserMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-func projectSubagentTasks(states []subagent.TaskState, viewingTaskID string) []tui.SubagentTaskView {
+func projectSubagentTasks(states []task.State, viewingTaskID string) []tui.SubagentTaskView {
 	tasks := make([]tui.SubagentTaskView, 0, len(states))
 	for _, state := range states {
 		if state == nil || state.Base() == nil {
@@ -114,7 +114,7 @@ func projectSubagentTasks(states []subagent.TaskState, viewingTaskID string) []t
 			LifecycleToken: base.LifecycleToken, Retain: false,
 		}
 		switch task := state.(type) {
-		case *subagent.AgentTaskState:
+		case *task.AgentState:
 			view.AgentType, view.Prompt, view.WorktreePath = task.AgentType, task.Prompt, task.WorktreePath
 			view.PendingCount = len(task.PendingMessages)
 			view.Revision = subagentTaskRevision(base, len(task.Messages), view.PendingCount)
@@ -133,7 +133,7 @@ func projectSubagentTasks(states []subagent.TaskState, viewingTaskID string) []t
 				}
 			}
 			view.Error = task.Error
-		case *subagent.BashTaskState:
+		case *task.BashState:
 			view.AgentType = "bash"
 			view.Description = task.Command
 			view.TotalTokens = 0
@@ -155,7 +155,7 @@ func projectSubagentTasks(states []subagent.TaskState, viewingTaskID string) []t
 	return tasks
 }
 
-func subagentTaskRevision(base *subagent.TaskStateBase, messageCount, pendingCount int) uint64 {
+func subagentTaskRevision(base *task.StateBase, messageCount, pendingCount int) uint64 {
 	revision := base.LifecycleToken + 1
 	for _, value := range string(base.Status) {
 		revision = revision*33 + uint64(value)
@@ -165,7 +165,7 @@ func subagentTaskRevision(base *subagent.TaskStateBase, messageCount, pendingCou
 	return revision
 }
 
-func textBlocks(blocks []subagent.TextBlock) string {
+func textBlocks(blocks []task.TextBlock) string {
 	parts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		if strings.TrimSpace(block.Text) != "" {

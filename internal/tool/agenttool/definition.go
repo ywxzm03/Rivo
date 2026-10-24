@@ -1,4 +1,4 @@
-package subagent
+package agenttool
 
 import (
 	"errors"
@@ -13,9 +13,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// AgentDefinition 是 typed subagent 使用的精简 Rivo agent 定义面。
+// Definition 是 typed subagent 使用的精简 agent 定义面。
 // body 是该 agent 的默认指令 prompt。
-type AgentDefinition struct {
+type Definition struct {
 	Name         string
 	Description  string
 	Prompt       string
@@ -26,7 +26,7 @@ type AgentDefinition struct {
 	OmitAgentsMd bool
 }
 
-type agentDefinitionFrontmatter struct {
+type definitionFrontmatter struct {
 	Name         string            `yaml:"name"`
 	Description  string            `yaml:"description"`
 	Model        string            `yaml:"model"`
@@ -36,11 +36,11 @@ type agentDefinitionFrontmatter struct {
 	OmitAgentsMd bool              `yaml:"omitAgentsMd"`
 }
 
-var agentDefinitionName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var definitionName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// LoadAgentDefinition 先解析项目定义,再解析用户定义
-func LoadAgentDefinition(cwd, agentDir, name string) (*AgentDefinition, error) {
-	if !agentDefinitionName.MatchString(name) || utf8.RuneCountInString(name) > 64 {
+// LoadDefinition 先解析项目定义,再解析用户定义
+func LoadDefinition(cwd, agentDir, name string) (*Definition, error) {
+	if !definitionName.MatchString(name) || utf8.RuneCountInString(name) > 64 {
 		return nil, fmt.Errorf("subagent: invalid agent name %q", name)
 	}
 	paths := []string{
@@ -55,7 +55,7 @@ func LoadAgentDefinition(cwd, agentDir, name string) (*AgentDefinition, error) {
 			}
 			return nil, err
 		}
-		definition, err := parseAgentDefinition(string(raw), name)
+		definition, err := parseDefinition(string(raw), name)
 		if err != nil {
 			return nil, fmt.Errorf("subagent: load %s: %w", path, err)
 		}
@@ -64,9 +64,9 @@ func LoadAgentDefinition(cwd, agentDir, name string) (*AgentDefinition, error) {
 	return nil, fmt.Errorf("subagent: agent definition %q not found", name)
 }
 
-func parseAgentDefinition(content, fallbackName string) (*AgentDefinition, error) {
-	frontmatter, body := splitAgentFrontmatter(strings.TrimPrefix(content, "\ufeff"))
-	var fields agentDefinitionFrontmatter
+func parseDefinition(content, fallbackName string) (*Definition, error) {
+	frontmatter, body := splitFrontmatter(strings.TrimPrefix(content, "\ufeff"))
+	var fields definitionFrontmatter
 	if frontmatter != "" {
 		if err := yaml.Unmarshal([]byte(frontmatter), &fields); err != nil {
 			return nil, err
@@ -75,16 +75,16 @@ func parseAgentDefinition(content, fallbackName string) (*AgentDefinition, error
 	if fields.Name == "" {
 		fields.Name = fallbackName
 	}
-	if !agentDefinitionName.MatchString(fields.Name) || utf8.RuneCountInString(fields.Name) > 64 {
+	if !definitionName.MatchString(fields.Name) || utf8.RuneCountInString(fields.Name) > 64 {
 		return nil, fmt.Errorf("invalid agent name %q", fields.Name)
 	}
 	if fields.MaxTurns < 0 {
 		return nil, errors.New("maxTurns must be non-negative")
 	}
-	return &AgentDefinition{Name: fields.Name, Description: fields.Description, Prompt: strings.TrimSpace(body), Model: fields.Model, Thinking: fields.Thinking, Tools: append([]string(nil), fields.Tools...), MaxTurns: fields.MaxTurns, OmitAgentsMd: fields.OmitAgentsMd}, nil
+	return &Definition{Name: fields.Name, Description: fields.Description, Prompt: strings.TrimSpace(body), Model: fields.Model, Thinking: fields.Thinking, Tools: append([]string(nil), fields.Tools...), MaxTurns: fields.MaxTurns, OmitAgentsMd: fields.OmitAgentsMd}, nil
 }
 
-func splitAgentFrontmatter(content string) (string, string) {
+func splitFrontmatter(content string) (string, string) {
 	if !strings.HasPrefix(content, "---\n") {
 		return "", content
 	}

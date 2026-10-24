@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/subagent"
+	taskpkg "github.com/ywxzm03/Rivo/internal/task"
+	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
 )
 
 func TestBackgroundBashCanBeStopped(t *testing.T) {
-	store := subagent.NewStore()
+	store := taskpkg.NewStore()
 	runner := NewBackgroundBashRunner(store)
 	result, err := runner.RunBackground(context.Background(), map[string]any{
 		"command":           "sleep 10",
@@ -28,7 +29,7 @@ func TestBackgroundBashCanBeStopped(t *testing.T) {
 	if id == "" {
 		t.Fatalf("task ID = %#v, want non-empty", details["task_id"])
 	}
-	stop, err := (&subagent.TaskStopTool{Store: store}).Execute(context.Background(), map[string]any{"task_id": id})
+	stop, err := taskstoptool.New(store).Execute(context.Background(), map[string]any{"task_id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +39,7 @@ func TestBackgroundBashCanBeStopped(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		task, ok := store.Task(id)
-		if ok && task.Base().Status == subagent.StateKilled {
+		if ok && task.Base().Status == taskpkg.StatusKilled {
 			break
 		}
 		select {

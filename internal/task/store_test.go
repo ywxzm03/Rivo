@@ -1,4 +1,4 @@
-package subagent
+package task
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 	store := NewStore()
-	id, token, err := store.Register(RegisterSpec{Type: TaskTypeAgent, Description: "inspect", AgentType: "Explore"})
+	id, token, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "inspect", AgentType: "Explore"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,8 +31,8 @@ func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 	if got := store.DrainPendingMessages(id, token); got != nil {
 		t.Fatalf("second drain = %#v, want empty", got)
 	}
-	store.CompleteAgent(id, token, &AgentToolResult{AgentID: id})
-	notification := TaskNotification{TaskID: id, Status: StateCompleted, Summary: "done"}
+	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	notification := Notification{TaskID: id, Status: StatusCompleted, Summary: "done"}
 	if !store.EnqueueNotification(id, token, notification) || store.EnqueueNotification(id, token, notification) {
 		t.Fatal("notification should be enqueued once")
 	}
@@ -44,7 +44,7 @@ func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 
 func TestSnapshotSharesImmutableTranscriptPrefix(t *testing.T) {
 	store := NewStore()
-	id, token, err := store.Register(RegisterSpec{Type: TaskTypeAgent, Description: "inspect", AgentType: "Explore"})
+	id, token, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "inspect", AgentType: "Explore"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestSnapshotSharesImmutableTranscriptPrefix(t *testing.T) {
 	first := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}
 	store.RecordAgentMessages(id, token, []llm.Message{first})
 
-	snapshot := store.Snapshot()[0].(*AgentTaskState)
+	snapshot := store.Snapshot()[0].(*AgentState)
 	if len(snapshot.Messages) != 1 {
 		t.Fatalf("snapshot messages = %d, want 1", len(snapshot.Messages))
 	}
@@ -61,7 +61,7 @@ func TestSnapshotSharesImmutableTranscriptPrefix(t *testing.T) {
 	if len(snapshot.Messages) != 1 {
 		t.Fatalf("later append mutated an issued snapshot: %d messages", len(snapshot.Messages))
 	}
-	if got := store.Snapshot()[0].(*AgentTaskState); len(got.Messages) != 2 {
+	if got := store.Snapshot()[0].(*AgentState); len(got.Messages) != 2 {
 		t.Fatalf("fresh snapshot messages = %d, want 2", len(got.Messages))
 	}
 }
@@ -69,11 +69,11 @@ func TestSnapshotSharesImmutableTranscriptPrefix(t *testing.T) {
 func TestFreshStoresDoNotReuseTaskIDs(t *testing.T) {
 	first := NewStore()
 	second := NewStore()
-	id1, _, err := first.Register(RegisterSpec{Type: TaskTypeAgent, Description: "first", AgentType: "Explore"})
+	id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, _, err := second.Register(RegisterSpec{Type: TaskTypeAgent, Description: "second", AgentType: "Explore"})
+	id2, _, err := second.Register(RegisterSpec{Type: TypeAgent, Description: "second", AgentType: "Explore"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +84,11 @@ func TestFreshStoresDoNotReuseTaskIDs(t *testing.T) {
 
 func TestRegisterContinuationRejectsStaleLifecycleCallbacks(t *testing.T) {
 	store := NewStore()
-	id, oldToken, err := store.Register(RegisterSpec{Type: TaskTypeAgent, Description: "work", AgentType: "Work"})
+	id, oldToken, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work", AgentType: "Work"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(id, oldToken, &AgentToolResult{AgentID: id}) {
+	if !store.CompleteAgent(id, oldToken, &AgentResult{AgentID: id}) {
 		t.Fatal("initial completion failed")
 	}
 	runtime := &AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
@@ -99,10 +99,10 @@ func TestRegisterContinuationRejectsStaleLifecycleCallbacks(t *testing.T) {
 	if newToken == oldToken {
 		t.Fatal("continuation reused lifecycle token")
 	}
-	if store.CompleteAgent(id, oldToken, &AgentToolResult{AgentID: id}) {
+	if store.CompleteAgent(id, oldToken, &AgentResult{AgentID: id}) {
 		t.Fatal("stale completion changed the replacement lifecycle")
 	}
-	if !store.CompleteAgent(id, newToken, &AgentToolResult{AgentID: id}) {
+	if !store.CompleteAgent(id, newToken, &AgentResult{AgentID: id}) {
 		t.Fatal("replacement completion was rejected")
 	}
 }
@@ -111,7 +111,7 @@ func TestAgentTaskStopLeavesNotificationForPartialResult(t *testing.T) {
 	store := NewStore()
 	ctx, cancel := context.WithCancel(context.Background())
 	id, token, err := store.Register(RegisterSpec{
-		Type:        TaskTypeAgent,
+		Type:        TypeAgent,
 		Description: "long task",
 		AgentType:   "Work",
 		Runtime:     &AgentRuntime{Cancel: cancel, Done: make(chan struct{})},
@@ -126,48 +126,21 @@ func TestAgentTaskStopLeavesNotificationForPartialResult(t *testing.T) {
 		t.Fatal("TaskStop did not cancel agent context")
 	}
 	task, _ := store.Task(id)
-	if task.Base().Status != StateKilled || task.Base().Notified {
+	if task.Base().Status != StatusKilled || task.Base().Notified {
 		t.Fatalf("task after stop = %#v, want killed and notification eligible", task.Base())
 	}
-	if !store.EnqueueNotification(id, token, TaskNotification{TaskID: id, Status: StateKilled}) {
+	if !store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusKilled}) {
 		t.Fatal("Agent TaskStop should retain terminal notification")
-	}
-}
-
-func TestPendingDrainInstallsSteeringMessages(t *testing.T) {
-	store := NewStore()
-	id, token, err := store.Register(RegisterSpec{Type: TaskTypeAgent, Description: "work", AgentType: "Work"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	child := agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil)
-	runtime := &AgentRuntime{Agent: child, Done: make(chan struct{})}
-	manager := NewManager(store, nil)
-	if _, err := store.attachAgentRuntime(id, runtime, "work"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EnqueuePendingMessage(id, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "queued"}}}); err != nil {
-		t.Fatal(err)
-	}
-	manager.installPendingDrain(id, token, runtime)
-	if err := runtime.Agent.OnEvent(llm.TurnEndEvent{}); err != nil {
-		t.Fatal(err)
-	}
-	if got := store.PendingMessages(id); len(got) != 0 {
-		t.Fatalf("pending queue after drain = %#v, want empty", got)
-	}
-	if !child.HasSteering() {
-		t.Fatal("drained message was not handed to agent steering")
 	}
 }
 
 func TestContinuationWaitsForOldRuntime(t *testing.T) {
 	store := NewStore()
-	id, token, err := store.Register(RegisterSpec{Type: TaskTypeAgent, Description: "work", AgentType: "Work"})
+	id, token, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work", AgentType: "Work"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentToolResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
 	done := make(chan struct{})
 	runtime := &AgentRuntime{Done: done}
 	store.mu.Lock()
@@ -177,7 +150,7 @@ func TestContinuationWaitsForOldRuntime(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		close(done)
 	}()
-	old, _, err := store.continuationRuntime(id)
+	old, _, err := store.ContinuationRuntime(id)
 	if err != nil || old != runtime {
 		t.Fatalf("continuation runtime = %p, %v; want %p", old, err, runtime)
 	}
@@ -185,5 +158,48 @@ func TestContinuationWaitsForOldRuntime(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("old runtime did not finish")
+	}
+}
+
+func TestStoreEnterViewLoadsTranscriptOnce(t *testing.T) {
+	store := NewStore()
+	id, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "view", AgentType: "Work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 没有 OutputFile 时 EnterView 仍应成功,只是没有可加载的 transcript
+	if !store.EnterView(id) {
+		t.Fatal("EnterView rejected a registered task")
+	}
+	if got := store.ViewingTaskID(); got != id {
+		t.Fatalf("viewing task = %q, want %q", got, id)
+	}
+	store.ExitView()
+	if got := store.ViewingTaskID(); got != "" {
+		t.Fatalf("viewing task after exit = %q, want empty", got)
+	}
+}
+
+func TestStoreEvictDropsTerminalTaskAndNotifications(t *testing.T) {
+	store := NewStore()
+	id, token, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "evict", AgentType: "Work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1.运行中的任务不可淘汰
+	if store.Evict(id) {
+		t.Fatal("running task must not be evicted")
+	}
+	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted})
+	// 2.终态任务淘汰后,任务和通知都从根投影消失
+	if !store.Evict(id) {
+		t.Fatal("terminal task was not evicted")
+	}
+	if _, ok := store.Task(id); ok {
+		t.Fatal("evicted task is still tracked")
+	}
+	if got := store.DrainNotifications(); len(got) != 0 {
+		t.Fatalf("notifications after evict = %#v, want empty", got)
 	}
 }

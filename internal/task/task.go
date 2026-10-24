@@ -1,4 +1,4 @@
-package subagent
+package task
 
 import (
 	"context"
@@ -8,32 +8,32 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-// TaskType 标识 Rivo 支持的两种后台任务实现
-type TaskType string
+// Type 标识 Rivo 支持的两种后台任务实现
+type Type string
 
 const (
-	TaskTypeBash  TaskType = "bash"
-	TaskTypeAgent TaskType = "agent"
+	TypeBash  Type = "bash"
+	TypeAgent Type = "agent"
 )
 
-type TaskStatus string
+type Status string
 
 const (
-	StateRunning   TaskStatus = "running"
-	StateCompleted TaskStatus = "completed"
-	StateFailed    TaskStatus = "failed"
-	StateKilled    TaskStatus = "killed"
+	StatusRunning   Status = "running"
+	StatusCompleted Status = "completed"
+	StatusFailed    Status = "failed"
+	StatusKilled    Status = "killed"
 )
 
-func (s TaskStatus) Terminal() bool {
-	return s == StateCompleted || s == StateFailed || s == StateKilled
+func (s Status) Terminal() bool {
+	return s == StatusCompleted || s == StatusFailed || s == StatusKilled
 }
 
-// TaskStateBase 是 BashTaskState 与 AgentTaskState 共享的公共 lifecycle 状态
-type TaskStateBase struct {
+// StateBase 是 BashState 与 AgentState 共享的公共 lifecycle 状态
+type StateBase struct {
 	ID             string
-	Type           TaskType
-	Status         TaskStatus
+	Type           Type
+	Status         Status
 	Description    string
 	ToolUseID      string
 	StartTime      time.Time
@@ -45,12 +45,12 @@ type TaskStateBase struct {
 	LifecycleToken uint64
 }
 
-type TaskState interface {
+type State interface {
 	taskState()
-	Base() *TaskStateBase
+	Base() *StateBase
 }
 
-type BashTaskResult struct {
+type BashResult struct {
 	Code        int  `json:"code"`
 	Interrupted bool `json:"interrupted"`
 }
@@ -61,10 +61,10 @@ type BashProcess interface {
 	Cleanup() error
 }
 
-type BashTaskState struct {
-	TaskStateBase
+type BashState struct {
+	StateBase
 	Command         string
-	Result          *BashTaskResult
+	Result          *BashResult
 	Process         BashProcess
 	ParentAgentID   string
 	Unregister      func()
@@ -74,8 +74,8 @@ type BashTaskState struct {
 	OutputBytes     int
 }
 
-func (*BashTaskState) taskState()             {}
-func (s *BashTaskState) Base() *TaskStateBase { return &s.TaskStateBase }
+func (*BashState) taskState()         {}
+func (s *BashState) Base() *StateBase { return &s.StateBase }
 
 type AgentProgress struct {
 	ToolUseCount     int
@@ -92,8 +92,8 @@ type ToolActivity struct {
 	IsRead              bool
 }
 
-type AgentTaskState struct {
-	TaskStateBase
+type AgentState struct {
+	StateBase
 	AgentID             string
 	Prompt              string
 	AgentType           string
@@ -103,7 +103,7 @@ type AgentTaskState struct {
 	WorktreePath        string
 	Worktree            bool
 	Error               string
-	Result              *AgentToolResult
+	Result              *AgentResult
 	Progress            *AgentProgress
 	Abort               context.CancelFunc
 	UnregisterCleanup   func()
@@ -115,8 +115,8 @@ type AgentTaskState struct {
 	EvictAfter          *time.Time
 }
 
-func (*AgentTaskState) taskState()             {}
-func (s *AgentTaskState) Base() *TaskStateBase { return &s.TaskStateBase }
+func (*AgentState) taskState()         {}
+func (s *AgentState) Base() *StateBase { return &s.StateBase }
 
 type AgentRuntime struct {
 	Agent                   *agent.Agent
@@ -132,7 +132,7 @@ type AgentRuntime struct {
 	Run                     func(context.Context, string) (*llm.AssistantMessage, error)
 }
 
-type AgentToolInput struct {
+type AgentInput struct {
 	Description  string             `json:"description"`
 	Prompt       string             `json:"prompt"`
 	Name         string             `json:"name,omitempty"`
@@ -146,18 +146,18 @@ type TextBlock struct {
 	Text string `json:"text"`
 }
 
-type AgentToolLaunched struct {
-	Status       string     `json:"status"`
-	AgentID      string     `json:"agentId"`
-	Description  string     `json:"description"`
-	Prompt       string     `json:"prompt"`
-	SubagentType string     `json:"subagentType"`
-	State        TaskStatus `json:"state"`
-	OutputFile   string     `json:"outputFile"`
-	WorktreePath string     `json:"worktreePath,omitempty"`
+type AgentLaunched struct {
+	Status       string `json:"status"`
+	AgentID      string `json:"agentId"`
+	Description  string `json:"description"`
+	Prompt       string `json:"prompt"`
+	SubagentType string `json:"subagentType"`
+	State        Status `json:"state"`
+	OutputFile   string `json:"outputFile"`
+	WorktreePath string `json:"worktreePath,omitempty"`
 }
 
-type AgentToolResult struct {
+type AgentResult struct {
 	AgentID           string      `json:"agentId"`
 	AgentType         string      `json:"agentType,omitempty"`
 	Content           []TextBlock `json:"content"`
@@ -167,30 +167,30 @@ type AgentToolResult struct {
 	Usage             llm.Usage   `json:"usage"`
 }
 
-type TaskNotification struct {
-	TaskID          string     `json:"task_id"`
-	ToolUseID       string     `json:"tool_use_id,omitempty"`
-	Status          TaskStatus `json:"status"`
-	OutputFile      string     `json:"output_file"`
-	Summary         string     `json:"summary"`
-	Result          string     `json:"result,omitempty"`
-	TotalTokens     int        `json:"total_tokens,omitempty"`
-	ToolUses        int        `json:"tool_uses,omitempty"`
-	DurationMs      int64      `json:"duration_ms,omitempty"`
-	WorktreePath    string     `json:"worktree_path,omitempty"`
-	OutputTruncated bool       `json:"output_truncated,omitempty"`
-	OutputBytes     int        `json:"output_bytes,omitempty"`
+type Notification struct {
+	TaskID          string `json:"task_id"`
+	ToolUseID       string `json:"tool_use_id,omitempty"`
+	Status          Status `json:"status"`
+	OutputFile      string `json:"output_file"`
+	Summary         string `json:"summary"`
+	Result          string `json:"result,omitempty"`
+	TotalTokens     int    `json:"total_tokens,omitempty"`
+	ToolUses        int    `json:"tool_uses,omitempty"`
+	DurationMs      int64  `json:"duration_ms,omitempty"`
+	WorktreePath    string `json:"worktree_path,omitempty"`
+	OutputTruncated bool   `json:"output_truncated,omitempty"`
+	OutputBytes     int    `json:"output_bytes,omitempty"`
 }
 
-type TaskStopInput struct {
+type StopInput struct {
 	TaskID string `json:"task_id"`
 }
 
-type TaskStopOutput struct {
-	Message  string   `json:"message"`
-	TaskID   string   `json:"task_id"`
-	TaskType TaskType `json:"task_type"`
-	Command  string   `json:"command"`
+type StopOutput struct {
+	Message string `json:"message"`
+	TaskID  string `json:"task_id"`
+	Type    Type   `json:"task_type"`
+	Command string `json:"command"`
 }
 
 type StopTaskError struct {
@@ -202,6 +202,37 @@ func (e *StopTaskError) Error() string { return e.Message }
 
 type Task interface {
 	Name() string
-	Type() TaskType
+	Type() Type
 	Kill(taskID string, store *Store) error
+}
+
+// ResumeSource 是磁盘侧描述,指向已不在易失 store 中的任务
+type ResumeSource struct {
+	ID           string
+	AgentType    string
+	Description  string
+	OutputFile   string
+	WorktreePath string
+}
+
+// ResumeResolver 查找已被 store 淘汰的任务,false 表示 transcript 已不存在
+type ResumeResolver func(taskID string) (ResumeSource, bool)
+
+// AgentSpec 是构造子 agent runtime 所需的完整描述
+type AgentSpec struct {
+	ID              string
+	Description     string
+	Prompt          string
+	AgentType       string
+	ToolUseID       string
+	OutputFile      string
+	WorktreePath    string
+	Worktree        bool
+	PendingMessages []llm.UserMessage
+	InitialMessages []llm.Message
+	Model           llm.Model
+	Thinking        llm.ThinkingLevel
+	Continuation    bool
+	ParentContext   *llm.Context
+	ParentConfig    *llm.AgentConfig
 }

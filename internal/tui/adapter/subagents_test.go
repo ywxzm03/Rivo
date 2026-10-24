@@ -6,7 +6,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
-	"github.com/ywxzm03/Rivo/internal/subagent"
+	"github.com/ywxzm03/Rivo/internal/task"
 )
 
 func TestProjectSubagentTasksUsesLoadedTranscriptState(t *testing.T) {
@@ -15,16 +15,16 @@ func TestProjectSubagentTasksUsesLoadedTranscriptState(t *testing.T) {
 	if err := manager.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "on disk"}}}); err != nil {
 		t.Fatal(err)
 	}
-	state := &subagent.AgentTaskState{
-		TaskStateBase: subagent.TaskStateBase{
+	state := &task.AgentState{
+		StateBase: task.StateBase{
 			ID:         "agent-1",
-			Type:       subagent.TaskTypeAgent,
-			Status:     subagent.StateRunning,
+			Type:       task.TypeAgent,
+			Status:     task.StatusRunning,
 			OutputFile: path,
 		},
 		DiskLoaded: true,
 	}
-	views := projectSubagentTasks([]subagent.TaskState{state}, "agent-1")
+	views := projectSubagentTasks([]task.State{state}, "agent-1")
 	if len(views) != 1 {
 		t.Fatalf("views = %d, want 1", len(views))
 	}

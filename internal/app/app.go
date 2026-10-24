@@ -16,7 +16,11 @@ import (
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/subagent"
+	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tool"
+	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
+	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
+	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
 )
 
 type App struct {
@@ -158,10 +162,10 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 	sm.AttachFileHistory(agentDir)
 
-	manager := subagent.NewManager(subagent.NewStore(), nil)
+	manager := subagent.NewManager(taskpkg.NewStore(), nil)
 	var notificationMu sync.Mutex
 	var notificationBatch int
-	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{Background: tool.NewBackgroundBashRunner(manager.Store())}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}, manager.AgentTool(), manager.SendMessageTool(), manager.TaskStopTool()}
+	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{Background: tool.NewBackgroundBashRunner(manager.Store())}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}, agenttool.New(manager), sendmessagetool.New(manager), taskstoptool.New(manager.Store())}
 	if runtime.GOOS == "windows" {
 		tools = append(tools, &tool.PowerShell{})
 	}
@@ -214,7 +218,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	ag.PrepareRequest = coord.PrepareRequest
 	ag.CommitMessages = coord.CommitMessages
 	coord.Agent = ag
-	manager.SetFactory(newSubagentFactory(subagentFactoryConfig{
+	runner := &agenttool.Runner{
 		ParentCwd:   cwd,
 		SessionDir:  filepath.Dir(sm.Path()),
 		AgentDir:    agentDir,
@@ -223,9 +227,9 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		StreamFn:    streamFn,
 		ParentTools: tools,
 		TaskStore:   manager.Store(),
-		OnEvent:     onEvent,
-	}))
-	manager.SetResumeResolver(subagentResumeResolver(filepath.Dir(sm.Path())))
+	}
+	manager.SetFactory(runner.Run)
+	manager.SetResumeResolver(agenttool.ResumeResolver(filepath.Dir(sm.Path())))
 	return &App{
 		agent:       ag,
 		session:     sm,
@@ -239,7 +243,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}, nil
 }
 
-func subagentNotificationMessages(notifications []subagent.TaskNotification) []llm.Message {
+func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Message {
 	if len(notifications) == 0 {
 		return nil
 	}
@@ -257,7 +261,7 @@ func subagentNotificationMessages(notifications []subagent.TaskNotification) []l
 }
 
 // SubagentStore exposes the root task store for TUI task projections and controls.
-func (a *App) SubagentStore() *subagent.Store {
+func (a *App) SubagentStore() *taskpkg.Store {
 	if a.subagents == nil {
 		return nil
 	}
@@ -285,14 +289,14 @@ func (a *App) StopSubagent(taskID string) error {
 	if store == nil {
 		return fmt.Errorf("app: subagent manager is unavailable")
 	}
-	_, err := (&subagent.TaskStopTool{Store: store}).Execute(context.Background(), map[string]any{"task_id": taskID})
+	_, err := taskstoptool.New(store).Execute(context.Background(), map[string]any{"task_id": taskID})
 	return err
 }
 
 // ContinueSubagent resumes a terminal child while keeping its stable task ID.
-func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (subagent.AgentToolLaunched, error) {
+func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (taskpkg.AgentLaunched, error) {
 	if a.subagents == nil {
-		return subagent.AgentToolLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
+		return taskpkg.AgentLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
 	}
 	return a.subagents.Continue(ctx, taskID, prompt)
 }

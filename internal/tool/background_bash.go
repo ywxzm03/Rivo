@@ -8,16 +8,16 @@ import (
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/subagent"
+	"github.com/ywxzm03/Rivo/internal/task"
 )
 
 type backgroundBashRunner struct {
-	store *subagent.Store
+	store *task.Store
 }
 
 const backgroundMaxOutputBytes = defaultMaxBytes
 
-func NewBackgroundBashRunner(store *subagent.Store) BackgroundRunner {
+func NewBackgroundBashRunner(store *task.Store) BackgroundRunner {
 	return &backgroundBashRunner{store: store}
 }
 
@@ -63,11 +63,11 @@ func (r *backgroundBashRunner) RunBackground(ctx context.Context, args map[strin
 		return llm.ToolResult{}, err
 	}
 	process := &backgroundProcess{cmd: cmd, file: output, capture: backgroundOutput, cancel: cancel}
-	id, token, err := r.store.Register(subagent.RegisterSpec{
-		Type:        subagent.TaskTypeBash,
+	id, token, err := r.store.Register(task.RegisterSpec{
+		Type:        task.TypeBash,
 		Description: command,
 		OutputFile:  path,
-		BashState: &subagent.BashTaskState{
+		BashState: &task.BashState{
 			Command: command,
 			Process: process,
 		},
@@ -108,29 +108,29 @@ func (p *backgroundProcess) Cleanup() error {
 	return err
 }
 
-func waitBackgroundBash(ctx context.Context, store *subagent.Store, id string, token uint64, process *backgroundProcess, cmd *exec.Cmd) {
+func waitBackgroundBash(ctx context.Context, store *task.Store, id string, token uint64, process *backgroundProcess, cmd *exec.Cmd) {
 	defer process.cancel()
 	err := cmd.Wait()
 	_ = process.Cleanup()
 	truncated, bytes := process.capture.Stats()
 	store.SetBashOutputStats(id, token, truncated, bytes)
-	notification := func(status subagent.TaskStatus, summary string) subagent.TaskNotification {
-		return subagent.TaskNotification{TaskID: id, Status: status, OutputFile: outputFile(store, id), Summary: summary, OutputTruncated: truncated, OutputBytes: bytes}
+	notification := func(status task.Status, summary string) task.Notification {
+		return task.Notification{TaskID: id, Status: status, OutputFile: outputFile(store, id), Summary: summary, OutputTruncated: truncated, OutputBytes: bytes}
 	}
 	if ctx.Err() != nil {
-		store.FailBash(id, token, &subagent.BashTaskResult{Code: -1, Interrupted: true}, ctx.Err())
-		store.EnqueueNotification(id, token, notification(subagent.StateFailed, "background bash interrupted"))
+		store.FailBash(id, token, &task.BashResult{Code: -1, Interrupted: true}, ctx.Err())
+		store.EnqueueNotification(id, token, notification(task.StatusFailed, "background bash interrupted"))
 		return
 	}
-	result := &subagent.BashTaskResult{Code: 0}
+	result := &task.BashResult{Code: 0}
 	if err != nil {
 		result.Code = exitCode(err)
 		store.FailBash(id, token, result, err)
-		store.EnqueueNotification(id, token, notification(subagent.StateFailed, "background bash failed"))
+		store.EnqueueNotification(id, token, notification(task.StatusFailed, "background bash failed"))
 		return
 	}
 	store.CompleteBash(id, token, result)
-	store.EnqueueNotification(id, token, notification(subagent.StateCompleted, "background bash completed"))
+	store.EnqueueNotification(id, token, notification(task.StatusCompleted, "background bash completed"))
 }
 
 type limitedBackgroundOutput struct {
@@ -163,7 +163,7 @@ func (w *limitedBackgroundOutput) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func outputFile(store *subagent.Store, id string) string {
+func outputFile(store *task.Store, id string) string {
 	task, ok := store.Task(id)
 	if !ok {
 		return ""

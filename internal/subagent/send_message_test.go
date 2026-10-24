@@ -7,12 +7,13 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
 func sendMessageManager(t *testing.T) *Manager {
 	t.Helper()
-	return NewManager(NewStore(), func(_ context.Context, spec AgentTaskSpec) (*AgentRuntime, error) {
-		runtime := &AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	return NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
 		runtime.Run = func(context.Context, string) (*llm.AssistantMessage, error) {
 			return &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: spec.Prompt}}}, nil
 		}
@@ -23,8 +24,8 @@ func sendMessageManager(t *testing.T) *Manager {
 func TestSendMessageQueuesForRunningTask(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
-	manager := NewManager(NewStore(), func(context.Context, AgentTaskSpec) (*AgentRuntime, error) {
-		runtime := &AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
 		runtime.Run = func(ctx context.Context, _ string) (*llm.AssistantMessage, error) {
 			close(started)
 			<-release
@@ -32,7 +33,7 @@ func TestSendMessageQueuesForRunningTask(t *testing.T) {
 		}
 		return runtime, nil
 	})
-	launched, err := manager.Start(context.Background(), AgentToolInput{Description: "long", Prompt: "work"})
+	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "long", Prompt: "work"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,16 +50,16 @@ func TestSendMessageQueuesForRunningTask(t *testing.T) {
 		t.Fatalf("pending = %#v, want one queued message", pending)
 	}
 	close(release)
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, StateCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
 }
 
 func TestSendMessageResumesTerminalTask(t *testing.T) {
 	manager := sendMessageManager(t)
-	launched, err := manager.Start(context.Background(), AgentToolInput{Description: "probe", Prompt: "ALPHA"})
+	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "probe", Prompt: "ALPHA"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, StateCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
 	manager.Store().DrainNotifications()
 
 	result, err := manager.SendMessage(context.Background(), launched.AgentID, "BETA")
@@ -68,7 +69,7 @@ func TestSendMessageResumesTerminalTask(t *testing.T) {
 	if result.Status != "resumed" || result.TaskID != launched.AgentID {
 		t.Fatalf("send result = %#v", result)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, StateCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
 	notifications := manager.Store().DrainNotifications()
 	if len(notifications) != 1 || notifications[0].TaskID != launched.AgentID || notifications[0].Result != "BETA" {
 		t.Fatalf("continuation notifications = %#v", notifications)
@@ -77,17 +78,17 @@ func TestSendMessageResumesTerminalTask(t *testing.T) {
 
 func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 	manager := sendMessageManager(t)
-	var factorySpec AgentTaskSpec
+	var factorySpec taskpkg.AgentSpec
 	base := manager.factory
-	manager.SetFactory(func(ctx context.Context, spec AgentTaskSpec) (*AgentRuntime, error) {
+	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
 		factorySpec = spec
 		return base(ctx, spec)
 	})
-	manager.SetResumeResolver(func(taskID string) (ResumeSource, bool) {
+	manager.SetResumeResolver(func(taskID string) (taskpkg.ResumeSource, bool) {
 		if taskID != "agent-evicted-1" {
-			return ResumeSource{}, false
+			return taskpkg.ResumeSource{}, false
 		}
-		return ResumeSource{ID: taskID, AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl"}, true
+		return taskpkg.ResumeSource{ID: taskID, AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl"}, true
 	})
 
 	result, err := manager.SendMessage(context.Background(), "agent-evicted-1", "continue please")
@@ -101,13 +102,13 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 	if !factorySpec.Continuation || factorySpec.OutputFile != "/tmp/agent-evicted-1.jsonl" || factorySpec.AgentType != "explore" {
 		t.Fatalf("factory spec = %#v", factorySpec)
 	}
-	waitForTaskStatus(t, manager.Store(), "agent-evicted-1", StateCompleted)
+	waitForTaskStatus(t, manager.Store(), "agent-evicted-1", taskpkg.StatusCompleted)
 }
 
 func TestSendMessageRejectsUnknownTask(t *testing.T) {
 	manager := sendMessageManager(t)
 	_, err := manager.SendMessage(context.Background(), "agent-missing", "hello")
-	var stopErr *StopTaskError
+	var stopErr *taskpkg.StopTaskError
 	if !errors.As(err, &stopErr) || stopErr.Code != "not_found" {
 		t.Fatalf("error = %v, want not_found", err)
 	}

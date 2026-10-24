@@ -1,4 +1,4 @@
-package subagent
+package task
 
 import (
 	"context"
@@ -14,21 +14,21 @@ import (
 // Store 是任务状态、lifecycle runtime 句柄和通知的唯一所有者
 type Store struct {
 	mu            sync.Mutex
-	tasks         map[string]TaskState
+	tasks         map[string]State
 	runtimes      map[string]*AgentRuntime
-	notifications []TaskNotification
+	notifications []Notification
 	nextID        uint64
 	nextToken     uint64
 	viewingTaskID string
 }
 
 func NewStore() *Store {
-	return &Store{tasks: make(map[string]TaskState), runtimes: make(map[string]*AgentRuntime)}
+	return &Store{tasks: make(map[string]State), runtimes: make(map[string]*AgentRuntime)}
 }
 
 type RegisterSpec struct {
 	ID           string
-	Type         TaskType
+	Type         Type
 	Description  string
 	ToolUseID    string
 	OutputFile   string
@@ -40,14 +40,14 @@ type RegisterSpec struct {
 	WorktreePath string
 	Worktree     bool
 	Runtime      *AgentRuntime
-	BashState    *BashTaskState
-	AgentState   *AgentTaskState
+	BashState    *BashState
+	AgentState   *AgentState
 }
 
 func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if spec.Type != TaskTypeBash && spec.Type != TaskTypeAgent {
+	if spec.Type != TypeBash && spec.Type != TypeAgent {
 		return "", 0, fmt.Errorf("subagent: unsupported task type %q", spec.Type)
 	}
 	id := spec.ID
@@ -58,27 +58,27 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 		// 因 O_EXCL 失败。
 		id = fmt.Sprintf("%s-%d-%d", spec.Type, time.Now().UnixNano(), s.nextID)
 	} else if existing, exists := s.tasks[id]; exists {
-		if existing.Base().Status == StateRunning {
+		if existing.Base().Status == StatusRunning {
 			return "", 0, fmt.Errorf("subagent: task %s is already running", id)
 		}
 		return "", 0, fmt.Errorf("subagent: task %s already exists; use continuation", id)
 	}
 	s.nextToken++
 	token := s.nextToken
-	base := TaskStateBase{ID: id, Type: spec.Type, Status: StateRunning, Description: spec.Description, ToolUseID: spec.ToolUseID, StartTime: time.Now(), OutputFile: spec.OutputFile, LifecycleToken: token}
-	var state TaskState
+	base := StateBase{ID: id, Type: spec.Type, Status: StatusRunning, Description: spec.Description, ToolUseID: spec.ToolUseID, StartTime: time.Now(), OutputFile: spec.OutputFile, LifecycleToken: token}
+	var state State
 	switch spec.Type {
-	case TaskTypeBash:
+	case TypeBash:
 		if spec.BashState == nil {
-			spec.BashState = &BashTaskState{}
+			spec.BashState = &BashState{}
 		}
-		spec.BashState.TaskStateBase = base
+		spec.BashState.StateBase = base
 		state = spec.BashState
-	case TaskTypeAgent:
+	case TypeAgent:
 		if spec.AgentState == nil {
-			spec.AgentState = &AgentTaskState{}
+			spec.AgentState = &AgentState{}
 		}
-		spec.AgentState.TaskStateBase = base
+		spec.AgentState.StateBase = base
 		spec.AgentState.AgentID = id
 		spec.AgentState.Prompt = spec.Prompt
 		spec.AgentState.AgentType = spec.AgentType
@@ -97,7 +97,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	return id, token, nil
 }
 
-func (s *Store) Task(id string) (TaskState, bool) {
+func (s *Store) Task(id string) (State, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id]
@@ -107,10 +107,10 @@ func (s *Store) Task(id string) (TaskState, bool) {
 	return cloneTaskState(task), true
 }
 
-func (s *Store) Snapshot() []TaskState {
+func (s *Store) Snapshot() []State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := make([]TaskState, 0, len(s.tasks))
+	result := make([]State, 0, len(s.tasks))
 	for _, task := range s.tasks {
 		result = append(result, cloneTaskState(task))
 	}
@@ -135,7 +135,7 @@ func (s *Store) EnterView(id string) bool {
 
 func (s *Store) ExitView() {
 	s.mu.Lock()
-	if task, ok := s.tasks[s.viewingTaskID].(*AgentTaskState); ok && !task.Retain {
+	if task, ok := s.tasks[s.viewingTaskID].(*AgentState); ok && !task.Retain {
 		task.Messages = nil
 		task.DiskLoaded = false
 	}
@@ -153,7 +153,7 @@ func (s *Store) ViewingTaskID() string {
 // 之后重复的 TUI 快照复用内存副本,不必每帧重新解析 JSONL 文件。
 func (s *Store) LoadTaskMessages(id string) bool {
 	s.mu.Lock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.DiskLoaded || task.Base().OutputFile == "" {
 		s.mu.Unlock()
 		return ok
@@ -167,7 +167,7 @@ func (s *Store) LoadTaskMessages(id string) bool {
 	messages := sm.BuildContext().Messages()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.tasks[id].(*AgentTaskState)
+	current, ok := s.tasks[id].(*AgentState)
 	if !ok || current.Base().OutputFile != path {
 		return false
 	}
@@ -200,7 +200,7 @@ func (s *Store) Evict(id string) bool {
 	return true
 }
 
-func (s *Store) EnqueueNotification(id string, token uint64, notification TaskNotification) bool {
+func (s *Store) EnqueueNotification(id string, token uint64, notification Notification) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id]
@@ -212,18 +212,18 @@ func (s *Store) EnqueueNotification(id string, token uint64, notification TaskNo
 	return true
 }
 
-func (s *Store) DrainNotifications() []TaskNotification {
+func (s *Store) DrainNotifications() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := append([]TaskNotification(nil), s.notifications...)
+	result := append([]Notification(nil), s.notifications...)
 	s.notifications = nil
 	return result
 }
 
-func (s *Store) PeekNotifications() []TaskNotification {
+func (s *Store) PeekNotifications() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]TaskNotification(nil), s.notifications...)
+	return append([]Notification(nil), s.notifications...)
 }
 
 func (s *Store) AckNotifications(count int) {
@@ -236,14 +236,14 @@ func (s *Store) AckNotifications(count int) {
 		s.notifications = nil
 		return
 	}
-	s.notifications = append([]TaskNotification(nil), s.notifications[count:]...)
+	s.notifications = append([]Notification(nil), s.notifications[count:]...)
 }
 
 func (s *Store) EnqueuePendingMessage(id string, message llm.UserMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().Status != StatusRunning {
 		return errors.New("subagent: task is not running")
 	}
 	message = cloneUserMessage(message)
@@ -256,7 +256,7 @@ func (s *Store) EnqueuePendingMessage(id string, message llm.UserMessage) error 
 func (s *Store) PendingMessages(id string) []llm.UserMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok {
 		return nil
 	}
@@ -270,7 +270,7 @@ func (s *Store) PendingMessages(id string) []llm.UserMessage {
 func (s *Store) ClearPendingMessages(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if task, ok := s.tasks[id].(*AgentTaskState); ok {
+	if task, ok := s.tasks[id].(*AgentState); ok {
 		task.PendingMessages = nil
 	}
 }
@@ -278,8 +278,8 @@ func (s *Store) ClearPendingMessages(id string) {
 func (s *Store) DrainPendingMessages(id string, token uint64) []llm.UserMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StateRunning || len(task.PendingMessages) == 0 {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning || len(task.PendingMessages) == 0 {
 		return nil
 	}
 	messages := append([]llm.UserMessage(nil), task.PendingMessages...)
@@ -290,11 +290,11 @@ func (s *Store) DrainPendingMessages(id string, token uint64) []llm.UserMessage 
 func (s *Store) RequeuePendingMessagesFront(id string, token uint64, messages []llm.UserMessage) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning {
 		return false
 	}
-	queue := cloneUserMessages(messages)
+	queue := CloneUserMessages(messages)
 	queue = append(queue, task.PendingMessages...)
 	task.PendingMessages = queue
 	return true
@@ -303,8 +303,8 @@ func (s *Store) RequeuePendingMessagesFront(id string, token uint64, messages []
 func (s *Store) UpdateAgentProgress(id string, token uint64, update func(*AgentProgress)) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning {
 		return false
 	}
 	if task.Progress == nil {
@@ -317,7 +317,7 @@ func (s *Store) UpdateAgentProgress(id string, token uint64, update func(*AgentP
 func (s *Store) RecordAgentMessages(id string, token uint64, messages []llm.Message) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
@@ -334,7 +334,7 @@ func (s *Store) RecordAgentMessages(id string, token uint64, messages []llm.Mess
 	return true
 }
 
-func (s *Store) CompleteAgent(id string, token uint64, result *AgentToolResult) bool {
+func (s *Store) CompleteAgent(id string, token uint64, result *AgentResult) bool {
 	return s.completeAgent(id, token, result, nil)
 }
 
@@ -342,14 +342,14 @@ func (s *Store) FailAgent(id string, token uint64, err error) bool {
 	return s.completeAgent(id, token, nil, err)
 }
 
-func (s *Store) CompleteBash(id string, token uint64, result *BashTaskResult) bool {
+func (s *Store) CompleteBash(id string, token uint64, result *BashResult) bool {
 	return s.completeBash(id, token, result, nil)
 }
 
 func (s *Store) SetBashOutputStats(id string, token uint64, truncated bool, bytes int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*BashTaskState)
+	task, ok := s.tasks[id].(*BashState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
@@ -358,15 +358,15 @@ func (s *Store) SetBashOutputStats(id string, token uint64, truncated bool, byte
 	return true
 }
 
-func (s *Store) FailBash(id string, token uint64, result *BashTaskResult, err error) bool {
+func (s *Store) FailBash(id string, token uint64, result *BashResult, err error) bool {
 	return s.completeBash(id, token, result, err)
 }
 
-func (s *Store) completeAgent(id string, token uint64, result *AgentToolResult, err error) bool {
+func (s *Store) completeAgent(id string, token uint64, result *AgentResult, err error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning {
 		return false
 	}
 	now := time.Now()
@@ -374,14 +374,14 @@ func (s *Store) completeAgent(id string, token uint64, result *AgentToolResult, 
 	task.Abort = nil
 	task.UnregisterCleanup = nil
 	if err != nil {
-		task.Base().Status = StateFailed
+		task.Base().Status = StatusFailed
 		task.Error = err.Error()
 		if task.Base().ID != s.viewingTaskID && !task.Retain {
 			task.Messages = nil
 		}
 		return true
 	}
-	task.Base().Status = StateCompleted
+	task.Base().Status = StatusCompleted
 	task.Result = result
 	if task.Base().ID != s.viewingTaskID && !task.Retain {
 		task.Messages = nil
@@ -389,20 +389,20 @@ func (s *Store) completeAgent(id string, token uint64, result *AgentToolResult, 
 	return true
 }
 
-func (s *Store) completeBash(id string, token uint64, result *BashTaskResult, err error) bool {
+func (s *Store) completeBash(id string, token uint64, result *BashResult, err error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*BashTaskState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*BashState)
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning {
 		return false
 	}
 	now := time.Now()
 	task.Base().EndTime = &now
 	task.Process = nil
 	if err != nil {
-		task.Base().Status = StateFailed
+		task.Base().Status = StatusFailed
 	} else {
-		task.Base().Status = StateCompleted
+		task.Base().Status = StatusCompleted
 	}
 	task.Result = result
 	return true
@@ -411,16 +411,16 @@ func (s *Store) completeBash(id string, token uint64, result *BashTaskResult, er
 func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, func(), uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	runtime := s.runtimes[id]
-	if !ok || runtime == nil || task.Base().Status != StateRunning {
+	if !ok || runtime == nil || task.Base().Status != StatusRunning {
 		return nil, nil, nil, 0, &StopTaskError{Code: "not_running", Message: "task is not running"}
 	}
 	now := time.Now()
 	token := task.Base().LifecycleToken
 	abort := task.Abort
 	cleanup := task.UnregisterCleanup
-	task.Base().Status = StateKilled
+	task.Base().Status = StatusKilled
 	task.Base().EndTime = &now
 	task.Abort = nil
 	task.UnregisterCleanup = nil
@@ -428,12 +428,12 @@ func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, fu
 	return runtime, abort, cleanup, token, nil
 }
 
-// continuationRuntime 返回当前 runtime 和 token,调用方据此取消它
+// ContinuationRuntime 返回当前 runtime 和 token,调用方据此取消它
 // 并在替换任务状态前等待 Done。
-func (s *Store) continuationRuntime(id string) (*AgentRuntime, uint64, error) {
+func (s *Store) ContinuationRuntime(id string) (*AgentRuntime, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok {
 		return nil, 0, &StopTaskError{Code: "not_found", Message: fmt.Sprintf("No task found with ID: %s", id)}
 	}
@@ -452,20 +452,20 @@ func (s *Store) continuationRuntime(id string) (*AgentRuntime, uint64, error) {
 func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old, ok := s.tasks[id].(*AgentTaskState)
+	old, ok := s.tasks[id].(*AgentState)
 	if !ok {
 		return 0, &StopTaskError{Code: "not_found", Message: fmt.Sprintf("No task found with ID: %s", id)}
 	}
-	if old.Base().Status == StateRunning {
+	if old.Base().Status == StatusRunning {
 		return 0, errors.New("subagent: task is still running")
 	}
 	s.nextToken++
 	token := s.nextToken
-	state := &AgentTaskState{
-		TaskStateBase: TaskStateBase{
+	state := &AgentState{
+		StateBase: StateBase{
 			ID:             old.Base().ID,
-			Type:           TaskTypeAgent,
-			Status:         StateRunning,
+			Type:           TypeAgent,
+			Status:         StatusRunning,
 			Description:    old.Base().Description,
 			ToolUseID:      old.Base().ToolUseID,
 			StartTime:      old.Base().StartTime,
@@ -497,7 +497,7 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 	return token, nil
 }
 
-func cloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
+func CloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
 	result := make([]llm.UserMessage, len(messages))
 	for i, message := range messages {
 		result[i] = cloneUserMessage(message)
@@ -526,21 +526,21 @@ func cloneContentReplacements(source map[string][]llm.Content) map[string][]llm.
 	return result
 }
 
-func (s *Store) beginBashKill(id string) (*BashTaskState, BashProcess, func(), uint64, error) {
+func (s *Store) beginBashKill(id string) (*BashState, BashProcess, func(), uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*BashTaskState)
-	if !ok || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*BashState)
+	if !ok || task.Base().Status != StatusRunning {
 		return nil, nil, nil, 0, &StopTaskError{Code: "not_running", Message: "task is not running"}
 	}
 	now := time.Now()
 	token := task.Base().LifecycleToken
 	process := task.Process
 	cleanup := task.Unregister
-	task.Base().Status = StateKilled
+	task.Base().Status = StatusKilled
 	task.Base().EndTime = &now
 	task.Base().Notified = true
-	task.Result = &BashTaskResult{Code: 137, Interrupted: true}
+	task.Result = &BashResult{Code: 137, Interrupted: true}
 	task.Process = nil
 	task.Unregister = nil
 	if task.CleanupTimeout != nil {
@@ -550,14 +550,14 @@ func (s *Store) beginBashKill(id string) (*BashTaskState, BashProcess, func(), u
 	return task, process, cleanup, token, nil
 }
 
-func (s *Store) restoreBashKill(task *BashTaskState, process BashProcess, token uint64) bool {
+func (s *Store) restoreBashKill(task *BashState, process BashProcess, token uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.tasks[task.Base().ID].(*BashTaskState)
-	if !ok || current.Base().LifecycleToken != token || current.Base().Status != StateKilled {
+	current, ok := s.tasks[task.Base().ID].(*BashState)
+	if !ok || current.Base().LifecycleToken != token || current.Base().Status != StatusKilled {
 		return false
 	}
-	current.Base().Status = StateRunning
+	current.Base().Status = StatusRunning
 	current.Base().EndTime = nil
 	current.Base().Notified = false
 	current.Result = nil
@@ -565,7 +565,7 @@ func (s *Store) restoreBashKill(task *BashTaskState, process BashProcess, token 
 	return true
 }
 
-func (s *Store) removeRuntime(id string, token uint64) {
+func (s *Store) RemoveRuntime(id string, token uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if task, ok := s.tasks[id]; ok && task.Base().LifecycleToken == token {
@@ -573,11 +573,11 @@ func (s *Store) removeRuntime(id string, token uint64) {
 	}
 }
 
-func (s *Store) attachAgentRuntime(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
+func (s *Store) AttachAgentRuntime(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
-	if !ok || task.Base().Status != StateRunning {
+	task, ok := s.tasks[id].(*AgentState)
+	if !ok || task.Base().Status != StatusRunning {
 		return 0, errors.New("subagent: task is not running")
 	}
 	task.Prompt = prompt
@@ -586,10 +586,10 @@ func (s *Store) attachAgentRuntime(id string, runtime *AgentRuntime, prompt stri
 	return task.Base().LifecycleToken, nil
 }
 
-func (s *Store) setRuntimeMetadata(id string, token uint64, runtime *AgentRuntime) bool {
+func (s *Store) SetRuntimeMetadata(id string, token uint64, runtime *AgentRuntime) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
@@ -608,7 +608,7 @@ func (s *Store) setRuntimeMetadata(id string, token uint64, runtime *AgentRuntim
 func (s *Store) ClearWorktreePath(id string, token uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	task, ok := s.tasks[id].(*AgentTaskState)
+	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
@@ -616,11 +616,11 @@ func (s *Store) ClearWorktreePath(id string, token uint64) bool {
 	return true
 }
 
-func (s *Store) failReserved(id string, _ error) bool {
+func (s *Store) FailReserved(id string, _ error) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id]
-	if !ok || task.Base().Status != StateRunning {
+	if !ok || task.Base().Status != StatusRunning {
 		return false
 	}
 	delete(s.tasks, id)
@@ -651,14 +651,14 @@ func cloneContent(content []llm.Content) []llm.Content {
 	return result
 }
 
-func cloneTaskState(task TaskState) TaskState {
+func cloneTaskState(task State) State {
 	switch state := task.(type) {
-	case *BashTaskState:
+	case *BashState:
 		copy := *state
 		copy.Process = nil
 		copy.Unregister = nil
 		return &copy
-	case *AgentTaskState:
+	case *AgentState:
 		copy := *state
 		copy.Abort = nil
 		copy.UnregisterCleanup = nil
