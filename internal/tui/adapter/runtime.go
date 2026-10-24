@@ -84,6 +84,25 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
 		}
 	}
+	if req.Kind == "follow-up" {
+		var err error
+		var revision uint64
+		if activeApp == nil {
+			err = app.ErrFollowUpUnavailable
+		} else {
+			if req.Message != nil {
+				err = activeApp.EnqueueFollowUpMessage(*req.Message)
+			} else {
+				err = activeApp.EnqueueFollowUp(req.Value)
+			}
+			if err == nil {
+				revision = activeApp.FollowUpRevision()
+			}
+		}
+		return func() tea.Msg {
+			return tui.FollowUpResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
+		}
+	}
 	value := req.Value
 	if req.Kind == "run" {
 		var err error
@@ -267,7 +286,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	var message *tui.Message
 	var previousID string
 	var status string
-	steeringChanged := false
+	queueChanged := false
 	previousToolAnchor := r.activeToolAnchorID
 	switch event := event.(type) {
 	case llm.AgentStartEvent:
@@ -285,7 +304,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			r.sealToolGroupLocked()
 			r.userMessages++
 			if r.userMessages > 1 {
-				steeringChanged = true
+				queueChanged = true
 				r.userID = fmt.Sprintf("%s/live/%d/user/%d", r.namespace, r.sequence, r.userMessages)
 			}
 			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
@@ -406,7 +425,11 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	if status != "" {
 		notifications = append(notifications, tui.StatusMsg(status))
 	}
-	if steeringChanged && r.app != nil {
+	if queueChanged && r.app != nil {
+		notifications = append(notifications, tui.QueueStateMsg{
+			Steering: r.app.SteeringMessages(), SteeringInputs: r.app.SteeringUserMessages(), SteeringRevision: r.app.SteeringRevision(),
+			FollowUp: r.app.FollowUpMessages(), FollowUpInputs: r.app.FollowUpUserMessages(), FollowUpRevision: r.app.FollowUpRevision(),
+		})
 		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages(), Inputs: r.app.SteeringUserMessages(), Revision: r.app.SteeringRevision()})
 	}
 	send := r.send
@@ -592,8 +615,11 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	steering := r.app.SteeringMessages()
 	steeringInputs := r.app.SteeringUserMessages()
+	followUp := r.app.FollowUpMessages()
+	followUpInputs := r.app.FollowUpUserMessages()
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills,
+		Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision(), FollowUp: followUp, FollowUpInputs: followUpInputs, FollowUpRevision: r.app.FollowUpRevision()}
 }
 
 func listSessionOptions(cwd string) []tui.SessionOption {
@@ -694,6 +720,46 @@ func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
 		return app.ErrSteeringUnavailable
 	}
 	return activeApp.EnqueueSteeringMessage(value)
+}
+
+func (r *Runtime) RestoreFollowUpMessages() []llm.UserMessage {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.TakeFollowUpMessages()
+}
+
+func (r *Runtime) ClearFollowUp() []llm.UserMessage {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.ClearFollowUp()
+}
+
+func (r *Runtime) EnqueueFollowUp(value string) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrFollowUpUnavailable
+	}
+	return activeApp.EnqueueFollowUp(value)
+}
+
+func (r *Runtime) EnqueueFollowUpMessage(value llm.UserMessage) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrFollowUpUnavailable
+	}
+	return activeApp.EnqueueFollowUpMessage(value)
 }
 
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }

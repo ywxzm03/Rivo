@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -207,6 +208,113 @@ func TestBusySubmitRoutesPlainTextToSteering(t *testing.T) {
 	}
 }
 
+func TestBusyTabRoutesPlainTextToFollowUp(t *testing.T) {
+	m := testModel(60, 15)
+	var request Request
+	m.handlers.Request = func(got Request) tea.Cmd {
+		request = got
+		return nil
+	}
+	m.busy, m.status = true, "Working"
+	typeText(m, "follow up this run")
+	press(m, tea.KeyTab)
+	if request.Kind != "follow-up" || request.Value != "follow up this run" {
+		t.Fatalf("request = %+v, want follow-up request", request)
+	}
+	if m.editor.Value() != "" || !m.busy {
+		t.Fatal("follow-up submission cleared busy state incorrectly")
+	}
+}
+
+func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy, m.status = true, "Working"
+	m.state.FollowUp = []string{"follow-up"}
+	m.state.FollowUpInputs = []llm.UserMessage{textUserMessage("follow-up")}
+	typeText(m, "/clear-follow-up")
+	press(m, tea.KeyEnter)
+	if len(m.state.FollowUp) != 0 || len(m.state.FollowUpInputs) != 0 {
+		t.Fatalf("follow-up state = %v/%v, want empty", m.state.FollowUp, m.state.FollowUpInputs)
+	}
+	if !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Cleared 1 follow-up message") {
+		t.Fatalf("clear notice = %+v", m.state.Messages[len(m.state.Messages)-1])
+	}
+}
+
+func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
+	m := testModel(60, 15)
+	var routed []string
+	m.handlers.EnqueueSteeringMessage = func(message llm.UserMessage) error {
+		routed = append(routed, "steering:"+userMessageText(message))
+		return nil
+	}
+	m.handlers.EnqueueFollowUpMessage = func(message llm.UserMessage) error {
+		routed = append(routed, "follow-up:"+userMessageText(message))
+		return nil
+	}
+	m.busy, m.compacting = true, true
+	m.operationIsRun = true
+	typeText(m, "steer during compact")
+	press(m, tea.KeyEnter)
+	typeText(m, "follow during compact")
+	press(m, tea.KeyTab)
+	if len(m.compactionQueuedMessages) != 2 || len(routed) != 0 {
+		t.Fatalf("staged = %+v, routed = %v", m.compactionQueuedMessages, routed)
+	}
+	m.Update(StatusMsg("Working"))
+	if len(m.compactionQueuedMessages) != 0 {
+		t.Fatal("compaction staged messages were not cleared after flush")
+	}
+	if !reflect.DeepEqual(routed, []string{"steering:steer during compact", "follow-up:follow during compact"}) {
+		t.Fatalf("routed = %v", routed)
+	}
+	if !reflect.DeepEqual(m.state.Steering, []string{"steer during compact"}) || !reflect.DeepEqual(m.state.FollowUp, []string{"follow during compact"}) {
+		t.Fatalf("queue mirror = %v/%v", m.state.Steering, m.state.FollowUp)
+	}
+}
+
+// 回填图片 follow-up 后必须仍可组装出原图片，验证 marker 与 images 表同步
+func TestRestoreFollowUpKeepsImageAttached(t *testing.T) {
+	m := testModel(60, 15)
+	image := llm.ImageContent{Data: "aGk=", MIMEType: "image/png"}
+	queued := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "look"}, image}}
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage { return []llm.UserMessage{queued} }
+	m.busy = true
+	if restored := m.restoreQueuedFollowUp(); restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+	built, ok := m.buildUserMessage()
+	if !ok {
+		t.Fatal("restored editor produced no message")
+	}
+	var images int
+	for _, content := range built.Content {
+		if got, ok := content.(llm.ImageContent); ok {
+			images++
+			if got != image {
+				t.Fatalf("image = %+v, want %+v", got, image)
+			}
+		}
+	}
+	if images != 1 {
+		t.Fatalf("image content count = %d, want 1", images)
+	}
+}
+
+func TestCompactionFailureRestoresStagedInput(t *testing.T) {
+	m := testModel(60, 15)
+	m.handlers.EnqueueSteeringMessage = func(llm.UserMessage) error { return fmt.Errorf("queue unavailable") }
+	m.busy, m.compacting = true, true
+	typeText(m, "restore after compact failure")
+	press(m, tea.KeyEnter)
+	m.Update(StatusMsg("Compaction failed"))
+	if got := m.editor.Value(); got != "restore after compact failure" {
+		t.Fatalf("editor = %q, want staged input restored", got)
+	}
+	if len(m.compactionQueuedMessages) != 0 {
+		t.Fatal("staged input retained after restoration")
+	}
+}
 func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 	m := testModel(80, 24)
 	var requests []Request
@@ -337,7 +445,7 @@ func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
 	m.state.Steering = []string{"first", "second"}
 	m.layout()
 	plain := ansi.Strip(m.View())
-	for _, want := range []string{"Steering: first", "Steering: second", "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"} {
+	for _, want := range []string{"Steering: first", "Steering: second", "↳ " + steeringDequeueKeyLabel() + " to edit steering"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view = %q, missing %q", plain, want)
 		}
@@ -357,6 +465,116 @@ func TestSteeringDequeueKeyLabelByOS(t *testing.T) {
 		if got := steeringDequeueKeyLabelForOS(test.goos); got != test.want {
 			t.Fatalf("steeringDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
 		}
+	}
+}
+
+func TestAltDownRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
+	m := testModel(80, 24)
+	restored := 0
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		restored++
+		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	}
+	m.busy, m.status = true, "Working"
+	m.state.Steering = []string{"keep steering"}
+	typeText(m, "draft")
+	m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	if restored != 1 {
+		t.Fatalf("restore calls = %d, want one call", restored)
+	}
+	if got, want := m.editor.Value(), "queued follow-up\n\ndraft"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if len(m.state.Steering) != 1 || m.state.Steering[0] != "keep steering" {
+		t.Fatalf("steering = %v, want untouched", m.state.Steering)
+	}
+}
+
+func TestFollowUpDequeueKeyLabelByOS(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want string
+	}{
+		{goos: "darwin", want: "option+down"},
+		{goos: "windows", want: "alt+down"},
+		{goos: "linux", want: "alt+down"},
+	} {
+		if got := followUpDequeueKeyLabelForOS(test.goos); got != test.want {
+			t.Fatalf("followUpDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
+		}
+	}
+}
+
+func TestFollowUpDequeueKeyVariants(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.KeyMsg
+		want bool
+	}{
+		{name: "semantic", key: tea.KeyMsg{Type: tea.KeyDown, Alt: true}, want: true},
+		{name: "csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3B"), Alt: true}, want: true},
+		{name: "meta-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;9B"), Alt: true}, want: true},
+		{name: "application", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("OB"), Alt: true}, want: true},
+		{name: "alt-up", key: tea.KeyMsg{Type: tea.KeyUp, Alt: true}, want: false},
+		{name: "ctrl-alt", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;7B"), Alt: true}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isFollowUpDequeueKey(test.key); got != test.want {
+				t.Fatalf("isFollowUpDequeueKey(%q) = %v, want %v", test.key.String(), got, test.want)
+			}
+		})
+	}
+}
+
+func TestPlainDownWithVisibleFollowUpFallsBackToDequeue(t *testing.T) {
+	if !shouldRestoreFollowUpOnPlainDown(runtime.GOOS) {
+		t.Skip("plain Down fallback is macOS-specific")
+	}
+	m := testModel(80, 24)
+	m.busy = true
+	m.state.FollowUp = []string{"queued follow-up"}
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.editor.Value(); got != "queued follow-up" {
+		t.Fatalf("editor = %q, want queued follow-up", got)
+	}
+}
+
+func TestPlainDownFollowUpFallbackIsMacOSOnly(t *testing.T) {
+	for _, test := range []struct {
+		goos string
+		want bool
+	}{
+		{goos: "darwin", want: true},
+		{goos: "linux", want: false},
+		{goos: "windows", want: false},
+	} {
+		if got := shouldRestoreFollowUpOnPlainDown(test.goos); got != test.want {
+			t.Fatalf("shouldRestoreFollowUpOnPlainDown(%q) = %v, want %v", test.goos, got, test.want)
+		}
+	}
+}
+
+func TestPlainDownWithoutFollowUpKeepsHistoryNavigation(t *testing.T) {
+	m := testModel(80, 24)
+	m.busy = true
+	m.history = []string{"older"}
+	m.historyPos = 0
+	m.draft = "draft"
+	m.editor.SetValue("older")
+	restored := 0
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		restored++
+		return nil
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.editor.Value(); got != "draft" {
+		t.Fatalf("editor = %q, want draft after history navigation", got)
+	}
+	if restored != 0 {
+		t.Fatalf("restore calls = %d, want none without visible follow-up", restored)
 	}
 }
 

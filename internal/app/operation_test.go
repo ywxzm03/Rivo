@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/prompt"
@@ -172,6 +173,108 @@ func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("ContinueSteering calls = %d, want one", runner.calls)
+	}
+}
+
+func TestContinueQueuedDrainsSteeringBeforeFollowUp(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &orderRecordingRunner{queue: a.agent}
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	if err := a.agent.Steer("steer me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.agent.FollowUp("follow me"); err != nil {
+		t.Fatal(err)
+	}
+	// 后继 run 期间再入队一条 steering，收尾循环必须重新消费它
+	runner.onContinueFollowUp = func() {
+		if err := a.agent.Steer("late steering"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	want := []string{"steering", "follow-up", "steering"}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("continuation order = %v, want %v", runner.calls, want)
+	}
+	if a.agent.HasSteering() || a.agent.HasFollowUp() {
+		t.Fatalf("queues not drained: %v / %v", a.agent.SteeringMessages(), a.agent.FollowUpMessages())
+	}
+	if !a.active.closing {
+		t.Fatal("operation stayed open after queues drained")
+	}
+}
+
+// orderRecordingRunner 记录 continuation 调用顺序，并可注入后继期间的入队
+type orderRecordingRunner struct {
+	queue              *agent.Agent
+	calls              []string
+	onContinueFollowUp func()
+}
+
+func (r *orderRecordingRunner) Run(context.Context, string) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) Continue(context.Context) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) Steer(string) error { return nil }
+
+func (r *orderRecordingRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
+	r.calls = append(r.calls, "steering")
+	r.queue.TakeSteering()
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) ContinueFollowUp(context.Context) (*llm.AssistantMessage, error) {
+	r.calls = append(r.calls, "follow-up")
+	r.queue.TakeFollowUp()
+	if r.onContinueFollowUp != nil {
+		r.onContinueFollowUp()
+		r.onContinueFollowUp = nil
+	}
+	return nil, nil
+}
+
+func TestEnqueueFollowUpRejectedDuringManualCompact(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	a.active = &Operation{kind: OperationCompact}
+	if err := a.EnqueueFollowUp("during compact"); !errors.Is(err, ErrFollowUpUnavailable) {
+		t.Fatalf("EnqueueFollowUp() error = %v, want unavailable", err)
+	}
+	a.active = &Operation{kind: OperationRun}
+	if err := a.EnqueueFollowUp("during run"); err != nil {
+		t.Fatalf("EnqueueFollowUp() during run error = %v", err)
+	}
+}
+
+// 收尾窗口关闭后，新入队必须被拒绝而不是静默留在队列里
+func TestContinueQueuedClosesSubmissionWindowAtomically(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &orderRecordingRunner{queue: a.agent}
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if !a.active.closing {
+		t.Fatal("submission window stayed open with empty queues")
+	}
+	if err := a.EnqueueSteering("after teardown"); !errors.Is(err, ErrSteeringUnavailable) {
+		t.Fatalf("EnqueueSteering() after teardown = %v, want unavailable", err)
+	}
+	if err := a.EnqueueFollowUp("after teardown"); !errors.Is(err, ErrFollowUpUnavailable) {
+		t.Fatalf("EnqueueFollowUp() after teardown = %v, want unavailable", err)
+	}
+	if a.agent.HasSteering() || a.agent.HasFollowUp() {
+		t.Fatalf("rejected input leaked into queues: %v / %v", a.agent.SteeringMessages(), a.agent.FollowUpMessages())
 	}
 }
 

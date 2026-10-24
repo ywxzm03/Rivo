@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"io"
 	"regexp"
 	"strconv"
@@ -84,6 +85,31 @@ func mouseCandidate(value string, index int) (payload int, prefix int, ok bool) 
 	}
 }
 
+// altArrowRewrites 把部分终端发送的 Meta/小写 CSI 变体规范成 Bubble Tea 认识的
+// Alt+方向键序列；未规范化的变体会被当作未知 CSI 丢弃
+var altArrowRewrites = []struct{ from, to string }{
+	{"\x1b[1;9A", "\x1b[1;3A"},
+	{"\x1b[1;9a", "\x1b[1;3A"},
+	{"\x1b[1;9B", "\x1b[1;3B"},
+	{"\x1b[1;9b", "\x1b[1;3B"},
+	{"\x1b[1;3a", "\x1b[1;3A"},
+	{"\x1b[1;3b", "\x1b[1;3B"},
+}
+
+// normalizeAltArrows 把部分终端发送的 Meta/小写 CSI 变体规范成 Bubble Tea 认识的
+// Alt+方向键序列；未规范化的变体会被当作未知 CSI 丢弃。
+// bracketed paste 的载荷原样保留，避免改写用户粘贴的转义字节
+func normalizeAltArrows(data []byte) []byte {
+	if bytes.Contains(data, []byte("\x1b[200~")) {
+		return data
+	}
+	value := string(data)
+	for _, rewrite := range altArrowRewrites {
+		value = strings.ReplaceAll(value, rewrite.from, rewrite.to)
+	}
+	return []byte(value)
+}
+
 // NewInputReader 把完整的鼠标报告交给 Bubble Tea，并剔除缺少 ESC 的报告
 func NewInputReader(source io.Reader) io.ReadCloser {
 	cancelable, err := cancelreader.NewReader(source)
@@ -122,6 +148,8 @@ func (r *inputReader) Read(dst []byte) (int, error) {
 		}
 		if len(r.pending) > 0 {
 			r.ready, r.pending = stripMalformedMouse(r.pending)
+			// 规范化必须在交给 Bubble Tea 前完成，未知 CSI 变体会被直接丢弃
+			r.ready = normalizeAltArrows(r.ready)
 			if len(r.ready) > 0 {
 				continue
 			}
@@ -326,14 +354,26 @@ func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 
 // isSteeringDequeueKey 接受标准键值和常见 Alt CSI 片段
 func isSteeringDequeueKey(msg tea.KeyMsg) bool {
-	if msg.String() == "alt+up" {
+	return isAltArrowKey(msg, "alt+up", 'A', 'a')
+}
+
+// isFollowUpDequeueKey 识别 Alt/Option+Down，用于回填 follow-up 队列
+func isFollowUpDequeueKey(msg tea.KeyMsg) bool {
+	return isAltArrowKey(msg, "alt+down", 'B', 'b')
+}
+
+func isAltArrowKey(msg tea.KeyMsg, semantic string, upper, lower rune) bool {
+	if msg.String() == semantic {
 		return true
 	}
 	if !msg.Alt || msg.Type != tea.KeyRunes {
 		return false
 	}
-	switch string(msg.Runes) {
-	case "[A", "OA", "[1;3A", "[1;3a", "[1;9A", "[1;9a":
+	value := string(msg.Runes)
+	switch value {
+	case "[" + string(upper), "O" + string(upper),
+		"[1;3" + string(upper), "[1;3" + string(lower),
+		"[1;9" + string(upper), "[1;9" + string(lower):
 		return true
 	default:
 		return false

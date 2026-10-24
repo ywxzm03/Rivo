@@ -21,18 +21,99 @@ type Agent struct {
 	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
 	CommitMessages func([]llm.Message) ([]string, error)
 
-	runGuardOnce     sync.Once
-	runGuard         chan struct{}
-	steeringMu       sync.Mutex
-	steering         []steeringMessage
-	steeringRevision uint64
-	currentUserID    string
+	runGuardOnce  sync.Once
+	runGuard      chan struct{}
+	steeringQueue pendingMessageQueue
+	followUpQueue pendingMessageQueue
+	currentUserID string
+	// retryableMu 保护 retryableQueue：只记录最近一次 commit 失败恢复的队列，
+	// 供下一次操作按队列类型确认补写，避免同文本跨队列误删
+	retryableMu    sync.Mutex
+	retryableQueue *pendingMessageQueue
 }
 
-type steeringMessage struct {
+type pendingMessage struct {
 	input     string
 	message   llm.UserMessage
 	retryable bool
+}
+
+type pendingMessageQueue struct {
+	mu       sync.Mutex
+	items    []pendingMessage
+	revision uint64
+}
+
+func (q *pendingMessageQueue) append(message pendingMessage) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items = append(q.items, pendingMessage{input: message.input, message: cloneUserMessage(message.message), retryable: message.retryable})
+	q.revision++
+}
+
+func (q *pendingMessageQueue) hasItems() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items) > 0
+}
+
+func (q *pendingMessageQueue) snapshot() []pendingMessage {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	items := make([]pendingMessage, len(q.items))
+	for i, item := range q.items {
+		items[i] = pendingMessage{input: item.input, message: cloneUserMessage(item.message), retryable: item.retryable}
+	}
+	return items
+}
+
+func (q *pendingMessageQueue) takeOne() (pendingMessage, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return pendingMessage{}, false
+	}
+	item := q.items[0]
+	q.items[0] = pendingMessage{}
+	q.items = q.items[1:]
+	q.revision++
+	item.message = cloneUserMessage(item.message)
+	return item, true
+}
+
+func (q *pendingMessageQueue) takeAllForRestore() []pendingMessage {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil
+	}
+	items := make([]pendingMessage, len(q.items))
+	for i, item := range q.items {
+		items[i] = pendingMessage{input: item.input, message: cloneUserMessage(item.message), retryable: item.retryable}
+	}
+	q.items = nil
+	q.revision++
+	return items
+}
+
+func (q *pendingMessageQueue) restoreFront(message pendingMessage) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	message.message = cloneUserMessage(message.message)
+	q.items = append([]pendingMessage{message}, q.items...)
+	q.revision++
+}
+
+func (q *pendingMessageQueue) clear() []pendingMessage { return q.takeAllForRestore() }
+
+func (q *pendingMessageQueue) revisionValue() uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.revision
+}
+
+func newPendingMessage(message llm.UserMessage) pendingMessage {
+	return pendingMessage{input: textOfUserMessage(message), message: cloneUserMessage(message)}
 }
 
 func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
@@ -84,114 +165,169 @@ func (a *Agent) SteerMessage(message llm.UserMessage) error {
 	if len(message.Content) == 0 {
 		return errors.New("agent: steering input is empty")
 	}
-	a.steeringMu.Lock()
-	a.steering = append(a.steering, steeringMessage{input: textOfUserMessage(message), message: cloneUserMessage(message)})
-	a.steeringRevision++
-	a.steeringMu.Unlock()
+	a.steeringQueue.append(newPendingMessage(message))
 	return nil
 }
 
-func (a *Agent) HasSteering() bool {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	return len(a.steering) > 0
+// FollowUp 把用户输入加入当前运行完成后的 follow-up 队列
+func (a *Agent) FollowUp(input string) error {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return errors.New("agent: follow-up input is empty")
+	}
+	return a.FollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
 }
 
-func (a *Agent) SteeringMessages() []string {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	messages := make([]string, len(a.steering))
-	for i, message := range a.steering {
-		messages[i] = displayUserMessageText(message.message)
+func (a *Agent) FollowUpMessage(message llm.UserMessage) error {
+	if len(message.Content) == 0 {
+		return errors.New("agent: follow-up input is empty")
+	}
+	a.followUpQueue.append(newPendingMessage(message))
+	return nil
+}
+
+func (a *Agent) HasSteering() bool { return a.steeringQueue.hasItems() }
+
+func (a *Agent) HasFollowUp() bool { return a.followUpQueue.hasItems() }
+
+func (a *Agent) HasQueuedMessages() bool { return a.HasSteering() || a.HasFollowUp() }
+
+func pendingMessageTexts(items []pendingMessage) []string {
+	messages := make([]string, len(items))
+	for i, item := range items {
+		messages[i] = displayUserMessageText(item.message)
 	}
 	return messages
 }
+
+func pendingUserMessages(items []pendingMessage) []llm.UserMessage {
+	messages := make([]llm.UserMessage, len(items))
+	for i, item := range items {
+		messages[i] = cloneUserMessage(item.message)
+	}
+	return messages
+}
+
+func (a *Agent) SteeringMessages() []string { return pendingMessageTexts(a.steeringQueue.snapshot()) }
+
+func (a *Agent) FollowUpMessages() []string { return pendingMessageTexts(a.followUpQueue.snapshot()) }
 
 func (a *Agent) SteeringUserMessages() []llm.UserMessage {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	messages := make([]llm.UserMessage, len(a.steering))
-	for i, message := range a.steering {
-		messages[i] = cloneUserMessage(message.message)
-	}
-	return messages
+	return pendingUserMessages(a.steeringQueue.snapshot())
 }
 
-func (a *Agent) SteeringRevision() uint64 {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	return a.steeringRevision
+func (a *Agent) FollowUpUserMessages() []llm.UserMessage {
+	return pendingUserMessages(a.followUpQueue.snapshot())
 }
+
+func (a *Agent) SteeringRevision() uint64 { return a.steeringQueue.revisionValue() }
+
+func (a *Agent) FollowUpRevision() uint64 { return a.followUpQueue.revisionValue() }
 
 // TakeSteering 清空等待消费的 steering，按 FIFO 返回消息文本
 func (a *Agent) TakeSteering() []string {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	messages := make([]string, len(a.steering))
-	for i, message := range a.steering {
-		messages[i] = message.input
-	}
-	if len(a.steering) > 0 {
-		a.steering = nil
-		a.steeringRevision++
-	}
-	return messages
+	return pendingMessageTexts(a.steeringQueue.takeAllForRestore())
+}
+
+func (a *Agent) TakeFollowUp() []string {
+	return pendingMessageTexts(a.followUpQueue.takeAllForRestore())
 }
 
 func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	messages := make([]llm.UserMessage, len(a.steering))
-	for i, message := range a.steering {
-		messages[i] = cloneUserMessage(message.message)
-	}
-	if len(a.steering) > 0 {
-		a.steering = nil
-		a.steeringRevision++
-	}
-	return messages
+	return pendingUserMessages(a.steeringQueue.takeAllForRestore())
+}
+
+func (a *Agent) TakeFollowUpMessages() []llm.UserMessage {
+	return pendingUserMessages(a.followUpQueue.takeAllForRestore())
+}
+
+func (a *Agent) ClearFollowUp() []llm.UserMessage {
+	return pendingUserMessages(a.followUpQueue.clear())
 }
 
 // AcknowledgeSteering 确认宿主提交失败后恢复、且已由会话补写的 steering
 func (a *Agent) AcknowledgeSteering(input string) bool {
-	return a.acknowledgeSteering(func(message steeringMessage) bool { return message.input == input })
+	return a.acknowledgeSteering(func(message pendingMessage) bool { return message.input == input })
 }
 
+// AcknowledgeSteeringMessage 确认宿主提交失败后恢复、且已由会话补写的 steering
 func (a *Agent) AcknowledgeSteeringMessage(input llm.UserMessage) bool {
-	return a.acknowledgeSteering(func(message steeringMessage) bool { return equalUserMessage(message.message, input) })
+	return a.acknowledgeSteering(func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
 }
 
-func (a *Agent) acknowledgeSteering(match func(steeringMessage) bool) bool {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	for i, message := range a.steering {
+func (a *Agent) pendingQueue() *pendingMessageQueue {
+	a.retryableMu.Lock()
+	defer a.retryableMu.Unlock()
+	return a.retryableQueue
+}
+
+// AcknowledgePendingMessage 只确认最近一次 commit 失败恢复的那条队列，
+// 同时匹配完整消息和队列类型，避免相同文本跨队列误删
+func (a *Agent) AcknowledgePendingMessage(input llm.UserMessage) bool {
+	queue := a.pendingQueue()
+	if queue == nil {
+		return false
+	}
+	return a.acknowledgeQueue(queue, func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
+}
+
+func (a *Agent) AcknowledgePending(input string) bool {
+	queue := a.pendingQueue()
+	if queue == nil {
+		return false
+	}
+	return a.acknowledgeQueue(queue, func(message pendingMessage) bool { return message.input == input })
+}
+
+// markRetryableQueue 记录本次 commit 失败消息所属的队列
+func (a *Agent) markRetryableQueue(queue *pendingMessageQueue) {
+	a.retryableMu.Lock()
+	a.retryableQueue = queue
+	a.retryableMu.Unlock()
+}
+
+func (a *Agent) clearRetryableQueue(queue *pendingMessageQueue) {
+	a.retryableMu.Lock()
+	if a.retryableQueue == queue {
+		a.retryableQueue = nil
+	}
+	a.retryableMu.Unlock()
+}
+
+// AcknowledgeFollowUp 确认宿主补写成功且已由会话落盘的 follow-up，避免 successor run 重复投放
+func (a *Agent) AcknowledgeFollowUp(input string) bool {
+	return a.acknowledgeQueue(&a.followUpQueue, func(message pendingMessage) bool { return message.input == input })
+}
+
+func (a *Agent) AcknowledgeFollowUpMessage(input llm.UserMessage) bool {
+	return a.acknowledgeQueue(&a.followUpQueue, func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
+}
+
+func (a *Agent) acknowledgeSteering(match func(pendingMessage) bool) bool {
+	return a.acknowledgeQueue(&a.steeringQueue, match)
+}
+
+func (a *Agent) acknowledgeQueue(queue *pendingMessageQueue, match func(pendingMessage) bool) bool {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	for i, message := range queue.items {
 		if message.retryable && match(message) {
-			a.steering = append(a.steering[:i], a.steering[i+1:]...)
-			a.steeringRevision++
+			queue.items = append(queue.items[:i], queue.items[i+1:]...)
+			queue.revision++
+			a.clearRetryableQueue(queue)
 			return true
 		}
 	}
 	return false
 }
 
-func (a *Agent) takeSteering() (steeringMessage, bool) {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	if len(a.steering) == 0 {
-		return steeringMessage{}, false
-	}
-	message := a.steering[0]
-	a.steering = a.steering[1:]
-	a.steeringRevision++
-	return message, true
-}
+func (a *Agent) takeSteering() (pendingMessage, bool) { return a.steeringQueue.takeOne() }
 
-func (a *Agent) restoreSteering(message steeringMessage) {
-	a.steeringMu.Lock()
-	defer a.steeringMu.Unlock()
-	a.steering = append([]steeringMessage{message}, a.steering...)
-	a.steeringRevision++
-}
+func (a *Agent) takeFollowUp() (pendingMessage, bool) { return a.followUpQueue.takeOne() }
+
+func (a *Agent) restoreSteering(message pendingMessage) { a.steeringQueue.restoreFront(message) }
+
+func (a *Agent) restoreFollowUp(message pendingMessage) { a.followUpQueue.restoreFront(message) }
 
 // PreparedRequest 是一次模型请求的配置与上下文快照；
 // Compacted 表示来源结构已重建，运行汇总从新快照的末尾开始
@@ -262,7 +398,7 @@ func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*l
 	if len(ids) > 0 {
 		a.currentUserID = ids[0]
 	}
-	return a.runLoop(llm.WithCurrentUserMessageID(ctx, a.currentUserID), cancel, firstMessageIndex, nil)
+	return a.runLoop(llm.WithCurrentUserMessageID(ctx, a.currentUserID), cancel, firstMessageIndex, nil, nil)
 }
 
 func (a *Agent) Continue(ctx context.Context) (*llm.AssistantMessage, error) {
@@ -279,6 +415,19 @@ func (a *Agent) Resume(ctx context.Context, committed *llm.AssistantMessage) (*l
 }
 
 func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, requireSteering bool) (*llm.AssistantMessage, error) {
+	var queue *pendingMessageQueue
+	if requireSteering {
+		queue = &a.steeringQueue
+	}
+	return a.resumeQueued(ctx, committed, queue)
+}
+
+// ContinueFollowUp 在当前 run 完成后启动一个只消费一条 follow-up 的后继 run
+func (a *Agent) ContinueFollowUp(ctx context.Context) (*llm.AssistantMessage, error) {
+	return a.resumeQueued(ctx, nil, &a.followUpQueue)
+}
+
+func (a *Agent) resumeQueued(ctx context.Context, committed *llm.AssistantMessage, queue *pendingMessageQueue) (*llm.AssistantMessage, error) {
 	release, err := a.acquireRunGuard(ctx)
 	if err != nil {
 		return nil, err
@@ -287,25 +436,28 @@ func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, req
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if queue == &a.followUpQueue {
+		a.currentUserID = ""
+	}
 	ctx = llm.WithCurrentUserMessageID(ctx, a.currentUserID)
 	firstMessageIndex := len(a.AgentContext.Messages)
-	var initialSteering *steeringMessage
-	if requireSteering {
-		pending, ok := a.takeSteering()
+	var initialPending *pendingMessage
+	if queue != nil {
+		pending, ok := queue.takeOne()
 		if !ok {
 			return nil, nil
 		}
-		initialSteering = &pending
+		initialPending = &pending
 	}
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
-		if initialSteering != nil {
-			a.restoreSteering(*initialSteering)
+		if initialPending != nil {
+			queue.restoreFront(*initialPending)
 		}
 		return nil, err
 	}
 	if err := a.emit(llm.TurnStartEvent{}); err != nil {
-		if initialSteering != nil {
-			a.restoreSteering(*initialSteering)
+		if initialPending != nil {
+			queue.restoreFront(*initialPending)
 		}
 		return nil, err
 	}
@@ -331,7 +483,7 @@ func (a *Agent) resume(ctx context.Context, committed *llm.AssistantMessage, req
 			return nil, err
 		}
 	}
-	return a.runLoop(ctx, cancel, firstMessageIndex, initialSteering)
+	return a.runLoop(ctx, cancel, firstMessageIndex, initialPending, queue)
 }
 
 // ReplaceMessages 用编排层提供的投影消息替换内存消息序列
@@ -344,16 +496,19 @@ func (a *Agent) AppendMessage(msg llm.Message) {
 }
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
-func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int, initialSteering *steeringMessage) (*llm.AssistantMessage, error) {
+func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int, initialPending *pendingMessage, initialQueue *pendingMessageQueue) (*llm.AssistantMessage, error) {
 	for {
-		// 1.先原子认领一条 steering，撤回只能取得尚未认领的消息
-		var pending steeringMessage
+		// 1.先原子认领一条 steering，后继 run 的首条消息由调用方指定队列
+		var pending pendingMessage
+		var pendingQueue *pendingMessageQueue
 		var ok bool
-		if initialSteering != nil {
-			pending, ok = *initialSteering, true
-			initialSteering = nil
+		if initialPending != nil {
+			pending, ok = *initialPending, true
+			pendingQueue = initialQueue
+			initialPending, initialQueue = nil, nil
 		} else {
 			pending, ok = a.takeSteering()
+			pendingQueue = &a.steeringQueue
 		}
 		if ok {
 			userMessage := pending.message
@@ -363,7 +518,8 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			ids, err := a.persistMessages([]llm.Message{userMessage})
 			if err != nil {
 				pending.retryable = true
-				a.restoreSteering(pending)
+				pendingQueue.restoreFront(pending)
+				a.markRetryableQueue(pendingQueue)
 				return nil, err
 			}
 			if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
@@ -522,7 +678,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				cancel()
 				return nil, err
 			}
-			initialSteering = &pending
+			initialPending, initialQueue = &pending, &a.steeringQueue
 			continue
 		}
 

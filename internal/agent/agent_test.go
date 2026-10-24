@@ -267,6 +267,52 @@ func TestAgentSteeringConsumesOneMessageAfterEachCompletedResponse(t *testing.T)
 	}
 }
 
+func TestAgentFollowUpConsumesOneMessagePerSuccessorRun(t *testing.T) {
+	calls := 0
+	streamFn := doneStreamFn(&calls,
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "initial reply"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "first follow-up reply"}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second follow-up reply"}}},
+	)
+	var agent *Agent
+	onEvent := func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.TurnEndEvent); ok && calls == 1 {
+			if err := agent.FollowUp("first follow-up"); err != nil {
+				return err
+			}
+			return agent.FollowUp("second follow-up")
+		}
+		return nil
+	}
+	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, onEvent)
+	if _, err := agent.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"first follow-up", "second follow-up"}) {
+		t.Fatalf("follow-up queue after initial run = %v", got)
+	}
+	first, err := agent.ContinueFollowUp(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.Content[0].(llm.TextContent).Text; got != "first follow-up reply" {
+		t.Fatalf("first successor reply = %q", got)
+	}
+	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"second follow-up"}) {
+		t.Fatalf("follow-up queue after first successor = %v", got)
+	}
+	second, err := agent.ContinueFollowUp(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second.Content[0].(llm.TextContent).Text; got != "second follow-up reply" {
+		t.Fatalf("second successor reply = %q", got)
+	}
+	if agent.HasFollowUp() {
+		t.Fatal("follow-up queue not drained")
+	}
+}
+
 func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	var commits int
 	sentinel := errors.New("storage unavailable")
@@ -367,6 +413,47 @@ func TestAgentSteeringEmitsMessageStartOnlyAfterCommitSuccess(t *testing.T) {
 	}
 	if starts != 1 {
 		t.Fatalf("steering MessageStartEvent count = %d, want 1", starts)
+	}
+}
+
+func TestAgentFollowUpRestoresAfterHostCommitFailure(t *testing.T) {
+	sentinel := errors.New("storage unavailable")
+	var commits int
+	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
+	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+		commits++
+		// 第 1 次是 initial user，第 2 次是 initial assistant，第 3 次是 follow-up user
+		if commits == 3 {
+			return []string{"follow-entry"}, sentinel
+		}
+		return []string{"entry"}, nil
+	}
+	if err := agent.FollowUp("pending follow-up"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ContinueFollowUp(context.Background()); !errors.Is(err, sentinel) {
+		t.Fatalf("ContinueFollowUp() error = %v, want storage error", err)
+	}
+	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
+		t.Fatalf("follow-up queue = %v, want restored message", got)
+	}
+	// 同文本 steering 不得被 follow-up 的确认误删
+	if err := agent.Steer("pending follow-up"); err != nil {
+		t.Fatal(err)
+	}
+	message := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "pending follow-up"}}}
+	if !agent.AcknowledgePendingMessage(message) {
+		t.Fatal("pending follow-up was not acknowledged")
+	}
+	if agent.HasFollowUp() {
+		t.Fatal("acknowledged follow-up remained queued")
+	}
+	if got := agent.SteeringMessages(); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
+		t.Fatalf("steering queue = %v, want untouched same-text steering", got)
 	}
 }
 

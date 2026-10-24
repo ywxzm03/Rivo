@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 const timeDoublePress = 500 * time.Millisecond
@@ -25,6 +27,7 @@ var commands = []slashCommand{
 	{"clear", "Clear the current conversation context"},
 	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
+	{"clear-follow-up", "Clear queued follow-up messages"},
 	{"context", "Show current context usage"},
 	{"exit", "Exit Rivo"},
 }
@@ -102,6 +105,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return nil
 	}
+	if isFollowUpDequeueKey(msg) {
+		if m.restoreQueuedFollowUp() == 0 {
+			m.status = "No queued follow-up messages to restore"
+		}
+		m.layout()
+		return nil
+	}
 	// 终端 bracketed paste 整段到达，只有粘贴走折叠路径
 	if msg.Paste {
 		m.handlePaste(string(msg.Runes))
@@ -155,7 +165,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "esc":
 		if m.busy {
-			m.restoreQueuedSteering()
+			m.restoreQueuedMessages()
 			m.canceling = true
 			m.status = "Cancelling…"
 			if m.handlers.Cancel != nil {
@@ -200,6 +210,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return cmd
 	case "enter":
 		return m.submit()
+	case "tab":
+		if m.busy {
+			return m.submitFollowUp()
+		}
 	case "backspace":
 		if m.backspaceAtMarker() {
 			m.layout()
@@ -221,6 +235,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "down":
 		line := m.editor.LineInfo()
 		if m.editor.Line() == m.editor.LineCount()-1 && line.RowOffset == line.Height-1 {
+			// 部分 macOS 终端把 Option+Down 发成普通 Down，有可见 follow-up 时优先撤回
+			if shouldRestoreFollowUpOnPlainDown(runtime.GOOS) && m.busy && len(m.state.FollowUp) > 0 {
+				if restored := m.restoreQueuedFollowUp(); restored > 0 {
+					m.layout()
+					return nil
+				}
+			}
 			m.browseHistory(1)
 			return nil
 		}
@@ -237,6 +258,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func shouldRestoreSteeringOnPlainUp(goos string) bool {
+	return goos == "darwin"
+}
+
+func shouldRestoreFollowUpOnPlainDown(goos string) bool {
 	return goos == "darwin"
 }
 
@@ -275,7 +300,11 @@ func (m *Model) browseHistory(direction int) {
 	m.layout()
 }
 
-func (m *Model) submit() tea.Cmd {
+func (m *Model) submit() tea.Cmd { return m.submitWithQueue(false) }
+
+func (m *Model) submitFollowUp() tea.Cmd { return m.submitWithQueue(true) }
+
+func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 	input := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if input == "" {
 		return nil
@@ -299,10 +328,15 @@ func (m *Model) submit() tea.Cmd {
 			return nil
 		}
 		if m.compacting {
-			m.notice("Cannot submit input while context compaction is running.")
-			return nil
+			if strings.HasPrefix(input, "/") && !isQueueControlCommand(input) {
+				m.notice("Commands are unavailable while context compaction is running.")
+				return nil
+			}
+			if !isQueueControlCommand(input) {
+				return m.stageCompactionMessage(input, message, followUp)
+			}
 		}
-		if strings.HasPrefix(input, "/") {
+		if strings.HasPrefix(input, "/") && !isQueueControlCommand(input) {
 			if input == "/tree" || strings.HasPrefix(input, "/tree ") {
 				m.notice("Wait for the current operation to finish before opening the tree.")
 			} else {
@@ -310,22 +344,34 @@ func (m *Model) submit() tea.Cmd {
 			}
 			return nil
 		}
-		if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil {
-			return nil
+		if !isQueueControlCommand(input) {
+			if followUp {
+				if m.handlers.Request == nil && m.handlers.EnqueueFollowUp == nil && m.handlers.EnqueueFollowUpMessage == nil {
+					return nil
+				}
+			} else if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil && m.handlers.EnqueueSteeringMessage == nil {
+				return nil
+			}
+			m.history = append(m.history, input)
+			m.historyMessages = append(m.historyMessages, message)
+			m.historyPos = len(m.history)
+			m.draft = ""
+			m.draftMessage = nil
+			m.editor.Reset()
+			m.resetPastes()
+			m.completionHidden = true
+			m.layout()
+			if followUp {
+				if hasImages {
+					return m.dispatchFollowUpMessage(input, &message)
+				}
+				return m.dispatchFollowUp(input)
+			}
+			if hasImages {
+				return m.dispatchSteeringMessage(input, &message)
+			}
+			return m.dispatchSteering(input)
 		}
-		m.history = append(m.history, input)
-		m.historyMessages = append(m.historyMessages, message)
-		m.historyPos = len(m.history)
-		m.draft = ""
-		m.draftMessage = nil
-		m.editor.Reset()
-		m.resetPastes()
-		m.completionHidden = true
-		m.layout()
-		if hasImages {
-			return m.dispatchSteeringMessage(input, &message)
-		}
-		return m.dispatchSteering(input)
 	}
 	if !m.busy && m.handlers.Request == nil && m.handlers.Context == nil {
 		if hasImages {
@@ -398,6 +444,14 @@ func (m *Model) submit() tea.Cmd {
 		return m.openSelector("resume", arg)
 	case "/compact":
 		return m.dispatch("compact", arg)
+	case "/clear-follow-up":
+		if arg != "" {
+			m.notice("Usage: /clear-follow-up")
+			return nil
+		}
+		count := m.clearQueuedFollowUp()
+		m.notice(fmt.Sprintf("Cleared %d follow-up message(s)", count))
+		return nil
 	case "/context":
 		if arg != "" {
 			m.notice("Usage: /context")
@@ -423,5 +477,32 @@ func (m *Model) submit() tea.Cmd {
 	default:
 		m.notice("Unknown command: " + name)
 	}
+	return nil
+}
+
+func isQueueControlCommand(input string) bool {
+	name := input
+	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
+		name = input[:index]
+	}
+	return name == "/clear-follow-up"
+}
+
+func (m *Model) stageCompactionMessage(input string, message llm.UserMessage, followUp bool) tea.Cmd {
+	kind := queuedSteering
+	if followUp {
+		kind = queuedFollowUp
+	}
+	m.compactionQueuedMessages = append(m.compactionQueuedMessages, compactionQueuedMessage{message: cloneUserMessage(message), kind: kind})
+	m.history = append(m.history, input)
+	m.historyMessages = append(m.historyMessages, cloneUserMessage(message))
+	m.historyPos = len(m.history)
+	m.draft = ""
+	m.draftMessage = nil
+	m.editor.Reset()
+	m.resetPastes()
+	m.completionHidden = true
+	m.status = "Compacting context…"
+	m.layout()
 	return nil
 }

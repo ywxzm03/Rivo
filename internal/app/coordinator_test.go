@@ -213,6 +213,11 @@ func (f *fakeRunner) Steer(input string) error {
 	return nil
 }
 
+func (f *fakeRunner) FollowUp(input string) error {
+	f.appended = append(f.appended, textMsg(input))
+	return nil
+}
+
 func (f *fakeRunner) ReplaceMessages(messages []llm.Message) {
 	f.replaced = append(f.replaced, messages)
 }
@@ -567,6 +572,45 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 	if !hasCompaction {
 		t.Error("manual compaction not persisted")
+	}
+}
+
+// compaction 结束事件是 TUI 转发暂存输入的触发点，此时入队边界必须已经打开
+func TestCoordinatorCompactionEndEventAllowsQueueEnqueue(t *testing.T) {
+	dir := t.TempDir()
+	summaryStreamFn := countingStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}})
+	sm := session.New("/project", dir)
+	runner := &fakeRunner{}
+	var steeringErr, followUpErr error
+	var enqueued bool
+	var coord *Coordinator
+	coord = NewCoordinator(sm, func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.CompactionEndEvent); ok && !enqueued {
+			enqueued = true
+			steeringErr = coord.EnqueueSteering("staged steering")
+			followUpErr = coord.EnqueueFollowUp("staged follow-up")
+		}
+		return nil
+	})
+	coord.Compactor = &compaction.Compactor{
+		StreamFn: summaryStreamFn,
+		Model:    llm.Model{ID: "m1"},
+		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
+	}
+	coord.Agent = runner
+	for _, msg := range []llm.Message{textMsg("u1 content"), textMsg("u2 content")} {
+		if err := coord.m.AppendMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coord.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if !enqueued {
+		t.Fatal("compaction end event not forwarded")
+	}
+	if steeringErr != nil || followUpErr != nil {
+		t.Fatalf("enqueue after compaction = %v / %v, want both accepted", steeringErr, followUpErr)
 	}
 }
 

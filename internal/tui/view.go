@@ -205,17 +205,23 @@ func (m *Model) frameLines() []string {
 
 // pendingRows 返回队列区域占用的行数
 func (m *Model) pendingRows() int {
-	if m.selector != nil || len(m.state.Steering) == 0 {
+	if m.selector != nil || (len(m.state.Steering) == 0 && len(m.state.FollowUp) == 0) {
 		return 0
 	}
-	rows := len(m.state.Steering) + 2
+	rows := len(m.state.Steering) + len(m.state.FollowUp) + 1
+	if len(m.state.Steering) > 0 {
+		rows++
+	}
+	if len(m.state.FollowUp) > 0 {
+		rows++
+	}
 	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems())))
 	return min(rows, available)
 }
 
-// pendingLines 显示每条待消费消息和撤回提示
+// pendingLines 显示两类待消费消息和各自的回填提示
 func (m *Model) pendingLines() []string {
-	if len(m.state.Steering) == 0 {
+	if len(m.state.Steering) == 0 && len(m.state.FollowUp) == 0 {
 		return nil
 	}
 	lines := []string{""}
@@ -225,8 +231,18 @@ func (m *Model) pendingLines() []string {
 		}
 		lines = append(lines, ansi.Truncate(colored(dimColor, "Steering: "+message), m.width, "…"))
 	}
-	hint := "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"
-	lines = append(lines, ansi.Truncate(colored(dimColor, hint), m.width, "…"))
+	for _, message := range m.state.FollowUp {
+		if index := strings.IndexByte(message, '\n'); index >= 0 {
+			message = message[:index]
+		}
+		lines = append(lines, ansi.Truncate(colored(dimColor, "Follow-up: "+message), m.width, "…"))
+	}
+	if len(m.state.Steering) > 0 {
+		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+steeringDequeueKeyLabel()+" to edit steering"), m.width, "…"))
+	}
+	if len(m.state.FollowUp) > 0 {
+		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+followUpDequeueKeyLabel()+" to edit follow-up"), m.width, "…"))
+	}
 	rows := m.pendingRows()
 	if len(lines) > rows {
 		if rows <= 0 {
@@ -235,7 +251,6 @@ func (m *Model) pendingLines() []string {
 		if rows == 1 {
 			return lines[len(lines)-1:]
 		}
-		// 保留空行与提示，同时尽量多显示最早的消息
 		visible := append([]string(nil), lines[:rows-1]...)
 		visible = append(visible, lines[len(lines)-1])
 		return visible
@@ -252,6 +267,17 @@ func steeringDequeueKeyLabelForOS(goos string) string {
 		return "option+up"
 	}
 	return "alt+up"
+}
+
+func followUpDequeueKeyLabel() string {
+	return followUpDequeueKeyLabelForOS(runtime.GOOS)
+}
+
+func followUpDequeueKeyLabelForOS(goos string) string {
+	if goos == "darwin" {
+		return "option+down"
+	}
+	return "alt+down"
 }
 
 func splitFrameLines(view string) []string {
