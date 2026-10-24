@@ -121,6 +121,9 @@ func assertFrame(t *testing.T, m *Model) {
 		if dock != m.selector.height(m.height-2) {
 			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), dock)
 		}
+	} else {
+		// 输入态在视口与输入框之间固定留一行空白
+		dock++
 	}
 	if got := m.viewport.Height + dock + 1; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
@@ -1099,7 +1102,8 @@ func TestTerminalMouseAndClipboardInput(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	m.editor.SetValue("hello")
 	m.layout()
-	y := m.viewport.Height + 1
+	// 视口与输入框之间有一行空白，编辑器首行下移一行
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	cmd := func() tea.Msg {
 		_, command := m.Update(tea.MouseMsg{X: 6, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
@@ -1135,7 +1139,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	now := time.Unix(1000, 0)
 	m.clock = func() time.Time { return now }
-	y := m.viewport.Height + 1
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	now = now.Add(100 * time.Millisecond)
 	_, cmd := m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
@@ -1146,7 +1150,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	if copied != "hello" || m.editor.Value() != "hello world" {
 		t.Fatalf("double click copied %q or changed input to %q", copied, m.editor.Value())
 	}
-	border := ansi.Strip(m.frameLines()[m.viewport.Height])
+	border := ansi.Strip(m.frameLines()[m.viewport.Height+1])
 	if !strings.HasSuffix(border, " copied! ──") || !strings.Contains(border, "Working") {
 		t.Fatalf("copy confirmation must be on the right beside working status: %q", border)
 	}

@@ -58,7 +58,8 @@ func (m *Model) layout() {
 		m.selector.input.Width = max(1, m.width-3)
 		dock = m.selector.height(max(1, m.height-2))
 	} else {
-		dock += m.completionRows(len(m.completionItems()))
+		// 视口与输入框上边框之间保留一行空白，避免长消息贴边
+		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
 	m.viewport.Height = max(0, m.height-1-dock)
@@ -178,6 +179,8 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
 		lines = append(lines, m.pendingLines()...)
+		// 消息区与输入框之间留一行空白，长消息不会贴上边框
+		lines = append(lines, "")
 		label := ""
 		if m.busy {
 			label = m.spinner.View() + " " + m.status
