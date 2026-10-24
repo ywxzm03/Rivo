@@ -144,8 +144,12 @@ func containsInt(values []int, value int) bool {
 
 func (m *Model) renderMessage(message Message) string {
 	width := max(1, m.width-2)
-	if message.Role == "context" {
-		return colored(textColor, ansi.Wrap(message.Text, width, ""))
+	if message.Role == "command" {
+		return colored(accentColor, ansi.Wrap(message.Text, width, ""))
+	}
+	if message.Role == "status" {
+		// 状态块整体右移两格，与顶格的命令回显区分
+		return colored(textColor, "  "+strings.ReplaceAll(ansi.Wrap(message.Text, max(1, width-2), ""), "\n", "\n  "))
 	}
 	if message.Role == "notice" || message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))

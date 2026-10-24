@@ -274,6 +274,9 @@ func (a *App) SessionID() string { return a.session.ID() }
 
 func (a *App) SessionName() string { return a.session.Name() }
 
+// SessionPath 返回会话 transcript 的绝对路径，尚未落盘时也是预定文件名
+func (a *App) SessionPath() string { return a.session.Path() }
+
 func (a *App) TakeSteering() []string {
 	if a == nil || a.agent == nil {
 		return nil

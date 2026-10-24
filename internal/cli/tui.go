@@ -41,7 +41,7 @@ func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, s
 	output := newSerializedOutput(stdout)
 	model := tui.NewWithInitialPrompt(runtime.Snapshot(), tui.Handlers{
 		Request:                 runtime.Request,
-		Context:                 runtime.Context,
+		Status:                  runtime.Status,
 		Cancel:                  runtime.Cancel,
 		EnqueueSteering:         runtime.EnqueueSteering,
 		EnqueueSteeringMessage:  runtime.EnqueueSteeringMessage,
