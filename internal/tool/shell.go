@@ -33,6 +33,7 @@ func executeShellCommand(
 	ctx context.Context,
 	args map[string]any,
 	toolName string,
+	workingDir string,
 	buildCommand func(context.Context, string) (*exec.Cmd, error),
 ) (llm.ToolResult, error) {
 	command, timeout, err := parseShellArgs(args, toolName)
@@ -46,15 +47,17 @@ func executeShellCommand(
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return llm.ToolResult{}, err
+	if workingDir == "" {
+		workingDir, err = os.Getwd()
+		if err != nil {
+			return llm.ToolResult{}, err
+		}
 	}
 	cmd, err := buildCommand(commandCtx, command)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	cmd.Dir = cwd
+	cmd.Dir = workingDir
 	cmd.Env = shellEnvironment()
 	configureShellProcess(cmd)
 	output := newShellOutputAccumulator()

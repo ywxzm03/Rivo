@@ -20,7 +20,10 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Edit struct{ History FileHistoryTracker }
+type Edit struct {
+	History    FileHistoryTracker
+	WorkingDir string
+}
 
 type EditDetails struct {
 	Diff             string
@@ -86,7 +89,7 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolveEditPath(path)
+	absPath, err := resolveEditPathFrom(path, e.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -193,6 +196,10 @@ func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 
 // resolveEditPath 处理路径前缀与空格变体
 func resolveEditPath(path string) (string, error) {
+	return resolveEditPathFrom(path, "")
+}
+
+func resolveEditPathFrom(path, cwd string) (string, error) {
 	path = strings.Map(func(r rune) rune {
 		switch r {
 		case '\u00a0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
@@ -226,7 +233,17 @@ func resolveEditPath(path string) (string, error) {
 		}
 		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 	}
-	return filepath.Abs(path)
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Clean(filepath.Join(cwd, path)), nil
 }
 
 func isWindowsDrivePath(path string) bool {

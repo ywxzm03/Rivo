@@ -251,6 +251,7 @@ func (m *Model) pendingLines() []string {
 		if rows == 1 {
 			return lines[len(lines)-1:]
 		}
+		// 保留空行与提示，同时尽量多显示最早的消息
 		visible := append([]string(nil), lines[:rows-1]...)
 		visible = append(visible, lines[len(lines)-1])
 		return visible

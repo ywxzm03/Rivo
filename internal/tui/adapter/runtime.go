@@ -666,6 +666,13 @@ func New(cfg app.Config, cwd, branch string) *Runtime {
 	return &Runtime{cfg: cfg, cwd: cwd, branch: branch}
 }
 
+// SetProjectContext 在打开会话后更新显示用的项目上下文
+func (r *Runtime) SetProjectContext(cwd, branch string) {
+	r.mu.Lock()
+	r.cwd, r.branch = cwd, branch
+	r.mu.Unlock()
+}
+
 func (r *Runtime) Attach(a *app.App) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
