@@ -10,6 +10,7 @@ const (
 	accentColor         = "#b1b9f9" // accent / mdCode / mdListBullet
 	borderColor         = "#888888" // border
 	dimColor            = "#999999" // dim
+	faintColor          = "#777777" // faint / abort hint
 	thinkingColor       = "#999999" // thinkingText
 	userBg              = "#373737" // user message frame
 	userBgHover         = "#464646" // hovered jump pill
