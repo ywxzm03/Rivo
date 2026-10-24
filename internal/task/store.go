@@ -519,9 +519,7 @@ func cloneContentReplacements(source map[string][]llm.Content) map[string][]llm.
 	}
 	result := make(map[string][]llm.Content, len(source))
 	for key, content := range source {
-		copy := make([]llm.Content, len(content))
-		copy = append(copy[:0], content...)
-		result[key] = copy
+		result[key] = llm.CloneContent(content)
 	}
 	return result
 }
@@ -616,7 +614,8 @@ func (s *Store) ClearWorktreePath(id string, token uint64) bool {
 	return true
 }
 
-func (s *Store) FailReserved(id string, _ error) bool {
+// DiscardReserved 丢弃启动失败时占位的任务,不留终态记录
+func (s *Store) DiscardReserved(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id]
@@ -629,26 +628,8 @@ func (s *Store) FailReserved(id string, _ error) bool {
 }
 
 func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
-	message.Content = cloneContent(message.Content)
+	message.Content = llm.CloneContent(message.Content)
 	return message
-}
-
-func cloneContent(content []llm.Content) []llm.Content {
-	result := make([]llm.Content, len(content))
-	for i, item := range content {
-		switch value := item.(type) {
-		case llm.ToolCall:
-			copy := value
-			copy.Arguments = make(map[string]any, len(value.Arguments))
-			for key, argument := range value.Arguments {
-				copy.Arguments[key] = argument
-			}
-			result[i] = copy
-		default:
-			result[i] = item
-		}
-	}
-	return result
 }
 
 func cloneTaskState(task State) State {

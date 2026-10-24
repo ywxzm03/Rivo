@@ -71,14 +71,14 @@ func (m *Manager) resumeEvicted(ctx context.Context, taskID, prompt string) (Sen
 	// 2.按 continuation 语义装配 runtime:factory 会打开已有 transcript
 	runtime, err := m.factory(ctx, taskpkg.AgentSpec{
 		ID: stateID, Description: source.Description, Prompt: prompt, AgentType: agentType,
-		OutputFile: source.OutputFile, WorktreePath: source.WorktreePath, Continuation: true,
+		WorktreePath: source.WorktreePath, Continuation: true,
 	})
 	if err != nil {
-		_ = m.store.FailReserved(stateID, err)
+		m.store.DiscardReserved(stateID)
 		return SendMessageResult{}, err
 	}
 	if runtime == nil || runtime.Agent == nil {
-		_ = m.store.FailReserved(stateID, errors.New("subagent: factory returned no agent"))
+		m.store.DiscardReserved(stateID)
 		return SendMessageResult{}, errors.New("subagent: factory returned no agent")
 	}
 	if runtime.Done == nil {

@@ -138,11 +138,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	child.CommitMessages = sm.AppendMessages
 	runtime := &taskpkg.AgentRuntime{
-		Agent: child, Cwd: cwd, OutputFile: transcriptPath, WorktreePath: worktreePath, ContentReplacementState: replacementState, Done: make(chan struct{}),
-		AppendMessages: func(messages []llm.Message) error {
-			_, err := sm.AppendMessages(messages)
-			return err
-		},
+		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, ContentReplacementState: replacementState, Done: make(chan struct{}),
 	}
 	if spec.Worktree && worktreePath != "" {
 		runtime.WorktreeCleanup = func() bool { return cleanupSubagentWorktree(worktreePath, r.ParentCwd, metadataPath) }

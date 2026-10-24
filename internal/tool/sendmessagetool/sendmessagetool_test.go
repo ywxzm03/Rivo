@@ -70,12 +70,16 @@ func TestExecuteDeliversMessage(t *testing.T) {
 func TestExecuteRejectsMissingFields(t *testing.T) {
 	messenger := &fakeMessenger{}
 	tool := New(messenger)
-	// 缺字段时仍应调用执行面,由 Manager 统一给出错误
-	if _, err := tool.Execute(context.Background(), map[string]any{}); err != nil {
-		t.Fatal(err)
+	// 缺必填字段时必须报错,且不得调用执行面
+	if _, err := tool.Execute(context.Background(), map[string]any{}); err == nil {
+		t.Fatal("missing fields were accepted")
 	}
 	if messenger.taskID != "" || messenger.message != "" {
-		t.Fatalf("unexpected delivery %q -> %q", messenger.taskID, messenger.message)
+		t.Fatalf("executor was called with %q -> %q", messenger.taskID, messenger.message)
+	}
+	// 只有 to 没有 message 也要拒绝
+	if _, err := tool.Execute(context.Background(), map[string]any{"to": "agent-1"}); err == nil {
+		t.Fatal("missing message was accepted")
 	}
 }
 

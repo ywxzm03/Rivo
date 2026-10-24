@@ -53,3 +53,21 @@ var (
 	_ Content = ThinkingContent{}
 	_ Content = ToolCall{}
 )
+
+// CloneContent 深拷贝一组 content,隔离 ToolCall 的 Arguments map
+func CloneContent(content []Content) []Content {
+	result := make([]Content, len(content))
+	for i, item := range content {
+		if call, ok := item.(ToolCall); ok {
+			cloned := call
+			cloned.Arguments = make(map[string]any, len(call.Arguments))
+			for key, value := range call.Arguments {
+				cloned.Arguments[key] = value
+			}
+			result[i] = cloned
+			continue
+		}
+		result[i] = item
+	}
+	return result
+}

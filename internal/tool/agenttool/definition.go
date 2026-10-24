@@ -13,8 +13,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Definition 是 typed subagent 使用的精简 agent 定义面。
-// body 是该 agent 的默认指令 prompt。
+// Definition 是 typed subagent 使用的精简 agent 定义面
+// Prompt 是该 agent 的默认指令正文
 type Definition struct {
 	Name         string
 	Description  string

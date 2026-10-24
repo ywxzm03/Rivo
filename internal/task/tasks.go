@@ -2,12 +2,8 @@ package task
 
 import "fmt"
 
-type BashTask struct{}
-
-func (BashTask) Name() string { return "BashTask" }
-func (BashTask) Type() Type   { return TypeBash }
-
-func (BashTask) Kill(taskID string, store *Store) error {
+// KillBash 终止后台 bash 任务:先杀进程,失败则回滚状态
+func KillBash(taskID string, store *Store) error {
 	task, process, unregister, token, err := store.beginBashKill(taskID)
 	if err != nil {
 		return err
@@ -27,12 +23,8 @@ func (BashTask) Kill(taskID string, store *Store) error {
 	return nil
 }
 
-type AgentTask struct{}
-
-func (AgentTask) Name() string { return "AgentTask" }
-func (AgentTask) Type() Type   { return TypeAgent }
-
-func (AgentTask) Kill(taskID string, store *Store) error {
+// KillAgent 取消 agent 任务的 lifecycle 并执行清理回调
+func KillAgent(taskID string, store *Store) error {
 	runtime, abort, unregister, _, err := store.beginAgentKill(taskID)
 	if err != nil {
 		return err
@@ -48,16 +40,7 @@ func (AgentTask) Kill(taskID string, store *Store) error {
 	return nil
 }
 
-var taskImplementations = map[Type]Task{
-	TypeBash:  BashTask{},
-	TypeAgent: AgentTask{},
-}
-
-func getTaskByType(taskType Type) (Task, bool) {
-	task, ok := taskImplementations[taskType]
-	return task, ok
-}
-
+// StopTask 按任务类型分派终止逻辑
 func StopTask(store *Store, input StopInput) (StopOutput, error) {
 	if input.TaskID == "" {
 		return StopOutput{}, &StopTaskError{Code: "not_found", Message: "Missing required parameter: task_id"}
@@ -69,12 +52,17 @@ func StopTask(store *Store, input StopInput) (StopOutput, error) {
 	if task.Base().Status != StatusRunning {
 		return StopOutput{}, &StopTaskError{Code: "not_running", Message: fmt.Sprintf("Task %s is not running (status: %s)", input.TaskID, task.Base().Status)}
 	}
-	implementation, ok := getTaskByType(task.Base().Type)
-	if !ok {
+	switch task.Base().Type {
+	case TypeBash:
+		if err := KillBash(input.TaskID, store); err != nil {
+			return StopOutput{}, err
+		}
+	case TypeAgent:
+		if err := KillAgent(input.TaskID, store); err != nil {
+			return StopOutput{}, err
+		}
+	default:
 		return StopOutput{}, &StopTaskError{Code: "unsupported_type", Message: fmt.Sprintf("Unsupported task type: %s", task.Base().Type)}
-	}
-	if err := implementation.Kill(input.TaskID, store); err != nil {
-		return StopOutput{}, err
 	}
 	command := task.Base().Description
 	if bash, ok := task.(*BashState); ok {

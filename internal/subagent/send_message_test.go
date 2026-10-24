@@ -88,7 +88,7 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 		if taskID != "agent-evicted-1" {
 			return taskpkg.ResumeSource{}, false
 		}
-		return taskpkg.ResumeSource{ID: taskID, AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl"}, true
+		return taskpkg.ResumeSource{ID: taskID, AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl", WorktreePath: "/tmp/wt"}, true
 	})
 
 	result, err := manager.SendMessage(context.Background(), "agent-evicted-1", "continue please")
@@ -99,7 +99,7 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 		t.Fatalf("send result = %#v", result)
 	}
 	// 驱逐任务必须按 continuation 语义重建,复用原 transcript
-	if !factorySpec.Continuation || factorySpec.OutputFile != "/tmp/agent-evicted-1.jsonl" || factorySpec.AgentType != "explore" {
+	if !factorySpec.Continuation || factorySpec.WorktreePath != "/tmp/wt" || factorySpec.AgentType != "explore" {
 		t.Fatalf("factory spec = %#v", factorySpec)
 	}
 	waitForTaskStatus(t, manager.Store(), "agent-evicted-1", taskpkg.StatusCompleted)

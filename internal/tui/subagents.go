@@ -310,26 +310,6 @@ func taskStatusIcon(status string, runningFrame string) string {
 	}
 }
 
-func taskStatusColor(status string) string {
-	switch status {
-	case "completed":
-		return greenColor
-	case "failed":
-		return redColor
-	case "killed":
-		return mutedColor
-	default:
-		return greenColor
-	}
-}
-
-func taskSelectionIcon(selected bool) string {
-	if selected {
-		return "●"
-	}
-	return "○"
-}
-
 func taskSelectionColor(selected bool) string {
 	if selected {
 		return textColor

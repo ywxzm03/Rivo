@@ -119,7 +119,7 @@ func TestAgentTaskStopLeavesNotificationForPartialResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (AgentTask{}).Kill(id, store); err != nil {
+	if err := KillAgent(id, store); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(ctx.Err(), context.Canceled) {

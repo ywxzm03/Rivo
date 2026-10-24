@@ -4,7 +4,6 @@ package agenttool
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
@@ -54,28 +53,12 @@ func (t *Tool) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionP
 
 // Execute 解析工具参数并派发任务,返回启动信息
 func (t *Tool) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	input := taskpkg.AgentInput{}
-	// 1.解析必填字段与可选的展示名
-	input.Description, _ = args["description"].(string)
-	input.Prompt, _ = args["prompt"].(string)
-	input.Name, _ = args["name"].(string)
-	// 2.可选字段:未提供时保持 nil,让 Manager 走默认值
-	if value, ok := args["subagent_type"].(string); ok && value != "" {
-		input.SubagentType = &value
+	if t.launcher == nil {
+		return llm.ToolResult{}, errMissingLauncher
 	}
-	if value, ok := args["worktree"].(bool); ok {
-		input.Worktree = &value
-	}
-	if value, ok := args["thinking"].(string); ok && value != "" {
-		thinking := llm.ThinkingLevel(value)
-		input.Thinking = &thinking
-	}
-	if value, ok := args["model"].(string); ok && value != "" {
-		model := &llm.Model{ID: value}
-		if parts := strings.SplitN(value, "/", 2); len(parts) == 2 {
-			model.Provider, model.ID = parts[0], parts[1]
-		}
-		input.Model = model
+	input, err := parseInput(args)
+	if err != nil {
+		return llm.ToolResult{}, err
 	}
 	launched, err := t.launcher.Start(ctx, input)
 	if err != nil {

@@ -23,9 +23,6 @@ type Manager struct {
 }
 
 func NewManager(store *taskpkg.Store, factory AgentRuntimeFactory) *Manager {
-	if store == nil {
-		store = taskpkg.NewStore()
-	}
 	return &Manager{store: store, factory: factory}
 }
 
@@ -77,31 +74,16 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 	}
 	runtime, err := m.factory(ctx, spec)
 	if err != nil {
-		_ = m.store.FailReserved(stateID, err)
+		m.store.DiscardReserved(stateID)
 		return taskpkg.AgentLaunched{}, err
 	}
-	if runtime == nil || runtime.Agent == nil {
-		_ = m.store.FailReserved(stateID, errors.New("agent: factory returned no agent"))
-		return taskpkg.AgentLaunched{}, errors.New("agent: factory returned no agent")
-	}
-	if runtime.Done == nil {
-		runtime.Done = make(chan struct{})
-	}
-	// Agent 工具是显式异步的。工具批次在返回结果后就会取消其子 context,
-	// 因此要把任务 lifecycle 与该短命请求 context 解绑。TaskStop 仍是子任务的
-	// 显式取消边界。
-	lifecycleCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	runtime.Cancel = cancel
-	token, err := m.store.AttachAgentRuntime(stateID, runtime, input.Prompt)
-	if err != nil {
-		cancel()
+	if err := m.launch(ctx, stateID, runtime, input, func() (uint64, error) {
+		return m.store.AttachAgentRuntime(stateID, runtime, input.Prompt)
+	}); err != nil {
+		m.store.DiscardReserved(stateID)
 		return taskpkg.AgentLaunched{}, err
 	}
-	m.store.SetRuntimeMetadata(stateID, token, runtime)
-	m.installPendingDrain(stateID, token, runtime)
-	go m.runAgent(lifecycleCtx, stateID, token, runtime, input)
-	launched := taskpkg.AgentLaunched{Status: "async_launched", AgentID: stateID, Description: input.Description, Prompt: input.Prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}
-	return launched, nil
+	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: stateID, Description: input.Description, Prompt: input.Prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
 }
 
 // Continue 用同一个稳定 agent ID 恢复终态任务。旧 lifecycle 先取消并完全 drain,
@@ -147,7 +129,7 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 	agentType := agentTask.AgentType
 	runtime, err := m.factory(ctx, taskpkg.AgentSpec{
 		ID: taskID, Description: task.Base().Description, Prompt: prompt,
-		AgentType: agentType, OutputFile: task.Base().OutputFile,
+		AgentType:       agentType,
 		WorktreePath:    agentTask.WorktreePath,
 		Worktree:        agentTask.Worktree,
 		PendingMessages: taskpkg.CloneUserMessages(agentTask.PendingMessages),
@@ -156,26 +138,37 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 	if err != nil {
 		return taskpkg.AgentLaunched{}, err
 	}
+	input := taskpkg.AgentInput{Description: task.Base().Description, Prompt: prompt, SubagentType: &agentType}
+	if err := m.launch(ctx, taskID, runtime, input, func() (uint64, error) {
+		return m.store.RegisterContinuation(taskID, runtime, prompt)
+	}); err != nil {
+		return taskpkg.AgentLaunched{}, err
+	}
+	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: taskID, Description: task.Base().Description, Prompt: prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
+}
+
+// launch 校验 runtime、绑定 lifecycle context 并在后台启动任务
+func (m *Manager) launch(ctx context.Context, taskID string, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput, register func() (uint64, error)) error {
 	if runtime == nil || runtime.Agent == nil {
-		return taskpkg.AgentLaunched{}, errors.New("agent: factory returned no agent")
+		return errors.New("agent: factory returned no agent")
 	}
 	if runtime.Done == nil {
 		runtime.Done = make(chan struct{})
 	}
+	// Agent 工具是显式异步的。工具批次在返回结果后就会取消其子 context,
+	// 因此要把任务 lifecycle 与该短命请求 context 解绑。TaskStop 仍是子任务的
+	// 显式取消边界。
 	lifecycleCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	runtime.Cancel = cancel
-	token, err := m.store.RegisterContinuation(taskID, runtime, prompt)
+	token, err := register()
 	if err != nil {
 		cancel()
-		return taskpkg.AgentLaunched{}, err
+		return err
 	}
 	m.store.SetRuntimeMetadata(taskID, token, runtime)
 	m.installPendingDrain(taskID, token, runtime)
-	go m.runAgent(lifecycleCtx, taskID, token, runtime, taskpkg.AgentInput{
-		Description: task.Base().Description, Prompt: prompt,
-		SubagentType: &agentType,
-	})
-	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: taskID, Description: task.Base().Description, Prompt: prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
+	go m.runAgent(lifecycleCtx, taskID, token, runtime, input)
+	return nil
 }
 
 func modelFromState(state *taskpkg.AgentState) llm.Model {
@@ -221,10 +214,17 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 	if wasKilled || errors.Is(ctx.Err(), context.Canceled) || errors.Is(runErr, context.Canceled) {
 		partial := latestAssistant(runtime.Agent)
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusRunning {
-			_ = taskpkg.AgentTask{}.Kill(taskID, m.store)
+			// 1.取消后状态没落到 killed 说明任务卡在 running,用 failed 兜住避免悬挂
+			if err := taskpkg.KillAgent(taskID, m.store); err != nil {
+				m.store.FailAgent(taskID, token, fmt.Errorf("agent: stop after cancellation failed: %w", err))
+			}
 		}
 		partialResult := agentResult(taskID, input, partial, time.Since(started))
-		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusKilled, Summary: input.Description, Result: firstText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
+		status := taskpkg.StatusKilled
+		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusFailed {
+			status = taskpkg.StatusFailed
+		}
+		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: status, Summary: input.Description, Result: firstText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
 		m.cleanupWorktree(taskID, token, runtime)
 		m.store.EnqueueNotification(taskID, token, notification)
 	} else if runErr != nil {

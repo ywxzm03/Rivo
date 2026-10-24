@@ -13,20 +13,16 @@ import (
 
 // childTools 构造子 agent 的工具集:换掉会写父 transcript 的实例,并移除 TaskStop
 func childTools(parent []llm.Tool, keepAgent bool, childSession *session.SessionManager, taskStore *taskpkg.Store) []llm.Tool {
-	if taskStore == nil {
-		taskStore = taskpkg.NewStore()
-	}
 	tools := make([]llm.Tool, 0, len(parent))
 	for _, tool := range parent {
-		// 1.TaskStop 只属于根 agent,子 agent 不得终止其他任务
-		if tool.Name() == "TaskStop" {
+		// 1.TaskStop 只属于根 agent;agent 工具按 keepAgent 决定移除还是拒绝嵌套
+		switch tool.Name() {
+		case "TaskStop":
 			continue
-		}
-		if tool.Name() == "agent" && !keepAgent {
-			continue
-		}
-		if tool.Name() == "agent" && keepAgent {
-			tools = append(tools, rejectingAgentTool{Tool: tool})
+		case "agent":
+			if keepAgent {
+				tools = append(tools, rejectingAgentTool{Tool: tool})
+			}
 			continue
 		}
 		// 2.写类工具要绑定子 transcript 的 file history

@@ -29,14 +29,17 @@ func ResumeResolver(sessionDir string) taskpkg.ResumeResolver {
 			return taskpkg.ResumeSource{}, false
 		}
 		source := taskpkg.ResumeSource{ID: taskID, OutputFile: transcript, AgentType: "work"}
-		// 2.元数据缺失时退回 work,不让恢复整体失败
+		// 2.元数据缺失时退回 work;存在但损坏则说明落盘有问题,直接判为不可恢复
 		data, err := os.ReadFile(filepath.Join(sessionDir, "subagents", "agent-"+taskID+".meta.json"))
 		if err != nil {
-			return source, true
+			if os.IsNotExist(err) {
+				return source, true
+			}
+			return taskpkg.ResumeSource{}, false
 		}
 		var meta metadata
 		if err := json.Unmarshal(data, &meta); err != nil {
-			return source, true
+			return taskpkg.ResumeSource{}, false
 		}
 		if strings.TrimSpace(meta.AgentType) != "" {
 			source.AgentType = meta.AgentType

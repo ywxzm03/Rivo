@@ -38,7 +38,6 @@ type StateBase struct {
 	ToolUseID      string
 	StartTime      time.Time
 	EndTime        *time.Time
-	TotalPausedMs  *int64
 	OutputFile     string
 	OutputOffset   int64
 	Notified       bool
@@ -123,12 +122,10 @@ type AgentRuntime struct {
 	Cancel                  context.CancelFunc
 	Done                    chan struct{}
 	LifecycleToken          uint64
-	Cwd                     string
 	OutputFile              string
 	WorktreePath            string
 	WorktreeCleanup         func() bool
 	ContentReplacementState map[string][]llm.Content
-	AppendMessages          func([]llm.Message) error
 	Run                     func(context.Context, string) (*llm.AssistantMessage, error)
 }
 
@@ -200,12 +197,6 @@ type StopTaskError struct {
 
 func (e *StopTaskError) Error() string { return e.Message }
 
-type Task interface {
-	Name() string
-	Type() Type
-	Kill(taskID string, store *Store) error
-}
-
 // ResumeSource 是磁盘侧描述,指向已不在易失 store 中的任务
 type ResumeSource struct {
 	ID           string
@@ -224,8 +215,6 @@ type AgentSpec struct {
 	Description     string
 	Prompt          string
 	AgentType       string
-	ToolUseID       string
-	OutputFile      string
 	WorktreePath    string
 	Worktree        bool
 	PendingMessages []llm.UserMessage

@@ -77,10 +77,13 @@ func TestExecuteRejectsUnknownTask(t *testing.T) {
 	}
 }
 
-func TestExecuteTreatsMissingIDAsEmpty(t *testing.T) {
+func TestExecuteRejectsMissingTaskID(t *testing.T) {
+	// 缺 task_id 时必须在工具层拒绝,而不是拿空 ID 去查 store
 	_, err := New(taskpkg.NewStore()).Execute(context.Background(), map[string]any{})
-	var stopErr *taskpkg.StopTaskError
-	if !errors.As(err, &stopErr) || stopErr.Code != "not_found" {
-		t.Fatalf("err = %v, want not_found StopTaskError", err)
+	if err == nil {
+		t.Fatal("missing task_id was accepted")
+	}
+	if _, err := New(taskpkg.NewStore()).Execute(context.Background(), map[string]any{"task_id": "   "}); err == nil {
+		t.Fatal("blank task_id was accepted")
 	}
 }

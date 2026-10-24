@@ -41,25 +41,13 @@ func TestRunWritesTranscriptAndMetadata(t *testing.T) {
 	}
 	defer func() {
 		if runtime.Cancel != nil {
-			if runtime.Cancel != nil {
-				runtime.Cancel()
-			}
+			runtime.Cancel()
 		}
 	}()
-	// 1.transcript 路径落在 sessionDir/subagents 下,首次追加时落盘
+	// 1.transcript 路径落在 sessionDir/subagents 下
 	want := filepath.Join(runner.SessionDir, "subagents", "agent-agent-1.jsonl")
 	if runtime.OutputFile != want {
 		t.Fatalf("output file = %q, want %q", runtime.OutputFile, want)
-	}
-	if runtime.AppendMessages == nil {
-		t.Fatal("runtime has no transcript appender")
-	}
-	// 只有 user/assistant 消息会落盘,system 段留在内存
-	if err := runtime.AppendMessages([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(want); err != nil {
-		t.Fatalf("transcript not written: %v", err)
 	}
 	// 2.元数据记录 agentType 与 description,供 eviction 后恢复
 	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-agent-1.meta.json"))
@@ -77,8 +65,8 @@ func TestRunWritesTranscriptAndMetadata(t *testing.T) {
 	if runtime.Agent == nil || runtime.Done == nil {
 		t.Fatalf("runtime = %#v", runtime)
 	}
-	if runtime.Cwd != runner.ParentCwd {
-		t.Fatalf("runtime cwd = %q, want %q", runtime.Cwd, runner.ParentCwd)
+	if runtime.Agent.WorkingDir != runner.ParentCwd {
+		t.Fatalf("agent working dir = %q, want %q", runtime.Agent.WorkingDir, runner.ParentCwd)
 	}
 }
 

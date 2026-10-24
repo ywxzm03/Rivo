@@ -3,6 +3,8 @@ package taskstoptool
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
@@ -41,11 +43,14 @@ func (t *Tool) PromptSnippet() string                { return "Stop a running ba
 func (t *Tool) PromptGuidelines() []string           { return nil }
 func (t *Tool) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
-// Execute 终止目标任务;缺少 task_id 时按空 ID 处理,由执行面报 not_found
+// Execute 终止目标任务,缺少 task_id 时返回明确错误
 func (t *Tool) Execute(_ context.Context, args map[string]any) (llm.ToolResult, error) {
+	if t.store == nil {
+		return llm.ToolResult{}, errMissingStore
+	}
 	taskID, ok := args["task_id"].(string)
-	if !ok {
-		taskID = ""
+	if !ok || strings.TrimSpace(taskID) == "" {
+		return llm.ToolResult{}, errMissingTaskID
 	}
 	result, err := taskpkg.StopTask(t.store, taskpkg.StopInput{TaskID: taskID})
 	if err != nil {
@@ -53,3 +58,8 @@ func (t *Tool) Execute(_ context.Context, args map[string]any) (llm.ToolResult, 
 	}
 	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: result.Message}}, Details: result}, nil
 }
+
+var (
+	errMissingStore  = errors.New("TaskStop: task store is unavailable")
+	errMissingTaskID = errors.New("TaskStop: task_id is required")
+)

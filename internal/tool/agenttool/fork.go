@@ -59,3 +59,23 @@ func buildForkMessages(parent []llm.Message, directive, worktreePath, parentCwd 
 	}
 	return append(messages, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}})
 }
+
+func cloneMessages(messages []llm.Message) []llm.Message {
+	result := make([]llm.Message, 0, len(messages))
+	for _, message := range messages {
+		switch message := message.(type) {
+		case llm.UserMessage:
+			message.Content = llm.CloneContent(message.Content)
+			result = append(result, message)
+		case llm.AssistantMessage:
+			message.Content = llm.CloneContent(message.Content)
+			result = append(result, message)
+		case llm.ToolResultMessage:
+			message.Content = llm.CloneContent(message.Content)
+			result = append(result, message)
+		default:
+			result = append(result, message)
+		}
+	}
+	return result
+}
