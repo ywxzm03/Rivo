@@ -66,17 +66,20 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 	}
 }
 
-func TestAnimatedToolFramesReuseStaticMarkdownPreview(t *testing.T) {
+// 工具行的点击命中按消息缓存：同一帧内重复渲染不改变命中数量
+func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	m.showAllTools = true
-	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "**result**", Status: ToolPending, StartedAt: time.Now()}}}
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess}}, Sealed: true}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
-	m.renderMessage(m.state.Messages[0])
-	first := len(m.markdownPreview)
-	m.renderMessage(m.state.Messages[0])
-	if len(m.markdownPreview) != first || first == 0 {
-		t.Fatalf("static tool markdown was reparsed: before=%d after=%d", first, len(m.markdownPreview))
+	m.refreshTranscript()
+	first := len(m.lastToolHits)
+	if first != 1 {
+		t.Fatalf("hits = %d, want 1", first)
+	}
+	m.refreshTranscript()
+	if len(m.lastToolHits) != first || m.lastToolHits[0] != m.cache["tools"].hits[0] {
+		t.Fatalf("hits changed between renders: %+v", m.lastToolHits)
 	}
 }
 

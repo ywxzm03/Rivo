@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,16 +21,32 @@ const exampleThinking = "The user just said hello. I will answer briefly and wai
 const exampleAnswer = "Hi! I'm ready to help with your code — reading files, editing code, running commands, and debugging. What would you like to do?"
 const exampleMarkdown = "## A small Go example\n\n中文、emoji 👋 和 **Markdown** 使用同一套宽度规则。\n\n```go\nfunc greet(name string) string {\n    return \"Hello, \" + name\n}\n```\n\n- Inline `code` and **bold text**\n- [Rivo](https://github.com/ywxzm03/Rivo)\n\n> A quoted paragraph with a long line that wraps inside the transcript.\n\n| State | Result |\n| --- | --- |\n| streaming | visible |\n| completed | cached |"
 
+// exampleToolGroup 覆盖 claude 行式的几类结果：只读分组、命令输出、write 预览、edit diff
 func exampleToolGroup() *tui.ToolGroupView {
+	patch := strings.Join([]string{
+		"--- demo/greet.ts",
+		"+++ demo/greet.ts",
+		"@@ -1,3 +1,3 @@",
+		" export function greet(name: string): string {",
+		"-  return `Hello, ${name}!`;",
+		"+  return `Welcome, ${name}!`;",
+		" }",
+	}, "\n")
 	return &tui.ToolGroupView{
 		ID: "preview-tools", Sealed: true,
 		Calls: []tui.ToolCallView{
-			{ID: "read", Name: "read", Arguments: `{"path":"/Users/wm/IdeaProjects/Rivo/internal/tui/model.go"}`, Result: "package tui\n\ntype Model struct {\n\tstate Snapshot\n}", Status: tui.ToolSuccess, Elapsed: 120 * time.Millisecond},
-			{ID: "grep", Name: "grep", Arguments: `{"pattern":"Ctrl+O","path":"internal/tui"}`, Result: "internal/tui/editor.go:case \"ctrl+o\":", Status: tui.ToolSuccess, Elapsed: 180 * time.Millisecond},
-			{ID: "bash", Name: "bash", Arguments: `{"command":"go test ./..."}`, Result: "ok   github.com/ywxzm03/Rivo/internal/tui  0.42s", Status: tui.ToolSuccess, Elapsed: 420 * time.Millisecond},
-			{ID: "write", Name: "write", Arguments: `{"path":"/tmp/preview.txt"}`, Result: "Successfully wrote to /tmp/preview.txt", Status: tui.ToolSuccess, Elapsed: 90 * time.Millisecond},
+			{ID: "grep", Name: "grep", Round: 1, ArgsComplete: true, Arguments: `{"pattern":"greet|language","path":"demo"}`, Result: "demo/greet.ts:1: export function greet(name: string): string {", Status: tui.ToolSuccess, Elapsed: 33 * time.Millisecond},
+			{ID: "read", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}", Status: tui.ToolSuccess, Elapsed: 10 * time.Millisecond},
+			{ID: "read2", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/config.json"}`, Result: "{\n  \"lang\": \"zh\"\n}", Status: tui.ToolSuccess, Elapsed: 8 * time.Millisecond},
+			{ID: "bash", Name: "bash", Round: 2, ArgsComplete: true, Arguments: `{"command":"node --test demo/greet.test.mjs"}`, Result: "✔ greeting helper exports a typed function (0.527416ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1", Status: tui.ToolSuccess, Elapsed: 145 * time.Millisecond},
+			{ID: "write", Name: "write", Round: 3, ArgsComplete: true, Arguments: `{"path":"demo/notes.md","content":"# Greeting\n\nUse a friendly welcome."}`, Result: "Successfully wrote to demo/notes.md", Status: tui.ToolSuccess, Elapsed: 2 * time.Millisecond},
+			{ID: "edit", Name: "edit", Round: 4, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "Successfully replaced 1 block(s) in demo/greet.ts.", Details: `{"Patch":` + strconv.Quote(patch) + `}`, Status: tui.ToolSuccess, Elapsed: 3 * time.Millisecond},
 		},
-		Thinking: []tui.ThinkingBlockView{{Index: 0, Text: exampleThinking, Tokens: 260, TokensExact: false}},
+		Thinking: []tui.ThinkingBlockView{
+			{Index: 0, Round: 1, Text: "The user said hello. First look around the demo directory.", Tokens: 120},
+			{Index: 0, Round: 2, Text: "Now run the test to confirm the helper still works.", Tokens: 90},
+			{Index: 0, Round: 3, Text: "Write the notes file, then update the greeting.", Tokens: 50},
+		},
 	}
 }
 
@@ -187,15 +205,49 @@ func (p *previewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return p, cmd
 }
 
+// exampleDiffPatch 是一段带长行与空内容删除行的统一 patch，用来验收 diff 版式
+const exampleDiffPatch = `@@ -360,9 +360,9 @@
+ // Insert 插入键，已存在时返回 false
+ func (t *Tree[K]) Insert(key K) bool {
+-
+-var path []*node[K]
++var parent *node[K]
+ cur := t.root
+ for cur != nil {
+-
+-path = append(path, cur)
++parent = cur
+ switch {`
+
+func exampleDiffGroup() *tui.ToolGroupView {
+	patch, _ := json.Marshal(map[string]any{"Patch": exampleDiffPatch})
+	return &tui.ToolGroupView{
+		ID: "preview-diff", Sealed: true,
+		Calls: []tui.ToolCallView{{
+			ID: "edit", Name: "edit", Round: 1, ArgsComplete: true,
+			Arguments: `{"path":"~/resources/handoff/rivo-handoff-2026-09-23.md"}`,
+			Result:    "Successfully replaced 1 block(s) in rbtree.go.",
+			Details:   string(patch),
+			Status:    tui.ToolSuccess, Elapsed: 3 * time.Millisecond,
+		}},
+	}
+}
+
 func main() {
-	scene := flag.String("scene", "initial", "initial, conversation, markdown, working, completion, model, thinking, resume")
+	scene := flag.String("scene", "initial", "initial, conversation, markdown, working, completion, model, thinking, resume, diff")
 	flag.Parse()
-	valid := map[string]bool{"initial": true, "conversation": true, "markdown": true, "working": true, "completion": true, "model": true, "thinking": true, "resume": true}
+	valid := map[string]bool{"initial": true, "conversation": true, "markdown": true, "working": true, "completion": true, "model": true, "thinking": true, "resume": true, "diff": true}
 	if !valid[*scene] {
 		fmt.Fprintln(os.Stderr, "unknown scene:", *scene)
 		os.Exit(2)
 	}
 	driver := &preview{state: initialState(), scene: *scene}
+	if *scene == "diff" {
+		driver.state.Messages = []tui.Message{
+			{ID: "ask", Role: "user", Text: "把这次改动展示一下"},
+			{ID: "answer", Role: "assistant", ToolGroup: exampleDiffGroup()},
+		}
+	}
 	if *scene == "conversation" || *scene == "model" || *scene == "markdown" {
 		answer := exampleAnswer
 		if *scene == "markdown" {

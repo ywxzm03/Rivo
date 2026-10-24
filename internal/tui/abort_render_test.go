@@ -51,7 +51,7 @@ func TestAbortedMessageRenderingWithToolGroup(t *testing.T) {
 	if !strings.Contains(rendered, "Operation aborted") {
 		t.Fatalf("abort hint missing: %q", rendered)
 	}
-	if !strings.Contains(rendered, "bash") {
+	if !strings.Contains(rendered, "Bash") {
 		t.Fatalf("tool group lost on aborted render: %q", rendered)
 	}
 }
@@ -64,7 +64,7 @@ func TestAbortedMessageRenderingTextAndGroup(t *testing.T) {
 		ToolGroup: &ToolGroupView{ID: "g1", Calls: []ToolCallView{{ID: "c1", Name: "bash", Status: ToolInterrupted}}, Sealed: true},
 	}}
 	rendered := ansi.Strip(m.renderMessage(m.state.Messages[0]))
-	if !strings.Contains(rendered, "partial answer") || !strings.Contains(rendered, "Operation aborted") || !strings.Contains(rendered, "bash") {
+	if !strings.Contains(rendered, "partial answer") || !strings.Contains(rendered, "Operation aborted") || !strings.Contains(rendered, "Bash") {
 		t.Fatalf("aborted render incomplete: %q", rendered)
 	}
 }

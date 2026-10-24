@@ -176,7 +176,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+l":
 		return m.openSelector("model", "")
 	case "ctrl+t":
-		m.hideThinking = !m.hideThinking
+		m.showThinking = !m.showThinking
 		m.refreshTranscript()
 		return nil
 	case "ctrl+o":

@@ -154,7 +154,9 @@ func (m *Model) renderMessage(message Message) string {
 		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
 	}
 	if message.ToolGroup != nil {
-		parts := []string{m.renderToolGroup(message.ToolGroup, width)}
+		group := m.renderToolGroup(message.ToolGroup, width)
+		m.lastMessageHits = append([]toolHit(nil), m.lastToolHits...)
+		parts := []string{group}
 		if message.Text != "" {
 			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 		}
@@ -220,11 +222,11 @@ func (m *Model) renderMessage(message Message) string {
 	}
 	var parts []string
 	if message.Thinking != "" {
-		thinking := message.Thinking
-		if m.hideThinking {
-			thinking = "Thinking..."
+		if !m.showThinking {
+			parts = append(parts, boldItalicText("Thinking..."))
+		} else {
+			parts = append(parts, indent(m.markdown.render(message.Thinking, "thinking", width)))
 		}
-		parts = append(parts, indent(m.markdown.render(thinking, "thinking", width)))
 	}
 	if message.Divider != nil && message.Text != "" {
 		parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))

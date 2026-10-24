@@ -62,7 +62,9 @@ const (
 
 // ThinkingBlockView 保存一个按 content index 分隔的 reasoning block
 type ThinkingBlockView struct {
-	Index       int
+	Index int
+	// Round 是该思考所属的 assistant 轮次：同一轮里的 thinking 排在它自己的调用之前
+	Round       int
 	Text        string
 	Active      bool
 	Tokens      int
@@ -71,13 +73,19 @@ type ThinkingBlockView struct {
 
 // ToolCallView 保存完整工具状态，compact/full 只改变展示方式
 type ToolCallView struct {
-	ID, Name  string
+	ID, Name string
+	// Round 是该调用所属的 assistant 轮次，用来把 thinking 排到同一轮的调用之前
+	Round     int
 	Arguments string
 	Result    string
-	Status    ToolStatus
-	Elapsed   time.Duration
-	StartedAt time.Time
-	EndedAt   time.Time
+	// Details 是工具返回的结构化详情（如 edit 的 diff），JSON 编码后只供展示
+	Details string
+	Status  ToolStatus
+	// ArgsComplete 表示模型已写完参数；Pi 用它判断行是否仍处于进行中
+	ArgsComplete bool
+	Elapsed      time.Duration
+	StartedAt    time.Time
+	EndedAt      time.Time
 }
 
 // ToolGroupView 将连续 thinking 和工具调用作为一个可折叠工作块
@@ -259,11 +267,15 @@ type clearCopyNoticeMsg uint64
 type screenPoint struct{ x, y int }
 
 type cachedMessage struct {
-	revision uint64
-	width    int
-	hidden   bool
-	allTools bool
+	revision     uint64
+	width        int
+	showThinking bool
+	allTools     bool
+	// expanded 是单击展开状态的指纹，任何一处切换都要重画
+	expanded string
 	view     string
+	// hits 是这条消息内部的可点击区域，行号相对消息块起点
+	hits []toolHit
 }
 
 // Model 独占全部显示状态
@@ -292,34 +304,41 @@ type Model struct {
 	compacting               bool
 	compactionQueuedMessages []compactionQueuedMessage
 	status                   string
-	hideThinking             bool
+	showThinking             bool
 	showAllTools             bool
 	lastCtrlC                time.Time
 	flushPending             bool
 	cache                    map[string]cachedMessage
-	steeringRevision         uint64
-	followUpRestored         bool
-	followUpRevision         uint64
-	markdownPreview          map[string]string
-	markdown                 markdownRenderer
-	clock                    func() time.Time
-	selectionAnchor          screenPoint
-	selectionFocus           screenPoint
-	selecting                bool
-	lastClick                screenPoint
-	lastClickAt              time.Time
-	mousePosition            screenPoint
-	mousePositionSet         bool
-	mouseFragment            string
-	copyNoticeSeq            uint64
-	copyNotice               bool
-	contextNoticeSeq         uint64
-	pastes                   map[int]string
-	pasteCounter             int
-	images                   map[int]llm.ImageContent
-	imageCounter             int
-	cursorRow                atomic.Int64
-	cursorColumn             atomic.Int64
+	// expandedGroups / expandedCalls / expandedThoughts 记录单击展开的组、调用与思考块
+	expandedGroups   map[string]bool
+	expandedCalls    map[string]bool
+	expandedThoughts map[string]bool
+	// lastToolHits 是最近一次渲染的点击命中区间，用于把单击映射回调用
+	lastToolHits     []toolHit
+	steeringRevision uint64
+	followUpRestored bool
+	followUpRevision uint64
+	// lastMessageHits 由 renderMessage 写入，refreshTranscript 换算成屏幕行
+	lastMessageHits  []toolHit
+	markdown         markdownRenderer
+	clock            func() time.Time
+	selectionAnchor  screenPoint
+	selectionFocus   screenPoint
+	selecting        bool
+	lastClick        screenPoint
+	lastClickAt      time.Time
+	mousePosition    screenPoint
+	mousePositionSet bool
+	mouseFragment    string
+	copyNoticeSeq    uint64
+	copyNotice       bool
+	contextNoticeSeq uint64
+	pastes           map[int]string
+	pasteCounter     int
+	images           map[int]llm.ImageContent
+	imageCounter     int
+	cursorRow        atomic.Int64
+	cursorColumn     atomic.Int64
 }
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
@@ -350,7 +369,8 @@ func newModel(state Snapshot, handlers Handlers, initialPrompt string) *Model {
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
 	m := &Model{handlers: handlers, editor: ed, initialPrompt: initialPrompt, viewport: viewport.New(0, 0),
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), markdownPreview: make(map[string]string), images: make(map[int]llm.ImageContent), clock: time.Now}
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), images: make(map[int]llm.ImageContent), clock: time.Now,
+		expandedGroups: make(map[string]bool), expandedCalls: make(map[string]bool), expandedThoughts: make(map[string]bool)}
 	m.applySnapshot(state)
 	return m
 }
@@ -552,7 +572,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.ResetTranscript {
 			m.viewport.GotoBottom()
 			m.cache = make(map[string]cachedMessage)
-			m.markdownPreview = make(map[string]string)
+			m.lastMessageHits = nil
 		}
 		if msg.Tail != nil {
 			m.replaceTail(*msg.Tail)
@@ -1230,10 +1250,10 @@ func (m *Model) resetSessionUI() {
 	m.completionHidden = true
 	m.selector = nil
 	m.editor.Focus()
-	m.hideThinking, m.showAllTools = false, false
+	m.showThinking, m.showAllTools = false, false
 	m.clearSelection()
 	m.cache = make(map[string]cachedMessage)
-	m.markdownPreview = make(map[string]string)
+	m.lastMessageHits = nil
 	m.steeringRevision = 0
 	m.state.Steering = nil
 	m.state.SteeringInputs = nil
@@ -1256,18 +1276,29 @@ func (m *Model) refreshTranscript() {
 	}
 	follow := m.viewport.AtBottom()
 	var blocks []string
+	// 1.逐消息渲染，并把消息内相对行号的命中区间换算成屏幕行
+	var screenHits []toolHit
+	blockOffset := 0
 	for _, message := range m.state.Messages {
 		cached := m.cache[message.ID]
 		animate := false
 		if m.busy && message.ToolGroup != nil {
-			_, _, animate = groupState(message.ToolGroup)
+			animate = groupRunning(message.ToolGroup.Calls)
 		}
-		if animate || cached.revision != message.Revision || cached.width != m.width || cached.hidden != m.hideThinking || cached.allTools != m.showAllTools {
-			cached = cachedMessage{revision: message.Revision, width: m.width, hidden: m.hideThinking, allTools: m.showAllTools, view: m.renderMessage(message)}
+		if animate || cached.revision != message.Revision || cached.width != m.width || cached.showThinking != m.showThinking || cached.allTools != m.showAllTools || cached.expanded != m.expandSignature() {
+			m.lastMessageHits = nil
+			view := m.renderMessage(message)
+			cached = cachedMessage{revision: message.Revision, width: m.width, showThinking: m.showThinking, allTools: m.showAllTools, expanded: m.expandSignature(), view: view, hits: m.lastMessageHits}
 			m.cache[message.ID] = cached
 		}
+		for _, hit := range cached.hits {
+			screenHits = append(screenHits, toolHit{Kind: hit.Kind, Key: hit.Key, Start: hit.Start + blockOffset, End: hit.End + blockOffset})
+		}
 		blocks = append(blocks, cached.view)
+		// 消息之间用一个空行分隔，下一块的起点因此比本块末行多一行
+		blockOffset += len(strings.Split(cached.view, "\n")) + 1
 	}
+	m.lastToolHits = screenHits
 	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
 	if follow {
 		m.viewport.GotoBottom()

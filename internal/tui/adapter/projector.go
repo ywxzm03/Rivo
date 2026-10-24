@@ -22,6 +22,8 @@ func encodeToolArguments(arguments map[string]any) string {
 	return string(data)
 }
 
+// formatToolResult 只拼工具输出的文本内容；结构化详情单独走 encodeToolDetails，
+// 否则 diff 之类的数据会以 JSON 形式混进结果正文
 func formatToolResult(result llm.ToolResult) string {
 	var parts []string
 	for _, content := range result.Content {
@@ -32,15 +34,19 @@ func formatToolResult(result llm.ToolResult) string {
 			parts = append(parts, fmt.Sprintf("[image %s, %d bytes]", content.MIMEType, len(content.Data)))
 		}
 	}
-	if result.Details != nil {
-		data, err := json.MarshalIndent(result.Details, "", "  ")
-		if err != nil {
-			parts = append(parts, fmt.Sprintf("%v", result.Details))
-		} else {
-			parts = append(parts, string(data))
-		}
-	}
 	return strings.Join(parts, "\n")
+}
+
+// encodeToolDetails 把工具的结构化详情编码成 JSON，供渲染层取 diff 等字段
+func encodeToolDetails(details any) string {
+	if details == nil {
+		return ""
+	}
+	data, err := json.Marshal(details)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func assistantContent(message llm.AssistantMessage) (string, []tui.ThinkingBlockView, []llm.ToolCall) {
@@ -60,8 +66,25 @@ func assistantContent(message llm.AssistantMessage) (string, []tui.ThinkingBlock
 	return text, blocks, calls
 }
 
-func toolCallView(call llm.ToolCall) tui.ToolCallView {
-	return tui.ToolCallView{ID: call.ID, Name: call.Name, Arguments: encodeToolArguments(call.Arguments), Status: tui.ToolPending}
+func toolCallView(call llm.ToolCall, round int) tui.ToolCallView {
+	return tui.ToolCallView{ID: call.ID, Name: call.Name, Round: round, Arguments: encodeToolArguments(call.Arguments), Status: tui.ToolPending}
+}
+
+// updateToolCallView 让已存在的调用跟随流式快照更新：名字、参数和“参数已写完”都随
+// partial assistant 消息前进，渲染层才不会在整个参数流期间显示空标签
+func updateToolCallView(view *tui.ToolCallView, call llm.ToolCall, round int, complete bool) {
+	if call.Name != "" {
+		view.Name = call.Name
+	}
+	if call.Arguments != nil {
+		view.Arguments = encodeToolArguments(call.Arguments)
+	}
+	if round > 0 {
+		view.Round = round
+	}
+	if complete {
+		view.ArgsComplete = true
+	}
 }
 
 func (r *Runtime) groupAnchorLocked() (int, *tui.ToolGroupView) {
@@ -121,9 +144,29 @@ func findToolCall(group *tui.ToolGroupView, id string) int {
 	return -1
 }
 
-func (r *Runtime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.ThinkingBlockView, active bool) {
-	group.Thinking = mergeThinking(group.Thinking, blocks, liveThinking)
+// updateThinkingLocked 把本轮思考写进组里：同一轮覆盖，不同轮追加，
+// 这样每轮的 thinking 都能留在它自己的调用前面
+func (r *Runtime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.ThinkingBlockView, round int, active bool) {
+	for _, block := range blocks {
+		block.Round = round
+		block.Active = active
+		replaced := false
+		for i := range group.Thinking {
+			if group.Thinking[i].Round == round && group.Thinking[i].Index == block.Index {
+				group.Thinking[i] = block
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			group.Thinking = append(group.Thinking, block)
+		}
+	}
+	// 本轮缺席的旧块视为已结束，避免上一轮的思考一直转圈
 	for i := range group.Thinking {
+		if group.Thinking[i].Round != round {
+			continue
+		}
 		group.Thinking[i].Active = active
 	}
 }
@@ -160,8 +203,9 @@ func (r *Runtime) toolStartLocked(event llm.ToolExecutionStartEvent) tui.Message
 		group.Calls[index].Arguments = encodeToolArguments(event.Arguments)
 		group.Calls[index].StartedAt = started
 		group.Calls[index].Status = tui.ToolPending
+		group.Calls[index].ArgsComplete = true
 	} else {
-		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Arguments: encodeToolArguments(event.Arguments), Status: tui.ToolPending, StartedAt: started})
+		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Round: r.assistantTurn, Arguments: encodeToolArguments(event.Arguments), Status: tui.ToolPending, ArgsComplete: true, StartedAt: started})
 	}
 	r.setToolGroupLocked(group)
 	return r.messages[r.groupAnchorIndexLocked()]
@@ -171,7 +215,7 @@ func (r *Runtime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Messa
 	group := r.ensureToolGroupLocked(r.currentAssistantID)
 	index := findToolCall(group, event.ToolCallID)
 	if index < 0 {
-		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Arguments: encodeToolArguments(event.Arguments), Status: tui.ToolPending})
+		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Round: r.assistantTurn, Arguments: encodeToolArguments(event.Arguments), Status: tui.ToolPending, ArgsComplete: true})
 		index = len(group.Calls) - 1
 	}
 	if event.ToolName != "" {
@@ -181,6 +225,7 @@ func (r *Runtime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Messa
 		group.Calls[index].Arguments = encodeToolArguments(event.Arguments)
 	}
 	group.Calls[index].Result = formatToolResult(event.PartialResult)
+	group.Calls[index].Details = encodeToolDetails(event.PartialResult.Details)
 	r.setToolGroupLocked(group)
 	return r.messages[r.groupAnchorIndexLocked()]
 }
@@ -189,11 +234,13 @@ func (r *Runtime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message {
 	group := r.ensureToolGroupLocked(r.currentAssistantID)
 	index := findToolCall(group, event.ToolCallID)
 	if index < 0 {
-		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Status: tui.ToolPending})
+		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Round: r.assistantTurn, Status: tui.ToolPending, ArgsComplete: true})
 		index = len(group.Calls) - 1
 	}
 	group.Calls[index].Name = event.ToolName
+	group.Calls[index].ArgsComplete = true
 	group.Calls[index].Result = formatToolResult(event.Result)
+	group.Calls[index].Details = encodeToolDetails(event.Result.Details)
 	group.Calls[index].Status = tui.ToolSuccess
 	if event.IsError || event.Result.IsError {
 		group.Calls[index].Status = tui.ToolError
@@ -216,12 +263,17 @@ func (r *Runtime) groupAnchorIndexLocked() int {
 	return len(r.messages) - 1
 }
 
-func (r *Runtime) addAssistantCallsLocked(group *tui.ToolGroupView, calls []llm.ToolCall) {
+// addAssistantCallsLocked 按 id upsert 调用：流式快照里名字与参数会持续变化，
+// 已存在的调用必须跟着更新，否则会一直显示宣告时的空名字
+func (r *Runtime) addAssistantCallsLocked(group *tui.ToolGroupView, calls []llm.ToolCall, round int, complete bool) {
 	for _, call := range calls {
-		if findToolCall(group, call.ID) >= 0 {
+		if index := findToolCall(group, call.ID); index >= 0 {
+			updateToolCallView(&group.Calls[index], call, round, complete)
 			continue
 		}
-		group.Calls = append(group.Calls, toolCallView(call))
+		view := toolCallView(call, round)
+		view.ArgsComplete = complete
+		group.Calls = append(group.Calls, view)
 	}
 }
 
@@ -231,11 +283,14 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
 		group = cloneToolGroup(current)
 	}
+	round := r.assistantTurn
+	// 参数是否写完：toolcall_end 或后续执行事件都会把它标成 true
+	complete := stream == nil || stream.Type() == llm.EventToolCallEnd
 	if len(calls) > 0 {
 		if group == nil {
 			group = r.ensureToolGroupLocked(id)
 		}
-		r.addAssistantCallsLocked(group, calls)
+		r.addAssistantCallsLocked(group, calls, round, complete)
 		r.setToolGroupLocked(group)
 	}
 	if len(blocks) > 0 && group == nil {
@@ -247,7 +302,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 		group = r.ensureToolGroupLocked(id)
 	}
 	if stream == nil && len(blocks) > 0 {
-		r.updateThinkingLocked(group, blocks, false)
+		r.updateThinkingLocked(group, blocks, round, false)
 		r.setToolGroupLocked(group)
 	}
 	if stream != nil {
@@ -257,7 +312,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 				group = r.ensureToolGroupLocked(id)
 			}
 			active := stream.Type() != llm.EventThinkingEnd
-			r.updateThinkingLocked(group, blocks, active)
+			r.updateThinkingLocked(group, blocks, round, active)
 			r.setToolGroupLocked(group)
 		case llm.AssistantMessageTextStartEvent, llm.AssistantMessageTextDeltaEvent, llm.AssistantMessageTextEndEvent:
 			if strings.TrimSpace(text) != "" && group != nil {
@@ -343,6 +398,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 		}
 		group, groupIndex = nil, -1
 	}
+	round := 0
 	for _, entry := range view.Entries {
 		// 压缩快照与摘要只供模型使用
 		if entry.Kind == compaction.ContextCompaction {
@@ -364,6 +420,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 				}
 				aborted := current.StopReason == llm.StopReasonAborted
 				text, thinking, calls := assistantContent(current)
+				round++
 				if len(calls) == 0 {
 					seal()
 					if text != "" || len(thinking) > 0 || aborted {
@@ -385,11 +442,18 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 						projected[groupIndex].Aborted = true
 					}
 				}
-				group.Thinking = mergeThinking(group.Thinking, thinking, replayThinking)
+				for _, block := range thinking {
+					block.Round = round
+					group.Thinking = append(group.Thinking, block)
+				}
 				for _, call := range calls {
-					if findToolCall(group, call.ID) < 0 {
-						group.Calls = append(group.Calls, toolCallView(call))
+					if index := findToolCall(group, call.ID); index >= 0 {
+						updateToolCallView(&group.Calls[index], call, round, true)
+						continue
 					}
+					view := toolCallView(call, round)
+					view.ArgsComplete = true
+					group.Calls = append(group.Calls, view)
 				}
 				projected[groupIndex].ToolGroup = cloneToolGroup(group)
 			case llm.ToolResultMessage:
@@ -400,11 +464,12 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 				}
 				toolIndex := findToolCall(group, current.ToolCallID)
 				if toolIndex < 0 {
-					group.Calls = append(group.Calls, tui.ToolCallView{ID: current.ToolCallID, Name: current.ToolName, Status: tui.ToolPending})
+					group.Calls = append(group.Calls, tui.ToolCallView{ID: current.ToolCallID, Name: current.ToolName, Round: round, Status: tui.ToolPending, ArgsComplete: true})
 					toolIndex = len(group.Calls) - 1
 				}
 				group.Calls[toolIndex].Name = current.ToolName
 				group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, Details: current.Details, IsError: current.IsError})
+				group.Calls[toolIndex].Details = encodeToolDetails(current.Details)
 				group.Calls[toolIndex].Status = tui.ToolSuccess
 				if current.IsError {
 					group.Calls[toolIndex].Status = tui.ToolError
@@ -415,18 +480,4 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 	}
 	seal()
 	return projected
-}
-
-type thinkingPolicy bool
-
-const (
-	liveThinking   thinkingPolicy = false
-	replayThinking thinkingPolicy = true
-)
-
-func mergeThinking(previous, next []tui.ThinkingBlockView, policy thinkingPolicy) []tui.ThinkingBlockView {
-	if policy == replayThinking {
-		return append(previous, next...)
-	}
-	return append([]tui.ThinkingBlockView(nil), next...)
 }
