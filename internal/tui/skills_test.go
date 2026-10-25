@@ -46,7 +46,7 @@ func TestSkillCompletionScrollsToEveryCandidate(t *testing.T) {
 	for i := 0; i < 11; i++ {
 		press(m, tea.KeyDown)
 	}
-	if m.completion != 11 || len(strings.Split(m.completionView(), "\n")) != 5 || !strings.Contains(ansi.Strip(m.completionView()), "→ skill:docs-11") {
+	if m.completion != 11 || len(strings.Split(m.completionView(), "\n")) != 5 || !strings.Contains(ansi.Strip(m.completionView()), "❯ skill:docs-11") {
 		t.Fatal("completion window did not follow the last skill")
 	}
 	assertFrame(t, m)

@@ -2,8 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -15,6 +13,9 @@ import (
 )
 
 const jumpToBottomLabel = " Jump to bottom ↓ "
+
+// branchIcon 是 git 分支图标（Nerd Font octicon git-branch），放在分支名左侧
+const branchIcon = "\uf418"
 
 type jumpPillBounds struct {
 	left, right, y int
@@ -58,7 +59,8 @@ func (m *Model) layout() {
 		m.selector.input.Width = max(1, m.width-3)
 		dock = m.selector.height(max(1, m.height-2))
 	} else {
-		dock += m.completionRows(len(m.completionItems()))
+		// 视口与输入框上边框之间保留一行空白，避免长消息贴边
+		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
 	m.viewport.Height = max(0, m.height-1-dock)
@@ -178,26 +180,33 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
 		lines = append(lines, m.pendingLines()...)
+		// 消息区与输入框之间留一行空白，长消息不会贴上边框
+		lines = append(lines, "")
+		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
+		if completions := m.completionView(); completions != "" {
+			lines = append(lines, splitFrameLines(completions)...)
+		}
 		label := ""
+		borderColor := inputBorder
 		if m.busy {
+			// 运行中的旋转器与状态文字用主题紫，与选中态一致
 			label = m.spinner.View() + " " + m.status
+			borderColor = accentColor
 		} else if m.status != "" {
 			label = m.status
 		}
-		border := rule(m.width, label, inputBorder, false)
+		border := rule(m.width, label, borderColor, false)
 		if m.copyNotice {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
 			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
-				border = rule(m.width-ansi.StringWidth(notice), label, inputBorder, false) + colored(mutedColor, notice)
+				border = rule(m.width-ansi.StringWidth(notice), label, borderColor, false) + colored(mutedColor, notice)
 			}
 		}
 		lines = append(lines, border)
 		lines = append(lines, splitFrameLines(m.editor.View())...)
-		lines = append(lines, rule(m.width, "", inputBorder, false))
-		if completions := m.completionView(); completions != "" {
-			lines = append(lines, splitFrameLines(completions)...)
-		}
+		// 上下两条边框同色，运行中一起变紫
+		lines = append(lines, rule(m.width, "", borderColor, false))
 	}
 	lines = append(lines, splitFrameLines(m.footer())...)
 	return lines
@@ -323,16 +332,10 @@ func formatElapsed(d time.Duration) string {
 
 // footer 输出单行状态栏：左侧工作目录与分支，右侧模型与思考等级，两端对齐
 func (m *Model) footer() string {
-	cwd := m.state.Cwd
-	if home, err := os.UserHomeDir(); err == nil {
-		if cwd == home {
-			cwd = "~"
-		} else if strings.HasPrefix(cwd, home+string(filepath.Separator)) {
-			cwd = "~" + strings.TrimPrefix(cwd, home)
-		}
-	}
+	cwd := shortenToolPath(m.state.Cwd)
 	if m.state.Branch != "" {
-		cwd += " [" + m.state.Branch + "]"
+		// 分支前用 git 图标，与目录之间用小点分隔
+		cwd += " • " + branchIcon + " " + m.state.Branch
 	}
 	left := colored(dimColor, ansi.Truncate(cwd, m.width, "…"))
 	model := m.currentModel()
@@ -340,21 +343,11 @@ func (m *Model) footer() string {
 	if len(model.Levels) > 1 {
 		level := m.state.Thinking
 		if level == "off" {
-			level = "thinking off"
+			level = "effort off"
 		}
 		right += " • " + level
 	}
 	available := m.width - ansi.StringWidth(ansi.Strip(left))
-	withProvider := "(" + model.Provider + ") " + right
-	if len(m.state.Models) > 1 {
-		providers := make(map[string]bool)
-		for _, model := range m.state.Models {
-			providers[model.Provider] = true
-		}
-		if len(providers) > 1 && ansi.StringWidth(withProvider) <= available {
-			right = withProvider
-		}
-	}
 	right = colored(dimColor, ansi.Truncate(right, max(0, available), "…"))
 	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(ansi.Strip(left))-ansi.StringWidth(ansi.Strip(right))))
 	return left + gap + right

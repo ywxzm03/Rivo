@@ -45,13 +45,13 @@ func TestAbortedMessageRenderingWithToolGroup(t *testing.T) {
 	m := testModel(80, 24)
 	m.state.Messages = []Message{{
 		ID: "a", Role: "assistant", Aborted: true,
-		ToolGroup: &ToolGroupView{ID: "g1", Calls: []ToolCallView{{ID: "c1", Name: "bash", Status: ToolInterrupted}}, Sealed: true},
+		ToolGroup: &ToolGroupView{ID: "g1", Calls: []ToolCallView{{ID: "c1", Name: "bash", Status: ToolInterrupted}}},
 	}}
 	rendered := ansi.Strip(m.renderMessage(m.state.Messages[0]))
 	if !strings.Contains(rendered, "Conversation interrupted") {
 		t.Fatalf("abort hint missing: %q", rendered)
 	}
-	if !strings.Contains(rendered, "bash") {
+	if !strings.Contains(rendered, "Bash") {
 		t.Fatalf("tool group lost on aborted render: %q", rendered)
 	}
 }
@@ -61,10 +61,10 @@ func TestAbortedMessageRenderingTextAndGroup(t *testing.T) {
 	m := testModel(80, 24)
 	m.state.Messages = []Message{{
 		ID: "a", Role: "assistant", Text: "partial answer", Aborted: true,
-		ToolGroup: &ToolGroupView{ID: "g1", Calls: []ToolCallView{{ID: "c1", Name: "bash", Status: ToolInterrupted}}, Sealed: true},
+		ToolGroup: &ToolGroupView{ID: "g1", Calls: []ToolCallView{{ID: "c1", Name: "bash", Status: ToolInterrupted}}},
 	}}
 	rendered := ansi.Strip(m.renderMessage(m.state.Messages[0]))
-	if !strings.Contains(rendered, "partial answer") || !strings.Contains(rendered, "Conversation interrupted") || !strings.Contains(rendered, "bash") {
+	if !strings.Contains(rendered, "partial answer") || !strings.Contains(rendered, "Conversation interrupted") || !strings.Contains(rendered, "Bash") {
 		t.Fatalf("aborted render incomplete: %q", rendered)
 	}
 }

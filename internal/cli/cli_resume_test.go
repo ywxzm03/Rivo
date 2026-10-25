@@ -259,15 +259,15 @@ func TestRunProviderWithoutModelErrors(t *testing.T) {
 	}
 }
 
-func TestRunInvalidThinkingErrors(t *testing.T) {
+func TestRunInvalidEffortErrors(t *testing.T) {
 	useTestEnv(t)
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"--thinking", "ultra"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	code := Run([]string{"--effort", "ultra"}, strings.NewReader("/exit\n"), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("Run() code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "unknown thinking level") {
-		t.Errorf("stderr = %q, want unknown thinking level error", stderr.String())
+	if !strings.Contains(stderr.String(), "unknown effort level") {
+		t.Errorf("stderr = %q, want unknown effort level error", stderr.String())
 	}
 }
 
@@ -402,7 +402,7 @@ func TestRunMissingFlagValueErrors(t *testing.T) {
 	useTestEnv(t)
 	var stdout, stderr bytes.Buffer
 	// --model 的值缺位（下一个 token 是另一个 flag）时报缺值错误，而不是吞掉后面的 flag
-	code := Run([]string{"--model", "--thinking", "high"}, strings.NewReader("/exit\n"), &stdout, &stderr)
+	code := Run([]string{"--model", "--effort", "high"}, strings.NewReader("/exit\n"), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("Run() code = %d, want 2", code)
 	}

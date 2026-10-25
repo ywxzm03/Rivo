@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +69,7 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 			s.items = append(s.items, choice{value: model.Key(), label: label, detail: "Model Name: " + model.Name, current: model.Key() == m.state.ModelKey})
 		}
 	case "thinking":
-		s.title = "Thinking Level"
+		s.title = "Reasoning Effort"
 		for _, level := range m.currentModel().Levels {
 			s.items = append(s.items, choice{value: level, label: level, description: thinkingDescription(level), current: level == m.state.Thinking})
 		}
@@ -158,34 +159,116 @@ func (s *selector) filter() {
 	s.selected = 0
 }
 
+// height 只由候选总数决定，与当前滚动位置无关，避免选中项下移时面板跳动
 func (s *selector) height(budget int) int {
 	budget = max(1, budget)
 	base := s.baseHeight(budget)
-	rows := len(s.filtered)
-	if rows == 0 {
-		rows = 1
+	rows := min(10, max(1, len(s.filtered)))
+	total := base + rows
+	// 列表被截断时固定预留一行溢出提示，滚到底部也占着这一行
+	if len(s.filtered) > rows {
+		total++
 	}
-	return min(budget, base+min(10, rows))
+	return min(budget, total)
+}
+
+// window 返回可视窗口的行数与是否被截断；截断时窗口外始终还有候选
+func (s *selector) window(budget int) (count int, truncated bool) {
+	room := max(0, s.height(budget)-s.baseHeight(budget))
+	count = min(len(s.filtered), min(10, room))
+	truncated = len(s.filtered) > count
+	// 截断时留一行给溢出提示
+	if truncated && count > 0 && count == room {
+		count--
+	}
+	return count, truncated
+}
+
+// numbered 表示是否给每行加序号：tree 保持原有的缩进树形，不参与编号
+func (s *selector) numbered() bool {
+	return s.kind != "tree"
+}
+
+// rowLine 画一行候选：序号、游标位、正文与当前项勾
+// 当前项用绿字加勾；被选中时正文仍为绿色，游标仍是紫色箭头
+// 游标位在首行/末行且还有被折叠的候选时改画 ↑ / ↓，提示还有内容
+func (s *selector) rowLine(index, start, end int, numbered bool, width int) string {
+	item := s.filtered[index]
+	cursor := "  "
+	switch {
+	case index == s.selected:
+		cursor = "❯ "
+	case index == start && start > 0:
+		cursor = "↑ "
+	case index == end-1 && end < len(s.filtered):
+		cursor = "↓ "
+	}
+	prefix := ""
+	if numbered {
+		// 序号左对齐：先把 "N." 整体排好，再按最长编号的位数补右侧空格，
+		// 这样 9. 与 12. 的正文列一致，点号也不会和数字分家
+		// 前面留两格，编号不贴左边界
+		width := len(strconv.Itoa(len(s.filtered)))
+		prefix = "  " + fmt.Sprintf("%-*s  ", width+1, strconv.Itoa(index+1)+".")
+	}
+	color := textColor
+	switch {
+	case item.current:
+		color = greenColor
+	case index == s.selected:
+		color = accentColor
+	}
+	label := item.label
+	// provider 与 default 标记保持 muted，不给整行统一着色
+	if s.kind == "model" {
+		if n := strings.LastIndex(label, " ["); n >= 0 {
+			label = colored(color, label[:n]) + colored(mutedColor, label[n:])
+		}
+	} else {
+		label = colored(color, label)
+	}
+	line := colored(dimColor, prefix) + colored(accentColor, cursor) + label
+	if item.description != "" {
+		line += "  " + colored(mutedColor, item.description)
+	}
+	if item.current {
+		line += colored(greenColor, " ✓")
+	}
+	return line
+}
+
+// overflowLine 在列表底部提示还有多少候选没显示，上方的剩余量由首行的 ↑ 表达
+// 滚到底部时返回空行，保持面板高度不变
+func (s *selector) overflowLine(width, end int) string {
+	if end >= len(s.filtered) {
+		return ""
+	}
+	noun := "items"
+	switch s.kind {
+	case "model":
+		noun = "models"
+	case "resume":
+		noun = "sessions"
+	case "thinking":
+		noun = "levels"
+	}
+	return colored(mutedColor, fmt.Sprintf("  ... +%d %s", len(s.filtered)-end, noun))
 }
 
 func (s *selector) baseHeight(budget int) int {
 	if budget < 20 {
-		return 6
+		// 紧凑模式只剩边框、标题、输入框、提示行与底部边框
+		return 5
 	}
-	if s.kind == "tree" {
-		return 9
-	}
-	return 12
+	// 固定区：上下边框、标题、输入框与四处空行、提示行；位置与详情行都不再占位
+	return 9
 }
 
 func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
 	base := s.baseHeight(budget)
-	count := 0
-	if height > base {
-		count = min(10, min(height-base, len(s.filtered)))
-	}
+	count, truncated := s.window(budget)
 	start, end := 0, 0
 	if count > 0 {
 		start = max(0, min(s.selected-count/2, len(s.filtered)-count))
@@ -203,48 +286,18 @@ func (s *selector) view(width, budget int) string {
 	if !compact {
 		lines = append(lines, "")
 	}
+	numbered := s.numbered()
 	for i := start; i < end; i++ {
-		item := s.filtered[i]
-		cursor, check := "  ", "  "
-		if i == s.selected {
-			cursor = "→ "
-		}
-		if item.current {
-			check = "✓ "
-		}
-		color := textColor
-		if i == s.selected {
-			color = accentColor
-		}
-		label := item.label
-		// provider 与 default 标记保持 muted，不给整行统一着色
-		if s.kind == "model" {
-			if n := strings.LastIndex(label, " ["); n >= 0 {
-				label = colored(color, label[:n]) + colored(mutedColor, label[n:])
-			}
-		} else {
-			label = colored(color, label)
-		}
-		line := colored(accentColor, cursor+check) + label
-		if item.description != "" {
-			line += "  " + colored(mutedColor, item.description)
-		}
-		lines = append(lines, ansi.Truncate(line, width, "…"))
+		lines = append(lines, ansi.Truncate(s.rowLine(i, start, end, numbered, width), width, "…"))
 	}
 	if len(s.filtered) == 0 && height > base {
 		lines = append(lines, colored(mutedColor, "  No matches"))
 	}
-	position := ""
-	if len(s.filtered) > 0 {
-		position = fmt.Sprintf("  (%d/%d)", s.selected+1, len(s.filtered))
+	if truncated {
+		lines = append(lines, s.overflowLine(width, end))
 	}
-	lines = append(lines, colored(mutedColor, position))
-	if !compact && s.kind != "tree" {
-		detail := ""
-		if len(s.filtered) > 0 {
-			detail = s.filtered[s.selected].detail
-		}
-		lines = append(lines, "", colored(mutedColor, ansi.Truncate("  "+detail, width, "…")), "")
+	if !compact {
+		lines = append(lines, "")
 	}
 	lines = append(lines, colored(dimColor, ansi.Truncate("  Enter to select · Escape/Ctrl+C to cancel", width, "…")), rule(width, "", borderColor, false))
 	if len(lines) > height {

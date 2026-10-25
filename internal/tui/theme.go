@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Claude Code dark 主题的语义色 token；固定 RGB 并沿用终端颜色降级
+// Claude Code dark 主题的语义色，供各渲染层取用
 const (
 	textColor           = "#ffffff" // text / userMessageText
 	inputBorder         = "#888888" // editor border and prompt
@@ -26,8 +26,19 @@ const (
 	syntaxLiteralColor  = "#be84ff" // syntaxLiteral / syntaxNumber
 	syntaxCommentColor  = "#75715e" // syntaxComment / syntaxMeta
 	selectionBackground = "#264f78" // text selection
+	// backgroundFill 是终端底色，呼吸状态点由它混向正文色
+	backgroundFill = "#1e1e1e"
 )
 
 func colored(color, value string) string {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(value)
+}
+
+func boldText(value string) string {
+	return lipgloss.NewStyle().Bold(true).Render(value)
+}
+
+// boldItalicText 是思考行的样式：白色粗斜体
+func boldItalicText(value string) string {
+	return lipgloss.NewStyle().Bold(true).Italic(true).Foreground(lipgloss.Color(textColor)).Render(value)
 }

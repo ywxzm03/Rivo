@@ -95,6 +95,7 @@ func (m *Model) updateCursorPosition() {
 	}
 	info := m.editor.LineInfo()
 	visibleRow := min(max(0, info.RowOffset), max(0, m.editor.Height()-1))
-	m.cursorRow.Store(int64(m.viewport.Height + 2 + visibleRow))
+	// 视口与输入框之间多一行空白，编辑器整体下移一行；候选列表在编辑器上方，再下移其行数
+	m.cursorRow.Store(int64(m.viewport.Height + 3 + m.completionRows(len(m.completionItems())) + visibleRow))
 	m.cursorColumn.Store(int64(3 + info.CharOffset))
 }

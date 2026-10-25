@@ -66,17 +66,20 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 	}
 }
 
-func TestAnimatedToolFramesReuseStaticMarkdownPreview(t *testing.T) {
+// 工具行的点击命中按消息缓存：同一帧内重复渲染不改变命中数量
+func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	m.showAllTools = true
-	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "**result**", Status: ToolPending, StartedAt: time.Now()}}}
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
-	m.renderMessage(m.state.Messages[0])
-	first := len(m.markdownPreview)
-	m.renderMessage(m.state.Messages[0])
-	if len(m.markdownPreview) != first || first == 0 {
-		t.Fatalf("static tool markdown was reparsed: before=%d after=%d", first, len(m.markdownPreview))
+	m.refreshTranscript()
+	first := len(m.lastToolHits)
+	if first != 1 {
+		t.Fatalf("hits = %d, want 1", first)
+	}
+	m.refreshTranscript()
+	if len(m.lastToolHits) != first || m.lastToolHits[0] != m.cache["tools"].hits[0] {
+		t.Fatalf("hits changed between renders: %+v", m.lastToolHits)
 	}
 }
 
@@ -118,6 +121,9 @@ func assertFrame(t *testing.T, m *Model) {
 		if dock != m.selector.height(m.height-2) {
 			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), dock)
 		}
+	} else {
+		// 输入态在视口与输入框之间固定留一行空白
+		dock++
 	}
 	if got := m.viewport.Height + dock + 1; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
@@ -140,7 +146,7 @@ func TestLayout(t *testing.T) {
 	for _, size := range [][2]int{{120, 30}, {80, 24}, {60, 15}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			m := testModel(size[0], size[1])
-			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Thinking: "Let me think", Text: "```go\n" + strings.Repeat("long_code", 40), Elapsed: 12 * time.Second}}
+			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Text: "```go\n" + strings.Repeat("long_code", 40)}}
 			m.refreshTranscript()
 			assertFrame(t, m)
 			for i, line := range strings.Split(m.renderMessage(m.state.Messages[0]), "\n") {
@@ -406,7 +412,7 @@ func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
 }
 
 func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
-	if !shouldRestoreSteeringOnPlainUp(runtime.GOOS) {
+	if !isDarwin(runtime.GOOS) {
 		t.Skip("plain Up fallback is macOS-specific")
 	}
 	m := testModel(80, 24)
@@ -431,8 +437,8 @@ func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
 		{goos: "linux", want: false},
 		{goos: "windows", want: false},
 	} {
-		if got := shouldRestoreSteeringOnPlainUp(test.goos); got != test.want {
-			t.Fatalf("shouldRestoreSteeringOnPlainUp(%q) = %v, want %v", test.goos, got, test.want)
+		if got := isDarwin(test.goos); got != test.want {
+			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
 		}
 	}
 }
@@ -543,7 +549,7 @@ func TestFollowUpDequeueKeyVariants(t *testing.T) {
 }
 
 func TestPlainDownWithVisibleFollowUpFallsBackToDequeue(t *testing.T) {
-	if !shouldRestoreFollowUpOnPlainDown(runtime.GOOS) {
+	if !isDarwin(runtime.GOOS) {
 		t.Skip("plain Down fallback is macOS-specific")
 	}
 	m := testModel(80, 24)
@@ -567,8 +573,8 @@ func TestPlainDownFollowUpFallbackIsMacOSOnly(t *testing.T) {
 		{goos: "linux", want: false},
 		{goos: "windows", want: false},
 	} {
-		if got := shouldRestoreFollowUpOnPlainDown(test.goos); got != test.want {
-			t.Fatalf("shouldRestoreFollowUpOnPlainDown(%q) = %v, want %v", test.goos, got, test.want)
+		if got := isDarwin(test.goos); got != test.want {
+			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
 		}
 	}
 }
@@ -724,7 +730,7 @@ func TestCompletionAndSelectors(t *testing.T) {
 	if m.selector != nil || !m.editor.Focused() || m.closing {
 		t.Fatal("Ctrl+C should cancel selector")
 	}
-	typeText(m, "/thin")
+	typeText(m, "/eff")
 	press(m, tea.KeyEnter)
 	if m.selector == nil || m.selector.kind != "thinking" {
 		t.Fatal("Enter must complete and execute")
@@ -982,8 +988,8 @@ func TestFooterSingleLine(t *testing.T) {
 	if ansi.StringWidth(footer) != 120 {
 		t.Fatalf("footer width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(footer), footer)
 	}
-	if !strings.HasPrefix(footer, "/project/Rivo [feat(tui)/fullscreen-tui]") {
-		t.Fatalf("footer should start with cwd [branch]: %q", footer)
+	if !strings.HasPrefix(footer, "/project/Rivo • \uf418 feat(tui)/fullscreen-tui") {
+		t.Fatalf("footer should start with cwd • icon branch: %q", footer)
 	}
 	if !strings.HasSuffix(footer, "model-00 • high") {
 		t.Fatalf("footer should end with model and thinking: %q", footer)
@@ -994,8 +1000,8 @@ func TestFooterWithoutBranch(t *testing.T) {
 	m := testModel(120, 30)
 	m.state.Branch = ""
 	footer := ansi.Strip(m.footer())
-	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "[") {
-		t.Fatalf("empty branch should drop brackets: %q", footer)
+	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "\uf418") || strings.Contains(footer, "Rivo •") {
+		t.Fatalf("empty branch should drop the separator and icon: %q", footer)
 	}
 }
 
@@ -1007,8 +1013,8 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatal("snapshot aliases nested slices")
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(m.footer()), "(provider-0)") {
-		t.Fatal("wide footer should include provider")
+	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
+		t.Fatalf("footer should never show the provider: %q", ansi.Strip(m.footer()))
 	}
 	s = testState()
 	s.ModelKey, s.Thinking = s.Models[3].Key(), "low"
@@ -1017,8 +1023,8 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatalf("snapshot footer = %q", ansi.Strip(m.footer()))
 	}
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
-	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
-		t.Fatal("narrow footer should omit provider")
+	if strings.Contains(ansi.Strip(m.footer()), "provider-") {
+		t.Fatal("narrow footer should still omit provider")
 	}
 }
 
@@ -1096,7 +1102,8 @@ func TestTerminalMouseAndClipboardInput(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	m.editor.SetValue("hello")
 	m.layout()
-	y := m.viewport.Height + 1
+	// 视口与输入框之间有一行空白，编辑器首行下移一行
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	cmd := func() tea.Msg {
 		_, command := m.Update(tea.MouseMsg{X: 6, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
@@ -1132,7 +1139,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	now := time.Unix(1000, 0)
 	m.clock = func() time.Time { return now }
-	y := m.viewport.Height + 1
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	now = now.Add(100 * time.Millisecond)
 	_, cmd := m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
@@ -1143,7 +1150,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	if copied != "hello" || m.editor.Value() != "hello world" {
 		t.Fatalf("double click copied %q or changed input to %q", copied, m.editor.Value())
 	}
-	border := ansi.Strip(m.frameLines()[m.viewport.Height])
+	border := ansi.Strip(m.frameLines()[m.viewport.Height+1])
 	if !strings.HasSuffix(border, " copied! ──") || !strings.Contains(border, "Working") {
 		t.Fatalf("copy confirmation must be on the right beside working status: %q", border)
 	}

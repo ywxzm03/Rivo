@@ -28,10 +28,10 @@ func TestRenameCommandRequiresNameAndKeepsSpaces(t *testing.T) {
 func TestNewSessionResetsUIOnlyAfterSuccess(t *testing.T) {
 	m := testModel(120, 30)
 	m.history, m.historyPos, m.draft = []string{"old input"}, 1, "old draft"
-	m.hideThinking, m.showAllTools = true, true
+	m.showThinking, m.showAllTools = true, true
 	m.state.Messages = []Message{{ID: "old", Role: "user", Text: "old conversation"}}
 	m.Update(OperationDoneMsg{Notice: "New session started", Snapshot: &Snapshot{Thinking: "high"}, ResetSessionUI: true})
-	if len(m.history) != 0 || m.draft != "" || m.editor.Value() != "" || m.hideThinking || m.showAllTools || m.state.Thinking != "high" {
+	if len(m.history) != 0 || m.draft != "" || m.editor.Value() != "" || m.showThinking || m.showAllTools || m.state.Thinking != "high" {
 		t.Fatal("new session did not restore initial UI state")
 	}
 	if len(m.state.Messages) != 1 || m.state.Messages[0].Text != "New session started" {

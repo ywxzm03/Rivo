@@ -33,7 +33,7 @@ Options:
       --print, -p         Non-interactive mode: process prompt and exit
       --provider <name>   Provider for --model (requires --model)
       --model <pattern>   Model id, provider/model, or substring, with optional :level suffix
-      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max
+      --effort <level>    Reasoning effort: off, minimal, low, medium, high, xhigh, max
 
 With a terminal, a positional prompt is submitted automatically in the TUI.
 Without a terminal, a positional prompt runs once and exits.
@@ -295,7 +295,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		switch args[i] {
-		case "--cost", "--provider", "--model", "--thinking":
+		case "--cost", "--provider", "--model", "--effort":
 			i++
 		}
 	}
@@ -308,7 +308,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		costPath       string
 		providerArg    string
 		modelArg       string
-		thinkingArg    string
+		effortArg      string
 		positional     []string
 	)
 	for i := 0; i < len(args); i++ {
@@ -340,7 +340,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 		case "--print", "-p":
 			printRequested = true
-		case "--provider", "--model", "--thinking":
+		case "--provider", "--model", "--effort":
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
 				return 2
@@ -351,8 +351,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				providerArg = args[i]
 			case "--model":
 				modelArg = args[i]
-			case "--thinking":
-				thinkingArg = args[i]
+			case "--effort":
+				effortArg = args[i]
 			}
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -364,7 +364,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if costPath != "" {
-		if continueRecent || printRequested || sessionArg != "" || sessionID != "" || providerArg != "" || modelArg != "" || thinkingArg != "" || len(positional) > 0 {
+		if continueRecent || printRequested || sessionArg != "" || sessionID != "" || providerArg != "" || modelArg != "" || effortArg != "" || len(positional) > 0 {
 			fmt.Fprintln(stderr, "Rivo: --cost cannot be combined with runtime options or a prompt")
 			return 2
 		}
@@ -396,7 +396,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 	}
-	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, thinkingArg); err != nil {
+	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, effortArg); err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}

@@ -380,7 +380,7 @@ func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
 
 func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
 	if !validThinkingLevel(level) {
-		return fmt.Errorf("unknown thinking level %q", level)
+		return fmt.Errorf("unknown effort level %q", level)
 	}
 	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
 		return err
