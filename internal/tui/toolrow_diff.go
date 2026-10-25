@@ -33,11 +33,18 @@ var (
 )
 
 // parseRowDiff 解析统一 patch，缺失时退回带行号的展示 diff
+// tab 在这里统一展开：显示宽度与词级高亮的字符下标都基于展开后的文本
 func parseRowDiff(patch, display string) []rowDiffLine {
-	if lines := parseUnifiedDiff(patch); len(lines) > 0 {
-		return lines
+	var lines []rowDiffLine
+	if parsed := parseUnifiedDiff(patch); len(parsed) > 0 {
+		lines = parsed
+	} else {
+		lines = parseDisplayDiff(display)
 	}
-	return parseDisplayDiff(display)
+	for index := range lines {
+		lines[index].Content = expandTabs(lines[index].Content)
+	}
+	return lines
 }
 
 func parseUnifiedDiff(patch string) []rowDiffLine {
@@ -217,6 +224,26 @@ func highlightRowLines(contents []string, path string) [][]styledCell {
 		}
 	}
 	return lines
+}
+
+// expandTabs 把制表符按制表位展开成空格，与粘贴内容的制表宽度保持一致
+func expandTabs(text string) string {
+	if !strings.ContainsRune(text, '\t') {
+		return text
+	}
+	var builder strings.Builder
+	column := 0
+	for _, r := range text {
+		if r != '\t' {
+			builder.WriteRune(r)
+			column++
+			continue
+		}
+		width := pasteTabWidth - column%pasteTabWidth
+		builder.WriteString(strings.Repeat(" ", width))
+		column += width
+	}
+	return builder.String()
 }
 
 // 词级高亮：一对被替换的行共享大部分字符时，只把不同的词染得更亮
@@ -668,6 +695,12 @@ func renderRowCode(contents []string, path string, startLine int, indent string,
 	if len(contents) == 0 {
 		return nil
 	}
+	// tab 的显示宽度是 0 但终端会展开，先换成空格，避免整行被终端折行
+	expanded := make([]string, len(contents))
+	for index, content := range contents {
+		expanded[index] = expandTabs(content)
+	}
+	contents = expanded
 	numberWidth := len(strconv.Itoa(startLine + len(contents) - 1))
 	highlighted := highlightRowLines(contents, path)
 	output := make([]string, 0, len(contents)+1)
