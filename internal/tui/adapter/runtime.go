@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -671,6 +670,12 @@ func (r *Runtime) snapshot() tui.Snapshot {
 	return snapshot
 }
 
+// thinkingLevelOrder 是档位从低到高的固定顺序，选择器与快捷键都按它展示
+var thinkingLevelOrder = []llm.ThinkingLevel{
+	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
+}
+
 func thinkingLevels(model llm.Model) []string {
 	if !model.Reasoning {
 		return []string{"off"}
@@ -679,10 +684,11 @@ func thinkingLevels(model llm.Model) []string {
 		return []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 	}
 	levels := make([]string, 0, len(model.ThinkingLevelMap))
-	for level := range model.ThinkingLevelMap {
-		levels = append(levels, string(level))
+	for _, level := range thinkingLevelOrder {
+		if _, ok := model.ThinkingLevelMap[level]; ok {
+			levels = append(levels, string(level))
+		}
 	}
-	sort.Strings(levels)
 	return levels
 }
 
