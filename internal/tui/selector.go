@@ -159,20 +159,29 @@ func (s *selector) filter() {
 	s.selected = 0
 }
 
+// height 只由候选总数决定，与当前滚动位置无关，避免选中项下移时面板跳动
 func (s *selector) height(budget int) int {
 	budget = max(1, budget)
 	base := s.baseHeight(budget)
-	rows := len(s.filtered)
-	if rows == 0 {
-		rows = 1
-	}
-	rows = min(10, rows)
+	rows := min(10, max(1, len(s.filtered)))
 	total := base + rows
-	// 还有候选没显示时，底部要额外占一行 "... +N more"
-	if rows < len(s.filtered) {
+	// 列表被截断时固定预留一行溢出提示，滚到底部也占着这一行
+	if len(s.filtered) > rows {
 		total++
 	}
 	return min(budget, total)
+}
+
+// window 返回可视窗口的行数与是否被截断；截断时窗口外始终还有候选
+func (s *selector) window(budget int) (count int, truncated bool) {
+	room := max(0, s.height(budget)-s.baseHeight(budget))
+	count = min(len(s.filtered), min(10, room))
+	truncated = len(s.filtered) > count
+	// 截断时留一行给溢出提示
+	if truncated && count > 0 && count == room {
+		count--
+	}
+	return count, truncated
 }
 
 // numbered 表示是否给每行加序号：tree 保持原有的缩进树形，不参与编号
@@ -198,8 +207,9 @@ func (s *selector) rowLine(index, start, end int, numbered bool, width int) stri
 	if numbered {
 		// 序号左对齐：先把 "N." 整体排好，再按最长编号的位数补右侧空格，
 		// 这样 9. 与 12. 的正文列一致，点号也不会和数字分家
+		// 前面留两格，编号不贴左边界
 		width := len(strconv.Itoa(len(s.filtered)))
-		prefix = fmt.Sprintf("%-*s  ", width+1, strconv.Itoa(index+1)+".")
+		prefix = "  " + fmt.Sprintf("%-*s  ", width+1, strconv.Itoa(index+1)+".")
 	}
 	color := textColor
 	switch {
@@ -227,10 +237,11 @@ func (s *selector) rowLine(index, start, end int, numbered bool, width int) stri
 	return line
 }
 
-// overflowLines 在列表底部提示还有多少候选没显示，上方的剩余量由首行的 ↑ 表达
-func (s *selector) overflowLines(width, end int) []string {
+// overflowLine 在列表底部提示还有多少候选没显示，上方的剩余量由首行的 ↑ 表达
+// 滚到底部时返回空行，保持面板高度不变
+func (s *selector) overflowLine(width, end int) string {
 	if end >= len(s.filtered) {
-		return nil
+		return ""
 	}
 	noun := "items"
 	switch s.kind {
@@ -241,7 +252,7 @@ func (s *selector) overflowLines(width, end int) []string {
 	case "thinking":
 		noun = "levels"
 	}
-	return []string{colored(mutedColor, fmt.Sprintf("  ... +%d %s", len(s.filtered)-end, noun))}
+	return colored(mutedColor, fmt.Sprintf("  ... +%d %s", len(s.filtered)-end, noun))
 }
 
 func (s *selector) baseHeight(budget int) int {
@@ -257,12 +268,7 @@ func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
 	base := s.baseHeight(budget)
-	room := max(0, height-base)
-	count := min(len(s.filtered), min(10, room))
-	// 窗口装不下全部候选时，留一行给底部的 "... +N more"
-	if count < len(s.filtered) && count > 0 && count == room {
-		count--
-	}
+	count, truncated := s.window(budget)
 	start, end := 0, 0
 	if count > 0 {
 		start = max(0, min(s.selected-count/2, len(s.filtered)-count))
@@ -287,7 +293,9 @@ func (s *selector) view(width, budget int) string {
 	if len(s.filtered) == 0 && height > base {
 		lines = append(lines, colored(mutedColor, "  No matches"))
 	}
-	lines = append(lines, s.overflowLines(width, end)...)
+	if truncated {
+		lines = append(lines, s.overflowLine(width, end))
+	}
 	if !compact {
 		lines = append(lines, "")
 	}
