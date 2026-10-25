@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,7 +196,10 @@ func (s *selector) rowLine(index, start, end int, numbered bool, width int) stri
 	}
 	prefix := ""
 	if numbered {
-		prefix = fmt.Sprintf("%2d. ", index+1)
+		// 序号左对齐：先把 "N." 整体排好，再按最长编号的位数补右侧空格，
+		// 这样 9. 与 12. 的正文列一致，点号也不会和数字分家
+		width := len(strconv.Itoa(len(s.filtered)))
+		prefix = fmt.Sprintf("%-*s  ", width+1, strconv.Itoa(index+1)+".")
 	}
 	color := textColor
 	switch {
