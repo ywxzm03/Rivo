@@ -202,12 +202,13 @@ func (m *Model) frameLines() []string {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
 			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
-				border = rule(m.width-ansi.StringWidth(notice), label, inputBorder, false) + colored(mutedColor, notice)
+				border = rule(m.width-ansi.StringWidth(notice), label, borderColor, false) + colored(mutedColor, notice)
 			}
 		}
 		lines = append(lines, border)
 		lines = append(lines, splitFrameLines(m.editor.View())...)
-		lines = append(lines, rule(m.width, "", inputBorder, false))
+		// 上下两条边框同色，运行中一起变紫
+		lines = append(lines, rule(m.width, "", borderColor, false))
 	}
 	lines = append(lines, splitFrameLines(m.footer())...)
 	return lines
