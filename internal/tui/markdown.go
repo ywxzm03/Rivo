@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -11,7 +12,6 @@ import (
 
 // markdownRenderer 按当前宽度复用解析器，已完成消息的输出缓存在 Model 中
 type markdownRenderer struct {
-	width     int
 	renderers map[markdownRendererKey]*glamour.TermRenderer
 	widths    []int
 }
@@ -39,9 +39,6 @@ func markdownStyle(role string) style.StyleConfig {
 	if role == "thinking" {
 		text = primitive(thinkingColor)
 		text.Italic = &yes
-	}
-	if role == "tool" {
-		text = primitive(mutedColor)
 	}
 	if role == "user" {
 		bg := userBg
@@ -102,7 +99,7 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	if r.renderers == nil {
 		r.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
 	}
-	if !containsInt(r.widths, width) {
+	if !slices.Contains(r.widths, width) {
 		r.widths = append(r.widths, width)
 		if len(r.widths) > 4 {
 			stale := r.widths[0]
@@ -114,7 +111,6 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 			}
 		}
 	}
-	r.width = width
 	key := markdownRendererKey{width: width, role: role}
 	renderer := r.renderers[key]
 	if renderer == nil {
@@ -133,15 +129,6 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	return ansi.Hardwrap(strings.Trim(result, "\n"), width, true)
 }
 
-func containsInt(values []int, value int) bool {
-	for _, current := range values {
-		if current == value {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *Model) renderMessage(message Message) string {
 	width := max(1, m.width-2)
 	if message.Role == "command" {
@@ -158,9 +145,6 @@ func (m *Model) renderMessage(message Message) string {
 		// 提示行的圆点与中断提示的方块对齐，正文从第三列开始；换行后保持相同缩进
 		wrapped := ansi.Wrap(message.Text, max(1, width-3), "")
 		return colored(mutedColor, " • "+strings.ReplaceAll(wrapped, "\n", "\n   "))
-	}
-	if message.Role == "divider" && message.Divider != nil {
-		return dividerLine(m.width, message.Divider)
 	}
 	if message.ToolGroup != nil {
 		group := m.renderToolGroup(message.ToolGroup, width)
@@ -230,13 +214,6 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(lines, "\n")
 	}
 	var parts []string
-	if message.Thinking != "" && !m.hideTools {
-		if !m.showThinking {
-			parts = append(parts, boldItalicText("Thinking..."))
-		} else {
-			parts = append(parts, indent(m.markdown.render(message.Thinking, "thinking", width)))
-		}
-	}
 	if message.Text != "" {
 		parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 	}

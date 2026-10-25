@@ -2,8 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -334,14 +332,7 @@ func formatElapsed(d time.Duration) string {
 
 // footer 输出单行状态栏：左侧工作目录与分支，右侧模型与思考等级，两端对齐
 func (m *Model) footer() string {
-	cwd := m.state.Cwd
-	if home, err := os.UserHomeDir(); err == nil {
-		if cwd == home {
-			cwd = "~"
-		} else if strings.HasPrefix(cwd, home+string(filepath.Separator)) {
-			cwd = "~" + strings.TrimPrefix(cwd, home)
-		}
-	}
+	cwd := shortenToolPath(m.state.Cwd)
 	if m.state.Branch != "" {
 		// 分支前用 git 图标，与目录之间用小点分隔
 		cwd += " • " + branchIcon + " " + m.state.Branch

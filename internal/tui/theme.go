@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Claude Code dark 主题的语义色 token；固定 RGB 并沿用终端颜色降级
+// Claude Code dark 主题的语义色，供各渲染层取用
 const (
 	textColor           = "#ffffff" // text / userMessageText
 	inputBorder         = "#888888" // editor border and prompt
@@ -26,7 +26,7 @@ const (
 	syntaxLiteralColor  = "#be84ff" // syntaxLiteral / syntaxNumber
 	syntaxCommentColor  = "#75715e" // syntaxComment / syntaxMeta
 	selectionBackground = "#264f78" // text selection
-	// backgroundFill 是终端底色，diff 的红绿底从它混出，避免整块高饱和
+	// backgroundFill 是终端底色，呼吸状态点由它混向正文色
 	backgroundFill = "#1e1e1e"
 )
 

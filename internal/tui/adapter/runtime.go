@@ -380,7 +380,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			message.ID = r.sourceID(event.SourceID, "message")
 			r.renameMessageLocked(previousID, message.ID)
 			if message.ToolGroup != nil {
-				message.ToolGroup = cloneToolGroup(message.ToolGroup)
+				message.ToolGroup = message.ToolGroup.Clone()
 				message.ToolGroup.ID = message.ID + "/tools"
 			}
 		}
@@ -535,7 +535,7 @@ func (r *Runtime) resetProjectionLocked() {
 func (r *Runtime) partialAssistantLocked() *tui.Message {
 	for i := len(r.messages) - 1; i >= 0; i-- {
 		message := r.messages[i]
-		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.Thinking != "" || message.ToolGroup != nil || message.Aborted) {
+		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.ToolGroup != nil || message.Aborted) {
 			copy := message
 			return &copy
 		}
@@ -557,22 +557,10 @@ func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Mess
 		converted.Role, converted.Text = "user", textContent(message.Content)
 		converted.Images = imageViews(message.Content)
 		converted.Skill = skillInvocation(converted.Text)
-	case llm.AssistantMessage:
-		converted.Role = "assistant"
-		for _, content := range message.Content {
-			switch content := content.(type) {
-			case llm.TextContent:
-				converted.Text += content.Text
-			case llm.ThinkingContent:
-				converted.Thinking += content.Thinking
-			}
-		}
-	case llm.ToolResultMessage:
-		return tui.Message{}, false
 	default:
 		return tui.Message{}, false
 	}
-	return converted, converted.Text != "" || converted.Thinking != "" || len(converted.Images) > 0
+	return converted, converted.Text != "" || len(converted.Images) > 0
 }
 
 func imageViews(contents []llm.Content) []tui.ImageView {
@@ -836,14 +824,14 @@ func preserveDisplayMetadata(messages, previous []tui.Message) []tui.Message {
 	}
 	for i := range messages {
 		before := old[messages[i].ID]
-		messages[i].Elapsed, messages[i].Divider = before.Elapsed, before.Divider
+		messages[i].Divider = before.Divider
 		messages[i].Revision = before.Revision + 1
 		if messages[i].ToolGroup != nil && before.ToolGroup != nil {
 			for j := range messages[i].ToolGroup.Calls {
 				call := &messages[i].ToolGroup.Calls[j]
 				if index := findToolCall(before.ToolGroup, call.ID); index >= 0 {
 					oldCall := before.ToolGroup.Calls[index]
-					call.Elapsed, call.StartedAt, call.EndedAt = oldCall.Elapsed, oldCall.StartedAt, oldCall.EndedAt
+					call.StartedAt = oldCall.StartedAt
 				}
 			}
 		}

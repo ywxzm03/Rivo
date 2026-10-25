@@ -75,7 +75,7 @@ func renderToolRows(group *ToolGroupView, width int, state toolRenderState, now 
 	return strings.Join(lines, "\n"), hits
 }
 
-// hiddenToolRowsLine 汇总被隐藏的调用数与思考轮数，并提示恢复键
+// hiddenToolRowsLine 汇总被隐藏的调用数与思考块数，并提示恢复键
 func hiddenToolRowsLine(group *ToolGroupView, width int) string {
 	parts := make([]string, 0, 2)
 	if count := len(group.Calls); count > 0 {
@@ -128,7 +128,7 @@ func renderToolRowCalls(group *ToolGroupView, width int, state toolRenderState, 
 		// 1.同一轮里连续的只读调用合成一组，轮次变化时断开以便插入下一轮思考
 		end := start
 		for end < len(group.Calls) && group.Calls[end].Round == round && visibleCall(group.Calls[end]) &&
-			lookKindOf(group.Calls[end].Name, toolArgs(group.Calls[end])) != lookNone {
+			lookKindOf(group.Calls[end]) != lookNone {
 			end++
 		}
 		if end == start {

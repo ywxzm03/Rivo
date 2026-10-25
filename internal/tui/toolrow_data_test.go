@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -72,7 +73,8 @@ func TestLookKindOfTools(t *testing.T) {
 		{"web_search", map[string]any{"query": "x"}, lookNone},
 	}
 	for _, tt := range cases {
-		if got := lookKindOf(tt.name, tt.args); got != tt.want {
+		call := ToolCallView{Name: tt.name, Arguments: rowCallArguments(tt.args)}
+		if got := lookKindOf(call); got != tt.want {
 			t.Fatalf("lookKindOf(%s, %v) = %q, want %q", tt.name, tt.args, got, tt.want)
 		}
 	}
@@ -269,10 +271,10 @@ func TestToolRowFailureHeadline(t *testing.T) {
 	}
 }
 
-// diff 解析：统一 patch 优先，退回带行号的展示 diff；三行上下文裁剪用 ⋮ 标断点
+// diff 解析：统一 patch 的增删与上下文行号；三行上下文裁剪用 ⋮ 标断点
 func TestParseRowDiff(t *testing.T) {
 	patch := "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c"
-	lines := parseRowDiff(patch, "")
+	lines := parseRowDiff(patch)
 	want := []rowDiffLine{
 		{Kind: diffContext, Number: 1, Content: "a"},
 		{Kind: diffRemove, Number: 2, Content: "b"},
@@ -286,12 +288,6 @@ func TestParseRowDiff(t *testing.T) {
 		if lines[i] != want[i] {
 			t.Fatalf("line %d = %+v, want %+v", i, lines[i], want[i])
 		}
-	}
-
-	display := " 1  keep\n-2  old\n+2  new\n ...\n 9  tail"
-	lines = parseRowDiff("", display)
-	if len(lines) != 5 || lines[4].Number != 9 || lines[3].Kind != diffSeparator {
-		t.Fatalf("display diff = %+v", lines)
 	}
 }
 
@@ -344,7 +340,7 @@ func TestParseRowDiffHunks(t *testing.T) {
 		"-d",
 		"+D",
 	}, "\n")
-	lines := parseRowDiff(patch, "")
+	lines := parseRowDiff(patch)
 	separators := 0
 	for _, line := range lines {
 		if line.Kind == diffSeparator {
@@ -551,4 +547,13 @@ func TestToolRowDiffWordTintColors(t *testing.T) {
 	if !strings.Contains(removed, "Hello"+bgSequence(removedTint)) {
 		t.Fatalf("removed row does not restore the base tint after the word: %q", removed)
 	}
+}
+
+// rowCallArguments 把测试里的参数表编码成调用行携带的 JSON
+func rowCallArguments(args map[string]any) string {
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }

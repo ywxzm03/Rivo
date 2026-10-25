@@ -19,7 +19,7 @@ func toolRowOutcome(call ToolCallView) string {
 	case "ls":
 		return "Listed " + countNoun(toolRowResultLines(call), "path", "paths")
 	case "write":
-		lines := toolRowContentLines(toolArgs(call))
+		lines := toolRowContentLines(call)
 		return "Wrote " + countNoun(lines, "line", "lines") + " to " + toolPath(toolArgs(call))
 	case "edit":
 		added, removed := toolRowEditChanges(call)
@@ -30,6 +30,9 @@ func toolRowOutcome(call ToolCallView) string {
 			return "Added " + countNoun(added, "line", "lines")
 		case removed > 0:
 			return "Removed " + countNoun(removed, "line", "lines")
+		case call.Details != "":
+			// 详情存在却解析不出增删行时交给 Result 原文，避免报成“0 行”
+			return ""
 		}
 	}
 	return ""
@@ -43,8 +46,8 @@ func countNoun(count int, singular, plural string) string {
 }
 
 // toolRowContentLines 数 write 写入的行数
-func toolRowContentLines(args map[string]any) int {
-	content := strings.TrimRight(argString(args, "content"), "\n")
+func toolRowContentLines(call ToolCallView) int {
+	content := strings.TrimRight(argString(toolArgs(call), "content"), "\n")
 	if content == "" {
 		return 0
 	}
@@ -81,8 +84,7 @@ func stripGeneratedFooter(output string) string {
 
 // toolRowEditChanges 从 diff 详情里数增删行
 func toolRowEditChanges(call ToolCallView) (added, removed int) {
-	patch, display := toolRowDiffDetails(call)
-	for _, line := range parseRowDiff(patch, display) {
+	for _, line := range parseRowDiff(toolRowDiffPatch(call)) {
 		switch line.Kind {
 		case diffAdd:
 			added++
@@ -427,8 +429,8 @@ func classifyShellCommand(command string) lookKind {
 }
 
 // lookKindOf 返回一个工具调用是否只是在看；只看内置工具与只读命令
-func lookKindOf(name string, args map[string]any) lookKind {
-	switch name {
+func lookKindOf(call ToolCallView) lookKind {
+	switch call.Name {
 	case "read":
 		return lookRead
 	case "grep", "find":
@@ -436,7 +438,8 @@ func lookKindOf(name string, args map[string]any) lookKind {
 	case "ls":
 		return lookList
 	case "bash", "powershell":
-		return classifyShellCommand(argString(args, "command"))
+		// 只有 shell 需要读命令内容，其余工具不必解码参数
+		return classifyShellCommand(argString(toolArgs(call), "command"))
 	}
 	return lookNone
 }
@@ -459,7 +462,7 @@ func toolRowGroupCounts(calls []ToolCallView) map[lookKind]int {
 	paths := map[string]bool{}
 	readCommands := 0
 	for _, call := range calls {
-		kind := lookKindOf(call.Name, toolArgs(call))
+		kind := lookKindOf(call)
 		switch {
 		case kind == lookRead && call.Name == "read":
 			paths[toolPath(toolArgs(call))] = true
@@ -557,13 +560,4 @@ func groupFailures(calls []ToolCallView) []string {
 		failures = append(failures, headline)
 	}
 	return failures
-}
-
-// sortStrings 是稳定排序的小工具，避免为几处字符串排序引入依赖顺序
-func sortStrings(values []string) {
-	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
-			values[j], values[j-1] = values[j-1], values[j]
-		}
-	}
 }

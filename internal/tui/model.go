@@ -50,7 +50,7 @@ type SkillInvocationView struct {
 	Name, Location, Content, Arguments string
 }
 
-// ToolStatus 表示工具调用在 compact transcript 中的状态
+// ToolStatus 表示一条工具调用在工具行中的执行状态
 type ToolStatus string
 
 const (
@@ -64,11 +64,8 @@ const (
 type ThinkingBlockView struct {
 	Index int
 	// Round 是该思考所属的 assistant 轮次：同一轮里的 thinking 排在它自己的调用之前
-	Round       int
-	Text        string
-	Active      bool
-	Tokens      int
-	TokensExact bool
+	Round int
+	Text  string
 }
 
 // ToolCallView 保存完整工具状态，compact/full 只改变展示方式
@@ -81,11 +78,9 @@ type ToolCallView struct {
 	// Details 是工具返回的结构化详情（如 edit 的 diff），JSON 编码后只供展示
 	Details string
 	Status  ToolStatus
-	// ArgsComplete 表示模型已写完参数；Pi 用它判断行是否仍处于进行中
+	// ArgsComplete 表示模型已写完参数，行是否仍在进行由它判断
 	ArgsComplete bool
-	Elapsed      time.Duration
 	StartedAt    time.Time
-	EndedAt      time.Time
 }
 
 // ToolGroupView 将连续 thinking 和工具调用作为一个可折叠工作块
@@ -93,8 +88,6 @@ type ToolGroupView struct {
 	ID       string
 	Calls    []ToolCallView
 	Thinking []ThinkingBlockView
-	Active   bool
-	Sealed   bool
 }
 
 // TurnDividerView 标记一个 turn 的最终工作耗时与结束时刻
@@ -105,14 +98,13 @@ type TurnDividerView struct {
 
 // Message 是显示投影，ID 在流式更新中保持稳定
 type Message struct {
-	Revision                 uint64
-	ID, Role, Text, Thinking string
-	Elapsed                  time.Duration
-	Aborted                  bool
-	ToolGroup                *ToolGroupView
-	Divider                  *TurnDividerView
-	Skill                    *SkillInvocationView
-	Images                   []ImageView
+	Revision       uint64
+	ID, Role, Text string
+	Aborted        bool
+	ToolGroup      *ToolGroupView
+	Divider        *TurnDividerView
+	Skill          *SkillInvocationView
+	Images         []ImageView
 }
 
 // ImageView 是消息投影中的图片元数据
@@ -670,7 +662,7 @@ func (m *Model) applySnapshot(s Snapshot) {
 	}
 	m.state.Messages = append([]Message(nil), s.Messages...)
 	for i := range m.state.Messages {
-		m.state.Messages[i].ToolGroup = cloneToolGroup(m.state.Messages[i].ToolGroup)
+		m.state.Messages[i].ToolGroup = m.state.Messages[i].ToolGroup.Clone()
 		if skill := m.state.Messages[i].Skill; skill != nil {
 			copy := *skill
 			m.state.Messages[i].Skill = &copy
@@ -1278,14 +1270,14 @@ func (m *Model) resetSessionUI() {
 	m.viewport.GotoTop()
 }
 
-// refreshTranscript 仅重渲染内容/宽度/思考可见性发生变化的消息
+// refreshTranscript 只重渲染内容、宽度、思考与工具的展开/遮罩状态变化的消息
 func (m *Model) refreshTranscript() {
 	if m.width == 0 {
 		return
 	}
 	follow := m.viewport.AtBottom()
 	var blocks []string
-	// 1.逐消息渲染，并把消息内相对行号的命中区间换算成屏幕行
+	// 逐消息渲染，并把消息内相对行号的命中区间换算成屏幕行
 	var screenHits []toolHit
 	blockOffset := 0
 	for _, message := range m.state.Messages {

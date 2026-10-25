@@ -36,7 +36,7 @@ func TestLiveThinkingUsesContentIndexes(t *testing.T) {
 	if !ok || converted.ToolGroup == nil {
 		t.Fatalf("converted = %+v", converted)
 	}
-	if len(converted.ToolGroup.Thinking) != 2 || converted.ToolGroup.Thinking[1].Text != "second" || !converted.ToolGroup.Thinking[1].Active {
+	if len(converted.ToolGroup.Thinking) != 2 || converted.ToolGroup.Thinking[1].Text != "second" {
 		t.Fatalf("thinking blocks = %+v", converted.ToolGroup.Thinking)
 	}
 }
@@ -48,7 +48,7 @@ func TestCompletedThinkingSnapshotIsProjectedWithoutStreamEvent(t *testing.T) {
 	if !ok || converted.ToolGroup == nil || len(converted.ToolGroup.Thinking) != 1 {
 		t.Fatalf("converted = %+v", converted)
 	}
-	if converted.ToolGroup.Thinking[0].Text != "final reasoning" || converted.ToolGroup.Thinking[0].Active {
+	if converted.ToolGroup.Thinking[0].Text != "final reasoning" {
 		t.Fatalf("thinking = %+v", converted.ToolGroup.Thinking)
 	}
 }
@@ -71,7 +71,7 @@ func TestCallsOnlyAssistantSnapshotWritesToolGroup(t *testing.T) {
 func TestEmptyAssistantStartShowsWorkingGroup(t *testing.T) {
 	runtime := &Runtime{sequence: 1}
 	converted, ok := runtime.liveAssistantLocked(llm.AssistantMessage{}, "assistant-1", nil)
-	if !ok || converted.ToolGroup == nil || !converted.ToolGroup.Active {
+	if !ok || converted.ToolGroup == nil {
 		t.Fatalf("converted = %+v", converted)
 	}
 	if len(runtime.messages) != 1 || runtime.messages[0].ToolGroup == nil {
@@ -97,7 +97,7 @@ func TestConsecutiveAssistantThinkingUpdatesReuseToolGroupAnchor(t *testing.T) {
 func TestAgentEndDividerIsBeforeFinalTextProjection(t *testing.T) {
 	runtime := &Runtime{turnStarted: time.Now().Add(-2 * time.Second)}
 	runtime.messages = []tui.Message{
-		{ID: "work", Role: "assistant", ToolGroup: &tui.ToolGroupView{ID: "group", Sealed: true}},
+		{ID: "work", Role: "assistant", ToolGroup: &tui.ToolGroupView{ID: "group"}},
 		{ID: "text", Role: "assistant", Text: "finished"},
 	}
 	runtime.addDividerLocked()

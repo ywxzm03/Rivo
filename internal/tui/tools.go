@@ -1,32 +1,20 @@
 package tui
 
 import (
+	"sort"
 	"strings"
 	"time"
 )
 
-// statusSpinner 是状态栏的工作指示；工具行改用 ⦁ 的呼吸，不共用它
-var statusSpinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-func cloneToolGroup(group *ToolGroupView) *ToolGroupView {
-	if group == nil {
+// Clone 深拷贝调用与思考切片，投影侧改副本时不影响已发出的消息
+func (g *ToolGroupView) Clone() *ToolGroupView {
+	if g == nil {
 		return nil
 	}
-	cloned := *group
-	cloned.Calls = append([]ToolCallView(nil), group.Calls...)
-	cloned.Thinking = append([]ThinkingBlockView(nil), group.Thinking...)
+	cloned := *g
+	cloned.Calls = append([]ToolCallView(nil), g.Calls...)
+	cloned.Thinking = append([]ThinkingBlockView(nil), g.Thinking...)
 	return &cloned
-}
-
-// renderToolGroup 用“全部收起/全部展开”两种状态渲染，供测试与预览直接调用
-func renderToolGroup(group *ToolGroupView, width int, expanded bool, now time.Time) string {
-	return renderToolGroupWithState(group, width, toolRenderState{allExpanded: expanded}, now)
-}
-
-// renderToolGroupWithState 渲染工具组并丢掉点击命中
-func renderToolGroupWithState(group *ToolGroupView, width int, state toolRenderState, now time.Time) string {
-	view, _ := renderToolRows(group, width, state, now)
-	return view
 }
 
 // toolRenderState 汇总当前的展开状态
@@ -62,7 +50,7 @@ func (m *Model) expandSignature() string {
 	for key := range m.expandedThoughts {
 		keys = append(keys, "t"+key)
 	}
-	sortStrings(keys)
+	sort.Strings(keys)
 	builder.WriteString(strings.Join(keys, "\x00"))
 	return builder.String()
 }

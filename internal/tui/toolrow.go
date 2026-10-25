@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,9 +73,6 @@ func argString(args map[string]any, key string) string {
 func toolPath(args map[string]any) string {
 	path := argString(args, "path")
 	if path == "" {
-		path = argString(args, "file_path")
-	}
-	if path == "" {
 		return ""
 	}
 	return shortenToolPath(path)
@@ -137,7 +135,7 @@ func formatArgValue(value any) string {
 }
 
 // argumentOrder 让常用参数按固定顺序排在前面，其余按字母序
-var argumentOrder = []string{"command", "query", "queries", "q", "url", "urls", "path", "file_path", "paths", "pattern", "prompt", "question", "claim", "name", "id", "tool"}
+var argumentOrder = []string{"command", "query", "queries", "q", "url", "urls", "path", "paths", "pattern", "prompt", "question", "claim", "name", "id", "tool"}
 
 // formatArguments 把自定义工具的参数排成 `query: "x", limit: 5`
 func formatArguments(args map[string]any) string {
@@ -155,7 +153,7 @@ func formatArguments(args map[string]any) string {
 			rest = append(rest, key)
 		}
 	}
-	sortStrings(rest)
+	sort.Strings(rest)
 	keys = append(keys, rest...)
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -193,9 +191,9 @@ func toolRowArgument(name string, args map[string]any, expanded bool) string {
 	}
 }
 
-// toolRowStatus 把投影状态映射成 Pi 的四种行状态。
-// 参数还在流式写入（ArgsComplete 为假）时算 running，这样写长参数的调用
-// 也会呼吸；参数写完但工具还没开始执行的短暂间隙算 pending，点不再呼吸
+// toolRowStatus 把投影状态映射成四种行状态：
+// 参数还在流式写入（ArgsComplete 为假）时算 running，写长参数的调用也会呼吸；
+// 参数写完但工具还没开始执行的短暂间隙算 pending，点不再呼吸
 func toolRowStatus(call ToolCallView) string {
 	switch call.Status {
 	case ToolPending:
@@ -214,7 +212,7 @@ func toolRowStatus(call ToolCallView) string {
 func toolRowDot(call ToolCallView, now time.Time) string {
 	switch toolRowStatus(call) {
 	case "running":
-		// 1.呼吸按 45ms 一帧、14 帧一轮，最暗不低于 8% 的强度
+		// 呼吸按 45ms 一帧、14 帧一轮，最暗不低于 8% 的强度
 		frame := (now.UnixMilli() / 45) % 14
 		wave := (cosine(frame, 14) + 1) / 2
 		strength := 0.08 + 0.92*wave
@@ -233,7 +231,7 @@ func cosine(frame, total int64) float64 {
 	if total == 0 {
 		return 0
 	}
-	// 直接用弧度近似 cos，避免为了一个呼吸引入 math 依赖以外的分支
+	// 角度已归一化到一轮内，直接按弧度求值
 	radians := 2 * 3.141592653589793 * float64(frame) / float64(total)
 	return mathCos(radians)
 }
@@ -285,8 +283,8 @@ func renderToolRow(call ToolCallView, width int, expanded bool, now time.Time) [
 // renderToolRowResult 画 ⎿ 起头的结果块
 func renderToolRowResult(call ToolCallView, width int, expanded bool) []string {
 	args := toolArgs(call)
-	// 结果区只在工具开始执行后才有：Pi 的 ToolExecutionComponent 在此之前没有
-	// result，只画调用行；点的呼吸与结果区是否存在是两件事
+	// 结果区只在工具开始执行后才有，pending 阶段只画调用行；
+	// 点的呼吸与结果区是否存在是两件事
 	if call.Status == ToolPending && call.StartedAt.IsZero() {
 		return nil
 	}
@@ -299,14 +297,14 @@ func renderToolRowResult(call ToolCallView, width int, expanded bool) []string {
 		if detail == "" {
 			return lines
 		}
-		return append(lines, toolRowOutputIndented(detail, width, expanded, true)...)
+		return append(lines, toolRowOutputWithPrefix(detail, width, expanded, true, rowIndent)...)
 	}
 	// 成功：先一句结果，再按工具补正文
 	body := toolRowBody(call, args, width, expanded)
 	if outcome := toolRowOutcome(call); outcome != "" {
 		return append(toolRowSentence(outcome, width), body...)
 	}
-	return append(toolRowOutput(call.Result, width, expanded, false), body...)
+	return append(toolRowOutputWithPrefix(call.Result, width, expanded, false, rowResultPrefix), body...)
 }
 
 // toolRowSentence 把一句话挂在 ⎿ 下，超出宽度按词换行
@@ -353,16 +351,6 @@ func wrapWords(text string, width int) []string {
 		rows = append(rows, line)
 	}
 	return rows
-}
-
-// toolRowOutput 把命令输出挂在 ⎿ 下；收起时只留三行并提示还有多少
-func toolRowOutput(output string, width int, expanded bool, isError bool) []string {
-	return toolRowOutputWithPrefix(output, width, expanded, isError, rowResultPrefix)
-}
-
-// toolRowOutputIndented 把输出整块缩进，用在已经有 ⎿ 标题行的结果里
-func toolRowOutputIndented(output string, width int, expanded bool, isError bool) []string {
-	return toolRowOutputWithPrefix(output, width, expanded, isError, rowIndent)
 }
 
 func toolRowOutputWithPrefix(output string, width int, expanded bool, isError bool, firstPrefix string) []string {
@@ -413,8 +401,7 @@ func toolRowBody(call ToolCallView, args map[string]any, width int, expanded boo
 	path := argString(args, "path")
 	switch call.Name {
 	case "edit":
-		patch, display := toolRowDiffDetails(call)
-		lines := trimRowDiff(parseRowDiff(patch, display), rowDiffContext)
+		lines := trimRowDiff(parseRowDiff(toolRowDiffPatch(call)), rowDiffContext)
 		return renderRowDiff(lines, path, rowIndent, width)
 	case "write":
 		content := strings.TrimRight(argString(args, "content"), "\n")
@@ -448,33 +435,27 @@ func toolRowBody(call ToolCallView, args map[string]any, width int, expanded boo
 	}
 }
 
-// toolRowDiffDetails 取 edit 结果里的 patch 与展示 diff
-func toolRowDiffDetails(call ToolCallView) (patch, display string) {
-	if strings.TrimSpace(call.Details) == "" {
-		return "", ""
-	}
-	var details struct {
-		Patch string
-		Diff  string
-	}
-	if err := json.Unmarshal([]byte(call.Details), &details); err != nil {
-		return "", ""
-	}
-	return details.Patch, details.Diff
+// toolDetails 是工具结果里工具行会读的字段，对应 tool.EditDetails
+type toolDetails struct {
+	Patch string
 }
 
-// readStartLine 取 read 的起始行，历史会话里的 offset 可能是字符串
+// toolRowDiffPatch 取 edit 结果里的统一 patch
+func toolRowDiffPatch(call ToolCallView) string {
+	if strings.TrimSpace(call.Details) == "" {
+		return ""
+	}
+	var details toolDetails
+	if err := json.Unmarshal([]byte(call.Details), &details); err != nil {
+		return ""
+	}
+	return details.Patch
+}
+
+// readStartLine 取 read 的起始行，offset 是模型给的 JSON 数字
 func readStartLine(args map[string]any) int {
-	switch value := args["offset"].(type) {
-	case float64:
-		if value >= 1 {
-			return int(value)
-		}
-	case string:
-		var parsed int
-		if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil && parsed >= 1 {
-			return parsed
-		}
+	if value, ok := args["offset"].(float64); ok && value >= 1 {
+		return int(value)
 	}
 	return 1
 }

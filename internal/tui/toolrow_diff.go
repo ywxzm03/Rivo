@@ -27,20 +27,12 @@ type rowDiffLine struct {
 	Content string
 }
 
-var (
-	unifiedHunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
-	displayDiffLine   = regexp.MustCompile(`^([ +\-])\s*(\d+)\s(.*)$`)
-)
+var unifiedHunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
-// parseRowDiff 解析统一 patch，缺失时退回带行号的展示 diff
+// parseRowDiff 解析统一 patch
 // tab 在这里统一展开：显示宽度与词级高亮的字符下标都基于展开后的文本
-func parseRowDiff(patch, display string) []rowDiffLine {
-	var lines []rowDiffLine
-	if parsed := parseUnifiedDiff(patch); len(parsed) > 0 {
-		lines = parsed
-	} else {
-		lines = parseDisplayDiff(display)
-	}
+func parseRowDiff(patch string) []rowDiffLine {
+	lines := parseUnifiedDiff(patch)
 	for index := range lines {
 		lines[index].Content = expandTabs(lines[index].Content)
 	}
@@ -78,30 +70,6 @@ func parseUnifiedDiff(patch string) []rowDiffLine {
 			oldLine++
 			newLine++
 		}
-	}
-	return lines
-}
-
-func parseDisplayDiff(display string) []rowDiffLine {
-	var lines []rowDiffLine
-	for _, line := range strings.Split(strings.ReplaceAll(display, "\r\n", "\n"), "\n") {
-		if strings.TrimSpace(line) == "..." {
-			lines = append(lines, rowDiffLine{Kind: diffSeparator, Content: "⋮"})
-			continue
-		}
-		match := displayDiffLine.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		number, _ := strconv.Atoi(match[2])
-		kind := diffContext
-		switch match[1] {
-		case "+":
-			kind = diffAdd
-		case "-":
-			kind = diffRemove
-		}
-		lines = append(lines, rowDiffLine{Kind: kind, Number: number, Content: match[3]})
 	}
 	return lines
 }
@@ -224,6 +192,14 @@ func highlightRowLines(contents []string, path string) [][]styledCell {
 		}
 	}
 	return lines
+}
+
+// highlightedCells 取一行的着色片段；无法着色时退回单色，调用方不必再判空
+func highlightedCells(highlighted [][]styledCell, index int, content string) []styledCell {
+	if index < len(highlighted) && len(highlighted[index]) > 0 {
+		return highlighted[index]
+	}
+	return []styledCell{{Text: content, FG: codeTextColor}}
 }
 
 // expandTabs 把制表符按制表位展开成空格，与粘贴内容的制表宽度保持一致
@@ -583,16 +559,13 @@ func renderRowDiff(lines []rowDiffLine, path string, indent string, width int) [
 			output = append(output, indent+strings.Repeat(" ", numberWidth+1)+colored(dimColor, line.Content))
 			continue
 		}
-		segments := highlighted[index]
-		if len(segments) == 0 {
-			segments = []styledCell{{Text: line.Content, FG: codeTextColor}}
-		}
+		segments := highlightedCells(highlighted, index, line.Content)
 		switch line.Kind {
 		case diffContext:
 			// 上下文行不着底色，超宽时按列切分，保证一行终端一行文本
 			gutter := diffGutter(line.Number, line.Kind, numberWidth, "")
 			body := paintCells(cellsFromLine(segments, nil), "", "", 0)
-			output = append(output, indent+gutter+fitCells(body, bodyWidth))
+			output = append(output, indent+gutter+ansi.Truncate(body, bodyWidth, ""))
 		default:
 			output = append(output, renderTintedDiffRow(line, segments, words[index], numberWidth, indent, width, bodyWidth)...)
 		}
@@ -707,24 +680,13 @@ func renderRowCode(contents []string, path string, startLine int, indent string,
 	for index, content := range contents {
 		number := strconv.Itoa(startLine + index)
 		number = strings.Repeat(" ", numberWidth-len(number)) + number
-		segments := highlighted[index]
-		if len(segments) == 0 {
-			segments = []styledCell{{Text: content, FG: codeTextColor}}
-		}
+		segments := highlightedCells(highlighted, index, content)
 		output = append(output, indent+colored(dimColor, " "+number+" ")+paintCells(cellsFromLine(segments, nil), "", "", 0))
 	}
 	if footer != "" {
 		output = append(output, indent+colored(dimColor, footer))
 	}
 	return output
-}
-
-// fitCells 把已经着色的正文按显示宽度硬切，避免整行超出终端宽度被折成两行
-func fitCells(text string, width int) string {
-	if ansi.StringWidth(text) <= width {
-		return text
-	}
-	return ansi.Truncate(text, width, "")
 }
 
 // diff 底色的四个层级：变更行的整行底色，以及其中被改动词的更亮底色。

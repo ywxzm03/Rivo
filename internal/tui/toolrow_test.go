@@ -97,7 +97,7 @@ func TestToolRowCommandCollapse(t *testing.T) {
 // 窄宽度下标题换行到工具名下方，而不是被截断
 func TestToolRowTitleWrapsUnderLabel(t *testing.T) {
 	call := rowCall("1", "bash", map[string]any{"command": strings.Repeat("ab ", 30)}, ToolSuccess)
-	view, _ := renderToolRows(&ToolGroupView{ID: "g", Calls: []ToolCallView{call}, Sealed: true}, 44, toolRenderState{}, time.UnixMilli(0))
+	view, _ := renderToolRows(&ToolGroupView{ID: "g", Calls: []ToolCallView{call}}, 44, toolRenderState{}, time.UnixMilli(0))
 	lines := plainLines(view)
 	if len(lines) < 2 {
 		t.Fatalf("narrow title did not wrap: %q", lines)
@@ -320,7 +320,7 @@ func TestToolRowGroupSummary(t *testing.T) {
 	calls[0].Result = "demo/greet.ts:1: export function greet"
 	calls[1].Result = "export function greet"
 	calls[2].Result = "{}"
-	group := &ToolGroupView{ID: "g", Calls: calls, Sealed: true}
+	group := &ToolGroupView{ID: "g", Calls: calls}
 
 	lines := groupLines(group, toolRenderState{})
 	want := " ⦁ Searched for 1 pattern, read 2 files (click to expand)"
@@ -349,7 +349,7 @@ func TestToolRowGroupBreaksOnCommand(t *testing.T) {
 	calls[0].Result = "a"
 	calls[1].Result = "ok"
 	calls[2].Result = "b"
-	group := &ToolGroupView{ID: "g", Calls: calls, Sealed: true}
+	group := &ToolGroupView{ID: "g", Calls: calls}
 
 	lines := groupLines(group, toolRenderState{})
 	want := []string{
@@ -368,7 +368,7 @@ func TestToolRowGroupRunningHint(t *testing.T) {
 	read := rowCall("1", "read", map[string]any{"path": "src/a"}, ToolSuccess)
 	read.Result = "a"
 	search := rowCall("2", "bash", map[string]any{"command": "rg x src"}, ToolPending)
-	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{read, search}, Active: true}
+	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{read, search}}
 
 	lines := groupLines(group, toolRenderState{})
 	if !strings.HasPrefix(lines[0], " ⦁ Searching for 1 pattern, reading 1 file") {
@@ -388,7 +388,7 @@ func TestToolRowGroupFailures(t *testing.T) {
 	ok.Result = "a"
 	failed := rowCall("2", "grep", map[string]any{"pattern": "x", "path": "src"}, ToolError)
 	failed.Result = "rg: src: No such file or directory"
-	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{ok, failed}, Sealed: true}
+	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{ok, failed}}
 
 	lines := groupLines(group, toolRenderState{})
 	if len(lines) != 2 || !strings.Contains(lines[1], "Error: rg: src: No such file or directory") {
@@ -419,7 +419,7 @@ func TestToolRowStatusDot(t *testing.T) {
 // 思考默认只有一行 Thinking...，展开后是完整正文
 func TestToolRowThinking(t *testing.T) {
 	text := strings.Repeat("reasoning line\n", 40)
-	group := &ToolGroupView{ID: "g", Thinking: []ThinkingBlockView{{Index: 0, Text: text}}, Sealed: true}
+	group := &ToolGroupView{ID: "g", Thinking: []ThinkingBlockView{{Index: 0, Text: text}}}
 
 	lines := groupLines(group, toolRenderState{})
 	if len(lines) != 1 || lines[0] != " Thinking..." {
@@ -441,13 +441,13 @@ func TestToolRowThinking(t *testing.T) {
 
 // 空组不渲染；点击命中按行区间返回
 func TestToolRowGroupHits(t *testing.T) {
-	if view, hits := renderToolRows(&ToolGroupView{ID: "g", Sealed: true}, 80, toolRenderState{}, time.UnixMilli(0)); view != "" || len(hits) != 0 {
+	if view, hits := renderToolRows(&ToolGroupView{ID: "g"}, 80, toolRenderState{}, time.UnixMilli(0)); view != "" || len(hits) != 0 {
 		t.Fatalf("empty group rendered: %q %+v", view, hits)
 	}
 
 	call := rowCall("1", "bash", map[string]any{"command": "echo hi"}, ToolSuccess)
 	call.Result = "hi\nho"
-	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{call}, Sealed: true}
+	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{call}}
 	view, hits := renderToolRows(group, 80, toolRenderState{}, time.UnixMilli(0))
 	if len(hits) != 1 || hits[0].Kind != "call" || hits[0].Key != "1" || hits[0].Start != 0 {
 		t.Fatalf("call hit = %+v", hits)
@@ -474,7 +474,7 @@ func lineTexts(count int) []string {
 // 单击摘要行展开分组，再点一次收起；单击单条调用只展开它自己
 func TestToolRowClickTogglesRows(t *testing.T) {
 	m := testModel(80, 24)
-	group := &ToolGroupView{ID: "g", Sealed: true, Calls: []ToolCallView{
+	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{
 		rowCall("1", "read", map[string]any{"path": "a"}, ToolSuccess),
 		rowCall("2", "read", map[string]any{"path": "b"}, ToolSuccess),
 	}}
@@ -499,7 +499,7 @@ func TestToolRowClickTogglesRows(t *testing.T) {
 func TestToolRowClickExpandsThinking(t *testing.T) {
 	m := testModel(80, 24)
 	text := strings.Repeat("reasoning line\n", 30)
-	group := &ToolGroupView{ID: "g", Sealed: true, Thinking: []ThinkingBlockView{{Index: 0, Text: text}}}
+	group := &ToolGroupView{ID: "g", Thinking: []ThinkingBlockView{{Index: 0, Text: text}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
 
@@ -524,7 +524,7 @@ func TestToolRowClickExpandsThinking(t *testing.T) {
 
 // 展开的思考正文按宽度换行后，每一行都保持同一缩进
 func TestToolRowThinkingWrapKeepsIndent(t *testing.T) {
-	group := &ToolGroupView{ID: "g", Sealed: true, Thinking: []ThinkingBlockView{{Index: 0, Text: strings.Repeat("word ", 60)}}}
+	group := &ToolGroupView{ID: "g", Thinking: []ThinkingBlockView{{Index: 0, Text: strings.Repeat("word ", 60)}}}
 	lines := groupLines(group, toolRenderState{thoughts: map[string]bool{"g/r0": true}})
 	if len(lines) < 3 {
 		t.Fatalf("thinking did not wrap: %q", lines)
@@ -538,7 +538,7 @@ func TestToolRowThinkingWrapKeepsIndent(t *testing.T) {
 
 // 每轮的 thinking 排在该轮调用之前；不同轮的思考各占一行，互不覆盖
 func TestToolRowThinkingPerRound(t *testing.T) {
-	group := &ToolGroupView{ID: "g", Sealed: true,
+	group := &ToolGroupView{ID: "g",
 		Thinking: []ThinkingBlockView{
 			{Index: 0, Round: 1, Text: "round one reasoning"},
 			{Index: 0, Round: 2, Text: "round two reasoning"},
@@ -570,7 +570,7 @@ func TestToolRowThinkingPerRound(t *testing.T) {
 
 // 最后一轮只有思考没有调用时，思考仍然出现在末尾
 func TestToolRowThinkingTailRound(t *testing.T) {
-	group := &ToolGroupView{ID: "g", Sealed: true,
+	group := &ToolGroupView{ID: "g",
 		Thinking: []ThinkingBlockView{
 			{Index: 0, Round: 1, Text: "first"},
 			{Index: 0, Round: 2, Text: "second"},
@@ -588,7 +588,7 @@ func TestToolRowThinkingTailRound(t *testing.T) {
 
 // 名字还没到的调用不上屏，避免出现只有状态点的空行
 func TestToolRowHidesNamelessCall(t *testing.T) {
-	group := &ToolGroupView{ID: "g", Active: true, Calls: []ToolCallView{
+	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{
 		{ID: "c1", Name: "", Arguments: "", Status: ToolPending},
 		{ID: "c2", Name: "bash", Arguments: `{"command":"npm test"}`, Status: ToolPending, StartedAt: time.UnixMilli(1)},
 	}}

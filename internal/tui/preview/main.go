@@ -33,19 +33,19 @@ func exampleToolGroup() *tui.ToolGroupView {
 		" }",
 	}, "\n")
 	return &tui.ToolGroupView{
-		ID: "preview-tools", Sealed: true,
+		ID: "preview-tools",
 		Calls: []tui.ToolCallView{
-			{ID: "grep", Name: "grep", Round: 1, ArgsComplete: true, Arguments: `{"pattern":"greet|language","path":"demo"}`, Result: "demo/greet.ts:1: export function greet(name: string): string {", Status: tui.ToolSuccess, Elapsed: 33 * time.Millisecond},
-			{ID: "read", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}", Status: tui.ToolSuccess, Elapsed: 10 * time.Millisecond},
-			{ID: "read2", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/config.json"}`, Result: "{\n  \"lang\": \"zh\"\n}", Status: tui.ToolSuccess, Elapsed: 8 * time.Millisecond},
-			{ID: "bash", Name: "bash", Round: 2, ArgsComplete: true, Arguments: `{"command":"node --test demo/greet.test.mjs"}`, Result: "✔ greeting helper exports a typed function (0.527416ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1", Status: tui.ToolSuccess, Elapsed: 145 * time.Millisecond},
-			{ID: "write", Name: "write", Round: 3, ArgsComplete: true, Arguments: `{"path":"demo/notes.md","content":"# Greeting\n\nUse a friendly welcome."}`, Result: "Successfully wrote to demo/notes.md", Status: tui.ToolSuccess, Elapsed: 2 * time.Millisecond},
-			{ID: "edit", Name: "edit", Round: 4, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "Successfully replaced 1 block(s) in demo/greet.ts.", Details: `{"Patch":` + strconv.Quote(patch) + `}`, Status: tui.ToolSuccess, Elapsed: 3 * time.Millisecond},
+			{ID: "grep", Name: "grep", Round: 1, ArgsComplete: true, Arguments: `{"pattern":"greet|language","path":"demo"}`, Result: "demo/greet.ts:1: export function greet(name: string): string {", Status: tui.ToolSuccess},
+			{ID: "read", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}", Status: tui.ToolSuccess},
+			{ID: "read2", Name: "read", Round: 1, ArgsComplete: true, Arguments: `{"path":"demo/config.json"}`, Result: "{\n  \"lang\": \"zh\"\n}", Status: tui.ToolSuccess},
+			{ID: "bash", Name: "bash", Round: 2, ArgsComplete: true, Arguments: `{"command":"node --test demo/greet.test.mjs"}`, Result: "✔ greeting helper exports a typed function (0.527416ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1", Status: tui.ToolSuccess},
+			{ID: "write", Name: "write", Round: 3, ArgsComplete: true, Arguments: `{"path":"demo/notes.md","content":"# Greeting\n\nUse a friendly welcome."}`, Result: "Successfully wrote to demo/notes.md", Status: tui.ToolSuccess},
+			{ID: "edit", Name: "edit", Round: 4, ArgsComplete: true, Arguments: `{"path":"demo/greet.ts"}`, Result: "Successfully replaced 1 block(s) in demo/greet.ts.", Details: `{"Patch":` + strconv.Quote(patch) + `}`, Status: tui.ToolSuccess},
 		},
 		Thinking: []tui.ThinkingBlockView{
-			{Index: 0, Round: 1, Text: "The user said hello. First look around the demo directory.", Tokens: 120},
-			{Index: 0, Round: 2, Text: "Now run the test to confirm the helper still works.", Tokens: 90},
-			{Index: 0, Round: 3, Text: "Write the notes file, then update the greeting.", Tokens: 50},
+			{Index: 0, Round: 1, Text: "The user said hello. First look around the demo directory."},
+			{Index: 0, Round: 2, Text: "Now run the test to confirm the helper still works."},
+			{Index: 0, Round: 3, Text: "Write the notes file, then update the greeting."},
 		},
 	}
 }
@@ -150,7 +150,7 @@ func (p *preview) run(ctx context.Context, input string) tea.Msg {
 	user := tui.Message{ID: fmt.Sprintf("user-%d", p.sequence), Role: "user", Text: input}
 	p.state.Messages = append(p.state.Messages, user)
 	p.send(tui.MessageMsg(user))
-	message := tui.Message{ID: fmt.Sprintf("assistant-%d", p.sequence), Role: "assistant", Thinking: exampleThinking}
+	message := tui.Message{ID: fmt.Sprintf("assistant-%d", p.sequence), Role: "assistant"}
 	start := time.Now()
 	p.send(tui.MessageMsg(message))
 	delay := 500 * time.Millisecond
@@ -239,13 +239,13 @@ const exampleDiffPatch = `@@ -360,9 +360,9 @@
 func exampleDiffGroup() *tui.ToolGroupView {
 	patch, _ := json.Marshal(map[string]any{"Patch": exampleDiffPatch})
 	return &tui.ToolGroupView{
-		ID: "preview-diff", Sealed: true,
+		ID: "preview-diff",
 		Calls: []tui.ToolCallView{{
 			ID: "edit", Name: "edit", Round: 1, ArgsComplete: true,
 			Arguments: `{"path":"~/resources/handoff/rivo-handoff-2026-09-23.md"}`,
 			Result:    "Successfully replaced 1 block(s) in rbtree.go.",
 			Details:   string(patch),
-			Status:    tui.ToolSuccess, Elapsed: 3 * time.Millisecond,
+			Status:    tui.ToolSuccess,
 		}},
 	}
 }
@@ -270,7 +270,7 @@ func main() {
 		if *scene == "markdown" {
 			answer = exampleMarkdown
 		}
-		assistant := tui.Message{ID: "answer", Role: "assistant", Thinking: exampleThinking, Text: answer, Divider: &tui.TurnDividerView{Elapsed: 12 * time.Second, FinishedAt: time.Now()}}
+		assistant := tui.Message{ID: "answer", Role: "assistant", Text: answer, Divider: &tui.TurnDividerView{Elapsed: 12 * time.Second, FinishedAt: time.Now()}}
 		if *scene == "conversation" || *scene == "model" {
 			assistant.ToolGroup = exampleToolGroup()
 		}

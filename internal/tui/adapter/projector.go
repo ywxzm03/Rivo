@@ -15,9 +15,9 @@ func encodeToolArguments(arguments map[string]any) string {
 	if arguments == nil {
 		return "{}"
 	}
-	data, err := json.MarshalIndent(arguments, "", "  ")
+	data, err := json.Marshal(arguments)
 	if err != nil {
-		return fmt.Sprintf("%v", arguments)
+		return ""
 	}
 	return string(data)
 }
@@ -58,7 +58,7 @@ func assistantContent(message llm.AssistantMessage) (string, []tui.ThinkingBlock
 		case llm.TextContent:
 			text += content.Text
 		case llm.ThinkingContent:
-			blocks = append(blocks, tui.ThinkingBlockView{Index: index, Text: content.Thinking, Tokens: max(0, len(content.Thinking)/4), TokensExact: false})
+			blocks = append(blocks, tui.ThinkingBlockView{Index: index, Text: content.Thinking})
 		case llm.ToolCall:
 			calls = append(calls, content)
 		}
@@ -99,22 +99,12 @@ func (r *Runtime) groupAnchorLocked() (int, *tui.ToolGroupView) {
 }
 
 func (r *Runtime) newToolGroupLocked(anchorID string) *tui.ToolGroupView {
-	return &tui.ToolGroupView{ID: anchorID + "/tools", Active: true}
-}
-
-func cloneToolGroup(group *tui.ToolGroupView) *tui.ToolGroupView {
-	if group == nil {
-		return nil
-	}
-	copy := *group
-	copy.Calls = append([]tui.ToolCallView(nil), group.Calls...)
-	copy.Thinking = append([]tui.ThinkingBlockView(nil), group.Thinking...)
-	return &copy
+	return &tui.ToolGroupView{ID: anchorID + "/tools"}
 }
 
 func (r *Runtime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
-		return cloneToolGroup(current)
+		return current.Clone()
 	}
 	group := r.newToolGroupLocked(anchorID)
 	r.activeToolAnchorID = anchorID
@@ -123,14 +113,14 @@ func (r *Runtime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
 			return group
 		}
 	}
-	r.upsertLocked(tui.Message{ID: anchorID, Role: "assistant", ToolGroup: cloneToolGroup(group)})
+	r.upsertLocked(tui.Message{ID: anchorID, Role: "assistant", ToolGroup: group.Clone()})
 	return group
 }
 
 func (r *Runtime) setToolGroupLocked(group *tui.ToolGroupView) {
 	index, _ := r.groupAnchorLocked()
 	if index >= 0 {
-		r.messages[index].ToolGroup = cloneToolGroup(group)
+		r.messages[index].ToolGroup = group.Clone()
 		r.messages[index].Revision++
 	}
 }
@@ -149,7 +139,6 @@ func findToolCall(group *tui.ToolGroupView, id string) int {
 func (r *Runtime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.ThinkingBlockView, round int, active bool) {
 	for _, block := range blocks {
 		block.Round = round
-		block.Active = active
 		replaced := false
 		for i := range group.Thinking {
 			if group.Thinking[i].Round == round && group.Thinking[i].Index == block.Index {
@@ -167,7 +156,6 @@ func (r *Runtime) updateThinkingLocked(group *tui.ToolGroupView, blocks []tui.Th
 		if group.Thinking[i].Round != round {
 			continue
 		}
-		group.Thinking[i].Active = active
 	}
 }
 
@@ -176,16 +164,12 @@ func (r *Runtime) sealToolGroupLocked() {
 	if index < 0 || current == nil {
 		return
 	}
-	group := cloneToolGroup(current)
+	group := current.Clone()
 	for i := range group.Calls {
 		if group.Calls[i].Status == tui.ToolPending {
 			group.Calls[i].Status = tui.ToolInterrupted
 		}
 	}
-	for i := range group.Thinking {
-		group.Thinking[i].Active = false
-	}
-	group.Active, group.Sealed = false, true
 	r.messages[index].ToolGroup = group
 	r.messages[index].Revision++
 	r.activeToolAnchorID = ""
@@ -247,8 +231,6 @@ func (r *Runtime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message {
 	}
 	if start := r.toolStarted[event.ToolCallID]; !start.IsZero() {
 		group.Calls[index].StartedAt = start
-		group.Calls[index].Elapsed = time.Since(start)
-		group.Calls[index].EndedAt = time.Now()
 	}
 	delete(r.toolStarted, event.ToolCallID)
 	r.setToolGroupLocked(group)
@@ -281,7 +263,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 	text, blocks, calls := assistantContent(message)
 	group := (*tui.ToolGroupView)(nil)
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
-		group = cloneToolGroup(current)
+		group = current.Clone()
 	}
 	round := r.assistantTurn
 	// 参数是否写完：toolcall_end 或后续执行事件都会把它标成 true
@@ -306,7 +288,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 		r.setToolGroupLocked(group)
 	}
 	if stream != nil {
-		switch current := stream.(type) {
+		switch stream.(type) {
 		case llm.AssistantMessageThinkingStartEvent, llm.AssistantMessageThinkingDeltaEvent, llm.AssistantMessageThinkingEndEvent:
 			if group == nil {
 				group = r.ensureToolGroupLocked(id)
@@ -319,27 +301,26 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 				r.setToolGroupLocked(group)
 				r.sealToolGroupLocked()
 			}
-			_ = current
 		}
 	}
 	converted := tui.Message{ID: id, Role: "assistant", Text: text}
 	if group != nil {
 		if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
 			if r.messages[index].ID == id {
-				converted.ToolGroup = cloneToolGroup(current)
+				converted.ToolGroup = current.Clone()
 			} else if strings.TrimSpace(text) == "" {
 				// 连续 assistant turn 属于同一个紧凑工具组，thinking 流继续写入原锚点
 				converted = r.messages[index]
-				converted.ToolGroup = cloneToolGroup(current)
+				converted.ToolGroup = current.Clone()
 			}
 		}
 	}
 	if converted.ToolGroup == nil {
 		if index := r.messageIndexLocked(id); index >= 0 {
-			converted.ToolGroup = cloneToolGroup(r.messages[index].ToolGroup)
+			converted.ToolGroup = r.messages[index].ToolGroup.Clone()
 		}
 	}
-	return converted, converted.Text != "" || converted.ToolGroup != nil || converted.Thinking != ""
+	return converted, converted.Text != "" || converted.ToolGroup != nil
 }
 
 func (r *Runtime) messageIndexLocked(id string) int {
@@ -384,15 +365,11 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 	groupIndex := -1
 	seal := func() {
 		if groupIndex >= 0 && group != nil {
-			copy := cloneToolGroup(group)
-			copy.Active, copy.Sealed = false, true
+			copy := group.Clone()
 			for i := range copy.Calls {
 				if copy.Calls[i].Status == tui.ToolPending {
 					copy.Calls[i].Status = tui.ToolInterrupted
 				}
-			}
-			for i := range copy.Thinking {
-				copy.Thinking[i].Active = false
 			}
 			projected[groupIndex].ToolGroup = copy
 		}
@@ -426,7 +403,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 					if text != "" || len(thinking) > 0 || aborted {
 						converted := tui.Message{ID: id, Role: "assistant", Text: text, Aborted: aborted}
 						if len(thinking) > 0 {
-							converted.ToolGroup = &tui.ToolGroupView{ID: id + "/tools", Thinking: thinking, Sealed: true}
+							converted.ToolGroup = &tui.ToolGroupView{ID: id + "/tools", Thinking: thinking}
 						}
 						projected = append(projected, converted)
 					}
@@ -435,7 +412,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 				if group == nil {
 					group = &tui.ToolGroupView{ID: id + "/tools"}
 					groupIndex = len(projected)
-					projected = append(projected, tui.Message{ID: id, Role: "assistant", Text: text, Aborted: aborted, ToolGroup: cloneToolGroup(group)})
+					projected = append(projected, tui.Message{ID: id, Role: "assistant", Text: text, Aborted: aborted, ToolGroup: group.Clone()})
 				} else {
 					projected[groupIndex].Text += text
 					if aborted {
@@ -455,12 +432,12 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 					view.ArgsComplete = true
 					group.Calls = append(group.Calls, view)
 				}
-				projected[groupIndex].ToolGroup = cloneToolGroup(group)
+				projected[groupIndex].ToolGroup = group.Clone()
 			case llm.ToolResultMessage:
 				if group == nil {
 					group = &tui.ToolGroupView{ID: id + "/tools"}
 					groupIndex = len(projected)
-					projected = append(projected, tui.Message{ID: id, Role: "assistant", ToolGroup: cloneToolGroup(group)})
+					projected = append(projected, tui.Message{ID: id, Role: "assistant", ToolGroup: group.Clone()})
 				}
 				toolIndex := findToolCall(group, current.ToolCallID)
 				if toolIndex < 0 {
@@ -474,7 +451,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 				if current.IsError {
 					group.Calls[toolIndex].Status = tui.ToolError
 				}
-				projected[groupIndex].ToolGroup = cloneToolGroup(group)
+				projected[groupIndex].ToolGroup = group.Clone()
 			}
 		}
 	}

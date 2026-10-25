@@ -74,7 +74,7 @@ func TestAgentEndSendsOnlyChangedBlocksWithLongHistory(t *testing.T) {
 	var sent []tea.Msg
 	r := &Runtime{turnStarted: time.Now().Add(-2 * time.Second), send: func(msg tea.Msg) { sent = append(sent, msg) }}
 	for i := 0; i < 10000; i++ {
-		r.upsertLocked(tui.Message{ID: fmt.Sprint(i), Role: "assistant", ToolGroup: &tui.ToolGroupView{Sealed: true}})
+		r.upsertLocked(tui.Message{ID: fmt.Sprint(i), Role: "assistant", ToolGroup: &tui.ToolGroupView{}})
 	}
 	r.upsertLocked(tui.Message{ID: "final", Role: "assistant", Text: "answer"})
 	_ = r.handleEvent(llm.AgentEndEvent{})

@@ -236,7 +236,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "up":
 		// 部分 macOS 终端把 Option+Up 发成普通 Up，有可见 steering 时优先撤回
-		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy {
+		if isDarwin(runtime.GOOS) && m.busy {
 			restored := m.restoreQueuedSteering()
 			if restored > 0 {
 				m.layout()
@@ -251,7 +251,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		line := m.editor.LineInfo()
 		if m.editor.Line() == m.editor.LineCount()-1 && line.RowOffset == line.Height-1 {
 			// 部分 macOS 终端把 Option+Down 发成普通 Down，有可见 follow-up 时优先撤回
-			if shouldRestoreFollowUpOnPlainDown(runtime.GOOS) && m.busy && len(m.state.FollowUp) > 0 {
+			if isDarwin(runtime.GOOS) && m.busy && len(m.state.FollowUp) > 0 {
 				if restored := m.restoreQueuedFollowUp(); restored > 0 {
 					m.layout()
 					return nil
@@ -272,11 +272,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-func shouldRestoreSteeringOnPlainUp(goos string) bool {
-	return goos == "darwin"
-}
-
-func shouldRestoreFollowUpOnPlainDown(goos string) bool {
+// isDarwin 决定 Alt+方向键在 macOS 上是否用于恢复队列，其余平台交给终端处理
+func isDarwin(goos string) bool {
 	return goos == "darwin"
 }
 

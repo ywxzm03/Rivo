@@ -70,7 +70,7 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess}}, Sealed: true}
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
 	first := len(m.lastToolHits)
@@ -146,7 +146,7 @@ func TestLayout(t *testing.T) {
 	for _, size := range [][2]int{{120, 30}, {80, 24}, {60, 15}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			m := testModel(size[0], size[1])
-			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Thinking: "Let me think", Text: "```go\n" + strings.Repeat("long_code", 40), Elapsed: 12 * time.Second}}
+			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Text: "```go\n" + strings.Repeat("long_code", 40)}}
 			m.refreshTranscript()
 			assertFrame(t, m)
 			for i, line := range strings.Split(m.renderMessage(m.state.Messages[0]), "\n") {
@@ -412,7 +412,7 @@ func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
 }
 
 func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
-	if !shouldRestoreSteeringOnPlainUp(runtime.GOOS) {
+	if !isDarwin(runtime.GOOS) {
 		t.Skip("plain Up fallback is macOS-specific")
 	}
 	m := testModel(80, 24)
@@ -437,8 +437,8 @@ func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
 		{goos: "linux", want: false},
 		{goos: "windows", want: false},
 	} {
-		if got := shouldRestoreSteeringOnPlainUp(test.goos); got != test.want {
-			t.Fatalf("shouldRestoreSteeringOnPlainUp(%q) = %v, want %v", test.goos, got, test.want)
+		if got := isDarwin(test.goos); got != test.want {
+			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
 		}
 	}
 }
@@ -549,7 +549,7 @@ func TestFollowUpDequeueKeyVariants(t *testing.T) {
 }
 
 func TestPlainDownWithVisibleFollowUpFallsBackToDequeue(t *testing.T) {
-	if !shouldRestoreFollowUpOnPlainDown(runtime.GOOS) {
+	if !isDarwin(runtime.GOOS) {
 		t.Skip("plain Down fallback is macOS-specific")
 	}
 	m := testModel(80, 24)
@@ -573,8 +573,8 @@ func TestPlainDownFollowUpFallbackIsMacOSOnly(t *testing.T) {
 		{goos: "linux", want: false},
 		{goos: "windows", want: false},
 	} {
-		if got := shouldRestoreFollowUpOnPlainDown(test.goos); got != test.want {
-			t.Fatalf("shouldRestoreFollowUpOnPlainDown(%q) = %v, want %v", test.goos, got, test.want)
+		if got := isDarwin(test.goos); got != test.want {
+			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
 		}
 	}
 }

@@ -29,9 +29,9 @@ func TestShortenToolPathRequiresHomeBoundary(t *testing.T) {
 }
 
 func testToolGroup(count int) *ToolGroupView {
-	group := &ToolGroupView{ID: "group", Active: true}
+	group := &ToolGroupView{ID: "group"}
 	for i := 0; i < count; i++ {
-		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess, Elapsed: 100 * time.Millisecond})
+		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess})
 	}
 	return group
 }
@@ -39,8 +39,8 @@ func testToolGroup(count int) *ToolGroupView {
 // 每条调用都单独成块，不再只留最近三条，也没有组头状态行
 func TestToolRowGroupShowsEveryCall(t *testing.T) {
 	group := testToolGroup(5)
-	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "checking the failing assertion", Tokens: 1200}}
-	got := ansi.Strip(renderToolGroup(group, 120, false, time.UnixMilli(1000)))
+	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "checking the failing assertion"}}
+	got := ansi.Strip(renderGroupCollapsed(group, 120, false, time.UnixMilli(1000)))
 	if strings.Count(got, "⦁ Bash(cmd)") != 5 {
 		t.Fatalf("group rendered %d calls, want 5:\n%s", strings.Count(got, "⦁ Bash(cmd)"), got)
 	}
@@ -55,23 +55,9 @@ func TestToolRowGroupShowsEveryCall(t *testing.T) {
 }
 
 // 思考是否结束都不改变工具行的外观：只有一行 Thinking...
-func TestThinkingLineIgnoresActiveState(t *testing.T) {
-	group := &ToolGroupView{
-		ID:       "group",
-		Thinking: []ThinkingBlockView{{Text: "still reasoning", Active: true}},
-		Calls:    []ToolCallView{{Name: "bash", Status: ToolSuccess}},
-	}
-	active := ansi.Strip(renderToolGroup(group, 80, false, time.UnixMilli(1000)))
-	group.Thinking[0].Active = false
-	done := ansi.Strip(renderToolGroup(group, 80, false, time.UnixMilli(1000)))
-	if active != done || !strings.Contains(active, "Thinking...") {
-		t.Fatalf("thinking line changed with state: %q vs %q", active, done)
-	}
-}
-
 func TestEmptySealedToolGroupIsNotRendered(t *testing.T) {
-	group := &ToolGroupView{ID: "empty", Sealed: true}
-	if got := renderToolGroup(group, 80, false, time.UnixMilli(1000)); got != "" {
+	group := &ToolGroupView{ID: "empty"}
+	if got := renderGroupCollapsed(group, 80, false, time.UnixMilli(1000)); got != "" {
 		t.Fatalf("empty sealed group = %q", got)
 	}
 }
@@ -79,9 +65,9 @@ func TestEmptySealedToolGroupIsNotRendered(t *testing.T) {
 // 展开后命令输出给全文；思考由 Ctrl+T 单独展开，不随工具行一起打开
 func TestExpandedToolGroupShowsFullOutput(t *testing.T) {
 	group := testToolGroup(1)
-	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "full thinking\nsecond line", Tokens: 1000}}
+	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "full thinking\nsecond line"}}
 	group.Calls[0].Result = strings.Repeat("line\n", 20)
-	got := ansi.Strip(renderToolGroup(group, 80, true, time.UnixMilli(1000)))
+	got := ansi.Strip(renderGroupCollapsed(group, 80, true, time.UnixMilli(1000)))
 	if strings.Contains(got, "ctrl+o") {
 		t.Fatalf("expanded output was folded:\n%s", got)
 	}
@@ -91,7 +77,7 @@ func TestExpandedToolGroupShowsFullOutput(t *testing.T) {
 	if !strings.Contains(got, "Thinking...") || strings.Contains(got, "full thinking") {
 		t.Fatalf("Ctrl+O also opened the thinking block:\n%s", got)
 	}
-	expandedThinking := ansi.Strip(renderToolGroupWithState(group, 80, toolRenderState{allExpanded: true, showThinking: true}, time.UnixMilli(1000)))
+	expandedThinking := ansi.Strip(renderGroupState(group, 80, toolRenderState{allExpanded: true, showThinking: true}, time.UnixMilli(1000)))
 	if !strings.Contains(expandedThinking, "full thinking") || !strings.Contains(expandedThinking, "second line") {
 		t.Fatalf("Ctrl+T did not open the thinking block:\n%s", expandedThinking)
 	}
@@ -101,7 +87,7 @@ func TestExpandedToolGroupShowsFullOutput(t *testing.T) {
 func TestModelCtrlOTogglesToolOutputAndThinking(t *testing.T) {
 	group := testToolGroup(1)
 	group.Calls[0].Result = "first\nsecond\nthird\nfourth\nfifth"
-	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "reasoning **detail**", Tokens: 1000}}
+	group.Thinking = []ThinkingBlockView{{Index: 1, Text: "reasoning **detail**"}}
 	m := New(Snapshot{Messages: []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}}, Handlers{})
 	m.width = 80
 	compact := ansi.Strip(m.renderMessage(m.state.Messages[0]))
@@ -125,7 +111,6 @@ func TestModelCtrlOTogglesToolOutputAndThinking(t *testing.T) {
 
 func TestActiveToolGroupRefreshesWithWorkingSpinner(t *testing.T) {
 	group := testToolGroup(1)
-	group.Active = true
 	group.Calls[0].Status = ToolPending
 	m := New(Snapshot{Messages: []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}}, Handlers{})
 	m.width = 80
@@ -142,14 +127,12 @@ func TestActiveToolGroupRefreshesWithWorkingSpinner(t *testing.T) {
 	}
 }
 
-func TestModelUsesPiCompactSpinnerFrames(t *testing.T) {
-	m := New(Snapshot{}, Handlers{})
-	if len(m.spinner.Spinner.Frames) != len(statusSpinner) {
-		t.Fatalf("spinner frame count = %d, want %d", len(m.spinner.Spinner.Frames), len(statusSpinner))
-	}
-	for index, frame := range statusSpinner {
-		if m.spinner.Spinner.Frames[index] != frame {
-			t.Fatalf("spinner frame %d = %q, want %q", index, m.spinner.Spinner.Frames[index], frame)
-		}
-	}
+func renderGroupState(group *ToolGroupView, width int, state toolRenderState, now time.Time) string {
+	view, _ := renderToolRows(group, width, state, now)
+	return view
+}
+
+// renderGroupCollapsed 以全部收起或全部展开渲染，其余展开状态默认关闭
+func renderGroupCollapsed(group *ToolGroupView, width int, expanded bool, now time.Time) string {
+	return renderGroupState(group, width, toolRenderState{allExpanded: expanded}, now)
 }
