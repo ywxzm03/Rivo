@@ -63,7 +63,7 @@ func (m *Model) completionRows(count int) int {
 }
 
 // completionIndent 是候选列表相对输入框的缩进，与斜杠命令的视觉层次对齐
-const completionIndent = "   "
+const completionIndent = "  "
 
 func (m *Model) completionView() string {
 	items := m.completionItems()
