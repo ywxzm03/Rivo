@@ -16,6 +16,9 @@ import (
 
 const jumpToBottomLabel = " Jump to bottom ↓ "
 
+// branchIcon 是 git 分支图标（Nerd Font octicon git-branch），放在分支名左侧
+const branchIcon = "\uf418"
+
 type jumpPillBounds struct {
 	left, right, y int
 }
@@ -335,7 +338,8 @@ func (m *Model) footer() string {
 		}
 	}
 	if m.state.Branch != "" {
-		cwd += " [" + m.state.Branch + "]"
+		// 分支前用 git 图标，与目录之间用小点分隔
+		cwd += " • " + branchIcon + " " + m.state.Branch
 	}
 	left := colored(dimColor, ansi.Truncate(cwd, m.width, "…"))
 	model := m.currentModel()

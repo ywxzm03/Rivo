@@ -988,8 +988,8 @@ func TestFooterSingleLine(t *testing.T) {
 	if ansi.StringWidth(footer) != 120 {
 		t.Fatalf("footer width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(footer), footer)
 	}
-	if !strings.HasPrefix(footer, "/project/Rivo [feat(tui)/fullscreen-tui]") {
-		t.Fatalf("footer should start with cwd [branch]: %q", footer)
+	if !strings.HasPrefix(footer, "/project/Rivo • \uf418 feat(tui)/fullscreen-tui") {
+		t.Fatalf("footer should start with cwd • icon branch: %q", footer)
 	}
 	if !strings.HasSuffix(footer, "model-00 • high") {
 		t.Fatalf("footer should end with model and thinking: %q", footer)
@@ -1000,8 +1000,8 @@ func TestFooterWithoutBranch(t *testing.T) {
 	m := testModel(120, 30)
 	m.state.Branch = ""
 	footer := ansi.Strip(m.footer())
-	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "[") {
-		t.Fatalf("empty branch should drop brackets: %q", footer)
+	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "\uf418") || strings.Contains(footer, "Rivo •") {
+		t.Fatalf("empty branch should drop the separator and icon: %q", footer)
 	}
 }
 
