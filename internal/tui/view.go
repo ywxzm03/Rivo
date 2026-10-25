@@ -189,12 +189,15 @@ func (m *Model) frameLines() []string {
 			lines = append(lines, splitFrameLines(completions)...)
 		}
 		label := ""
+		borderColor := inputBorder
 		if m.busy {
+			// 运行中的旋转器与状态文字用主题紫，与选中态一致
 			label = m.spinner.View() + " " + m.status
+			borderColor = accentColor
 		} else if m.status != "" {
 			label = m.status
 		}
-		border := rule(m.width, label, inputBorder, false)
+		border := rule(m.width, label, borderColor, false)
 		if m.copyNotice {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"

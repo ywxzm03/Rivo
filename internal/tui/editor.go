@@ -62,6 +62,9 @@ func (m *Model) completionRows(count int) int {
 	return min(count, min(5, room))
 }
 
+// completionIndent 是候选列表相对输入框的缩进，与斜杠命令的视觉层次对齐
+const completionIndent = "    "
+
 func (m *Model) completionView() string {
 	items := m.completionItems()
 	rows := m.completionRows(len(items))
@@ -77,10 +80,11 @@ func (m *Model) completionView() string {
 			prefix, color = "❯ ", accentColor
 		}
 		primary := min(32, max(10, m.width/3))
-		name := prefix + command.name
-		line := colored(color, name)
+		// 整块右移，候选名不贴左边界；缩进不参与列宽计算，描述列仍然对齐
+		label := prefix + command.name
+		line := completionIndent + colored(color, label)
 		if m.width > primary+12 {
-			line += strings.Repeat(" ", max(1, primary-ansi.StringWidth(name))) + colored(mutedColor, command.description)
+			line += strings.Repeat(" ", max(1, primary-ansi.StringWidth(label))) + colored(mutedColor, command.description)
 		}
 		lines = append(lines, ansi.Truncate(line, m.width, "…"))
 	}
