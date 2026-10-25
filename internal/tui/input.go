@@ -122,6 +122,7 @@ func (r *inputReader) Read(dst []byte) (int, error) {
 		}
 		if len(r.pending) > 0 {
 			r.ready, r.pending = stripMalformedMouse(r.pending)
+			// 规范化必须在交给 Bubble Tea 前完成，未知 CSI 变体会被直接丢弃
 			if len(r.ready) > 0 {
 				continue
 			}
@@ -324,20 +325,30 @@ func rawMouseWheel(msg tea.KeyMsg) (int, bool) {
 	return 0, false
 }
 
-// isSteeringDequeueKey 接受标准键值和常见 Alt CSI 片段
+// isSteeringDequeueKey 识别 Shift+Left,用于把 steering 队列撤回输入框
 func isSteeringDequeueKey(msg tea.KeyMsg) bool {
-	if msg.String() == "alt+up" {
+	return isShiftArrow(msg, tea.KeyShiftLeft)
+}
+
+// isFollowUpDequeueKey 识别 Shift+Right,用于把 follow-up 队列撤回输入框
+func isFollowUpDequeueKey(msg tea.KeyMsg) bool {
+	return isShiftArrow(msg, tea.KeyShiftRight)
+}
+
+// isShiftArrow 兼容终端把 Shift+方向键发成普通方向键加 Shift 修饰的情况
+func isShiftArrow(msg tea.KeyMsg, key tea.KeyType) bool {
+	if msg.Type == key {
 		return true
 	}
-	if !msg.Alt || msg.Type != tea.KeyRunes {
-		return false
+	// 部分终端只给 KeyRunes 加修饰,用语义字符串兜底
+	return msg.Alt == false && msg.String() == shiftArrowName(key)
+}
+
+func shiftArrowName(key tea.KeyType) string {
+	if key == tea.KeyShiftLeft {
+		return "shift+left"
 	}
-	switch string(msg.Runes) {
-	case "[A", "OA", "[1;3A", "[1;3a", "[1;9A", "[1;9a":
-		return true
-	default:
-		return false
-	}
+	return "shift+right"
 }
 
 func isTerminalControlKey(msg tea.KeyMsg) bool {

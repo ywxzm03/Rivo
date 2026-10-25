@@ -61,10 +61,22 @@ func dirName(cwd string) string {
 
 // New 在 dir 下创建新会话，header 只在内存，正式发布延迟到首条对话消息
 func New(cwd, dir string) *SessionManager {
+	return newWithID(cwd, dir, newSessionID())
+}
+
+// NewWithID 创建指定 ID 且延迟发布的会话
+func NewWithID(cwd, dir, id string) (*SessionManager, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	return newWithID(cwd, dir, id), nil
+}
+
+func newWithID(cwd, dir, id string) *SessionManager {
 	header := Header{
 		Type:      TypeSession,
 		Version:   CurrentVersion,
-		ID:        newSessionID(),
+		ID:        id,
 		Timestamp: nowRFC3339(),
 		Cwd:       cwd,
 	}
@@ -254,6 +266,9 @@ func (m *SessionManager) Delete() error {
 }
 
 func (m *SessionManager) ID() string { return m.header.ID }
+
+// Cwd 返回会话 header 记录的工作目录
+func (m *SessionManager) Cwd() string { return m.header.Cwd }
 
 func (m *SessionManager) Warnings() []string {
 	m.persistMu.Lock()

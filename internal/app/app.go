@@ -36,11 +36,11 @@ type App struct {
 	cfg            Config
 	onEvent        llm.AgentEventSink
 	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
-	loader    *prompt.Loader
-	cwd       string
-	tools     []llm.Tool
-	subagents *subagent.Manager
-	// subagentRunner 持有子 agent 的默认 model 与 stream,applyModel 时同步
+	loader *prompt.Loader
+	cwd    string
+	tools  []llm.Tool
+	// subagents 是子任务管理器，subagentRunner 持有子 agent 的默认 model 与 stream
+	subagents      *subagent.Manager
 	subagentRunner *agenttool.Runner
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
@@ -61,11 +61,11 @@ func (a *App) Warnings() []string {
 // Open 恢复指定会话文件：按投影记录的 Provider/Model 装配运行链，
 // 模型解析失败时回退 env 配置并记录警告
 func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
-	cwd, err := os.Getwd()
+	commandCwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
 	}
-	sm, err := session.Open(path, cwd)
+	sm, err := session.Open(path, commandCwd)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +137,30 @@ func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App
 	return newApp(cfg, sm, onEvent)
 }
 
+// NewWithSessionID 创建指定 ID 且延迟发布的会话
+func NewWithSessionID(cfg Config, id string, onEvent llm.AgentEventSink) (*App, error) {
+	return NewWithSessionIDInDir(cfg, "", id, onEvent)
+}
+
+// NewWithSessionIDInDir 在指定目录创建稳定 ID 的会话
+func NewWithSessionIDInDir(cfg Config, dir, id string, onEvent llm.AgentEventSink) (*App, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+	}
+	if dir == "" {
+		dir, err = session.DefaultDir(cwd)
+		if err != nil {
+			return nil, err
+		}
+	}
+	sm, err := session.NewWithID(cwd, dir, id)
+	if err != nil {
+		return nil, err
+	}
+	return newApp(cfg, sm, onEvent)
+}
+
 // newApp 组装编排层与 Agent，模型取自 env 配置
 func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
 	return newAppWithModel(cfg, cfg.ProviderID, cfg.ModelID, sm, onEvent)
@@ -164,12 +188,33 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	}
 	sm.AttachFileHistory(agentDir)
 
+	// 1.资源加载：会话恢复使用 header cwd，新会话使用当前进程 cwd
+	cwd := sm.Cwd()
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("app: failed to get working directory: %w", err)
+		}
+	}
+
 	manager := subagent.NewManager(taskpkg.NewStore(), nil)
 	var notificationMu sync.Mutex
 	var notificationBatch int
-	tools := []llm.Tool{&tool.Read{SupportsImages: model.SupportsImages}, &tool.Ls{}, &tool.Grep{}, &tool.Find{}, &tool.Bash{Background: tool.NewBackgroundBashRunner(manager.Store())}, &tool.Write{History: sm.FileHistory()}, &tool.Edit{History: sm.FileHistory()}, agenttool.New(manager), sendmessagetool.New(manager), taskstoptool.New(manager.Store())}
+	tools := []llm.Tool{
+		&tool.Read{SupportsImages: model.SupportsImages, WorkingDir: cwd},
+		&tool.Ls{WorkingDir: cwd},
+		&tool.Grep{WorkingDir: cwd},
+		&tool.Find{WorkingDir: cwd},
+		&tool.Bash{WorkingDir: cwd, Background: tool.NewBackgroundBashRunner(manager.Store())},
+		&tool.Write{History: sm.FileHistory(), WorkingDir: cwd},
+		&tool.Edit{History: sm.FileHistory(), WorkingDir: cwd},
+		agenttool.New(manager),
+		sendmessagetool.New(manager),
+		taskstoptool.New(manager.Store()),
+	}
 	if runtime.GOOS == "windows" {
-		tools = append(tools, &tool.PowerShell{})
+		tools = append(tools, &tool.PowerShell{WorkingDir: cwd})
 	}
 
 	coord := NewCoordinator(sm, onEvent)
@@ -195,15 +240,11 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
 	}
 
-	// 1.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
-	}
+	// 2.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
 	loader := prompt.NewLoader(cwd, agentDir)
 	loader.Reload()
 
-	// 2.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
+	// 3.基线分节交给编排层，请求前由它 diff 并落盘 system 消息
 	coord.SetPromptSections(prompt.BuildSections(prompt.Options{
 		Cwd:          cwd,
 		Tools:        tools,
@@ -241,12 +282,13 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		onEvent:        onEvent,
 		loader:         loader,
 		cwd:            cwd,
-		tools:          tools,
 		subagents:      manager,
 		subagentRunner: runner,
+		tools:          tools,
 	}, nil
 }
 
+// subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息
 func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Message {
 	if len(notifications) == 0 {
 		return nil
@@ -264,7 +306,7 @@ func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Me
 	return result
 }
 
-// SubagentStore exposes the root task store for TUI task projections and controls.
+// SubagentStore 暴露根任务存储，供 TUI 投影与操作
 func (a *App) SubagentStore() *taskpkg.Store {
 	if a.subagents == nil {
 		return nil
@@ -283,6 +325,16 @@ func (a *App) ExitSubagentView() {
 	}
 }
 
+// ShutdownSubagents 终止所有仍在运行的子任务与后台命令。
+// 进程退出时调用:子任务 lifecycle 与请求解绑,不主动终止会变成孤儿进程
+func (a *App) ShutdownSubagents() int {
+	store := a.SubagentStore()
+	if store == nil {
+		return 0
+	}
+	return store.KillAllRunningTasks()
+}
+
 func (a *App) EvictSubagent(taskID string) bool {
 	store := a.SubagentStore()
 	return store != nil && store.Evict(taskID)
@@ -297,7 +349,7 @@ func (a *App) StopSubagent(taskID string) error {
 	return err
 }
 
-// ContinueSubagent resumes a terminal child while keeping its stable task ID.
+// ContinueSubagent 用同一个稳定任务 ID 恢复终态子任务
 func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (taskpkg.AgentLaunched, error) {
 	if a.subagents == nil {
 		return taskpkg.AgentLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
@@ -305,10 +357,14 @@ func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (task
 	return a.subagents.Continue(ctx, taskID, prompt)
 }
 
-// QueueSubagentMessage adds structured input to a running child FIFO.
-func (a *App) QueueSubagentMessage(taskID string, message llm.UserMessage) error {
+// QueueSubagentMessage 把输入排进运行中子任务的队列。
+// followUp 为真时进 follow-up 队列(当前轮结束后注入),否则进 steering 队列
+func (a *App) QueueSubagentMessage(taskID string, message llm.UserMessage, followUp bool) error {
 	if a.subagents == nil {
 		return fmt.Errorf("app: subagent manager is unavailable")
+	}
+	if followUp {
+		return a.subagents.Store().EnqueueFollowUpMessage(taskID, message)
 	}
 	return a.subagents.Store().EnqueuePendingMessage(taskID, message)
 }
@@ -338,9 +394,15 @@ func (a *App) ContextView() compaction.ContextView { return a.session.BuildConte
 // Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器
 func (a *App) Tree() session.TreeSnapshot { return a.session.Tree() }
 
+// Cwd 返回加载项目资源时使用的工作目录
+func (a *App) Cwd() string { return a.cwd }
+
 func (a *App) SessionID() string { return a.session.ID() }
 
 func (a *App) SessionName() string { return a.session.Name() }
+
+// SessionPath 返回会话 transcript 的绝对路径，尚未落盘时也是预定文件名
+func (a *App) SessionPath() string { return a.session.Path() }
 
 func (a *App) TakeSteering() []string {
 	if a == nil || a.agent == nil {
@@ -354,6 +416,27 @@ func (a *App) TakeSteeringMessages() []llm.UserMessage {
 		return nil
 	}
 	return a.agent.TakeSteeringMessages()
+}
+
+func (a *App) TakeFollowUp() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeFollowUp()
+}
+
+func (a *App) TakeFollowUpMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.TakeFollowUpMessages()
+}
+
+func (a *App) ClearFollowUp() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.ClearFollowUp()
 }
 
 // Skills 返回当前已发现技能的副本
@@ -385,6 +468,27 @@ func (a *App) SteeringRevision() uint64 {
 	return a.agent.SteeringRevision()
 }
 
+func (a *App) FollowUpMessages() []string {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.FollowUpMessages()
+}
+
+func (a *App) FollowUpUserMessages() []llm.UserMessage {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.FollowUpUserMessages()
+}
+
+func (a *App) FollowUpRevision() uint64 {
+	if a == nil || a.agent == nil {
+		return 0
+	}
+	return a.agent.FollowUpRevision()
+}
+
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
 func (a *App) AutoCompactionEnabled() bool {
 	return a.coordinator != nil && a.coordinator.Compactor != nil
@@ -402,8 +506,8 @@ func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
 }
 
 func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
-	if !llm.ValidThinkingLevel(level) {
-		return fmt.Errorf("unknown thinking level %q", level)
+	if !validThinkingLevel(level) {
+		return fmt.Errorf("unknown effort level %q", level)
 	}
 	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
 		return err
@@ -452,11 +556,6 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 	a.agent.AgentConfig.Model = model
 	a.coordinator.setModel(model)
 	a.agent.StreamFn = streamFn
-	// 子 agent 的默认 model 与 stream 跟随主 agent,否则切换模型后新起的
-	// 子任务会用旧 provider 的 stream 发送新模型 ID
-	if a.subagentRunner != nil {
-		a.subagentRunner.SetModel(model, streamFn)
-	}
 	for _, candidate := range a.agent.AgentContext.Tools {
 		if read, ok := candidate.(*tool.Read); ok {
 			read.SupportsImages = model.SupportsImages
@@ -473,6 +572,16 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 		a.coordinator.Compactor = nil
 	}
 	return nil
+}
+
+func validThinkingLevel(level llm.ThinkingLevel) bool {
+	switch level {
+	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
+		return true
+	default:
+		return false
+	}
 }
 
 // Reload 重读 AGENTS.md 与 skills 并重建基线分节，变更在下次请求前 diff 后追加

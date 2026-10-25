@@ -77,6 +77,21 @@ func (a *App) EnqueueSteeringMessage(input llm.UserMessage) error {
 	return a.coordinator.EnqueueSteeringMessage(input)
 }
 
+var ErrFollowUpUnavailable = errors.New("app: follow-up is unavailable")
+
+func (a *App) EnqueueFollowUp(input string) error {
+	return a.EnqueueFollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+func (a *App) EnqueueFollowUpMessage(input llm.UserMessage) error {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.active == nil || a.active.kind != OperationRun || a.active.closing {
+		return ErrFollowUpUnavailable
+	}
+	return a.coordinator.EnqueueFollowUpMessage(input)
+}
+
 // Start 接受后立即执行操作，一个 App 同时只接受一个会话修改，不隐式排队
 func (a *App) Start(ctx context.Context, request OperationRequest) (*Operation, error) {
 	a.operationMu.Lock()
@@ -157,7 +172,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		a.pendingRequest = nil
-		a.acknowledgePendingSteering(messages)
+		a.acknowledgePendingQueued(messages)
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
@@ -280,39 +295,58 @@ func equalOperationRequest(left, right OperationRequest) bool {
 	return reflect.DeepEqual(left, right)
 }
 
-// continueQueuedSteering 在释放操作所有权前消费已接受的 steering，并关闭收尾窗口
+// continueQueuedSteering 在释放操作所有权前完成收尾：steering 优先，follow-up 后继；
+// 每完成一次后继 run 都重新检查两类队列，避免收尾窗口内新入队的消息被遗留
 func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult) OperationResult {
 	for result.Err == nil && ctx.Err() == nil {
 		a.operationMu.Lock()
-		continueRun := a.active != nil && !a.active.closing && a.agent.HasSteering()
-		if !continueRun && a.active != nil {
-			a.active.closing = true
+		open := a.active != nil && !a.active.closing
+		steering := open && a.agent.HasSteering()
+		followUp := open && !steering && a.agent.HasFollowUp()
+		if !steering && !followUp {
+			// 最终队列检查与关闭收尾窗口必须同处一个临界区，
+			// 否则检查通过后的新入队会留在队列里无人消费
+			if a.active != nil {
+				a.active.closing = true
+			}
+			a.operationMu.Unlock()
+			return result
 		}
 		a.operationMu.Unlock()
-		if !continueRun {
-			break
+		var reply *llm.AssistantMessage
+		var err error
+		if steering {
+			reply, err = a.coordinator.ContinueQueued(ctx)
+		} else {
+			reply, err = a.coordinator.ContinueFollowUp(ctx)
 		}
-		reply, err := a.coordinator.ContinueQueued(ctx)
 		if reply != nil {
 			result.Reply = reply
 		}
 		result.Err = err
 	}
+	a.operationMu.Lock()
+	if a.active != nil {
+		a.active.closing = true
+	}
+	a.operationMu.Unlock()
 	return result
 }
 
-func (a *App) acknowledgePendingSteering(messages []llm.Message) {
+// acknowledgePendingQueued 只确认最近一次 commit 失败恢复的那条队列项；
+// 不按文本跨队列删除，避免同文本 steering/follow-up 互相误删
+func (a *App) acknowledgePendingQueued(messages []llm.Message) {
 	for _, message := range messages {
 		user, ok := message.(llm.UserMessage)
 		if !ok {
 			continue
 		}
-		if a.agent.AcknowledgeSteeringMessage(user) {
+		if a.agent.AcknowledgePendingMessage(user) {
 			continue
 		}
 		if len(user.Content) == 1 {
 			if text, ok := user.Content[0].(llm.TextContent); ok {
-				a.agent.AcknowledgeSteering(text.Text)
+				a.agent.AcknowledgePending(text.Text)
 			}
 		}
 	}

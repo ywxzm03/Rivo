@@ -678,3 +678,86 @@ func TestStoreSnapshotIsolatesNestedSamplingParams(t *testing.T) {
 		t.Fatal("nested sampling params leaked out of the snapshot")
 	}
 }
+
+// 主 agent 退出时必须终止所有运行中的子任务与后台命令,否则会留下孤儿进程
+func TestStoreKillAllRunningTasks(t *testing.T) {
+	store := NewStore()
+	agentID, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bashID, _, err := store.Register(RegisterSpec{Type: TypeBash, Description: "sleep 300"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneID, doneToken, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.CompleteAgent(doneID, doneToken, &AgentResult{AgentID: doneID})
+
+	if killed := store.KillAllRunningTasks(); killed != 2 {
+		t.Fatalf("killed %d tasks, want 2", killed)
+	}
+	for _, id := range []string{agentID, bashID} {
+		task, ok := store.Task(id)
+		if !ok || task.Base().Status != StatusKilled {
+			t.Fatalf("task %s status = %v, want killed", id, task.Base().Status)
+		}
+	}
+	// 已终态的任务不能被改写
+	done, _ := store.Task(doneID)
+	if done.Base().Status != StatusCompleted {
+		t.Fatalf("completed task status = %v, want completed", done.Base().Status)
+	}
+}
+
+// 子任务的 steering 与 follow-up 是两条独立队列
+func TestStoreSubagentHasTwoQueues(t *testing.T) {
+	store := NewStore()
+	id, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steer := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "steer"}}}
+	follow := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "follow"}}}
+	if err := store.EnqueuePendingMessage(id, steer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueFollowUpMessage(id, follow); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.PendingMessages(id); len(got) != 1 || textOf(got[0]) != "steer" {
+		t.Fatalf("steering queue = %+v", got)
+	}
+	if got := store.PendingFollowUpMessages(id); len(got) != 1 || textOf(got[0]) != "follow" {
+		t.Fatalf("follow-up queue = %+v", got)
+	}
+	// 取走一条不能影响另一条
+	if got := store.DrainPendingMessages(id, 1); len(got) != 1 {
+		t.Fatalf("drained steering = %d", len(got))
+	}
+	if got := store.PendingFollowUpMessages(id); len(got) != 1 {
+		t.Fatal("draining steering cleared the follow-up queue")
+	}
+	// 清空 follow-up 不影响 steering
+	if err := store.EnqueuePendingMessage(id, steer); err != nil {
+		t.Fatal(err)
+	}
+	store.ClearFollowUpMessages(id)
+	if got := store.PendingMessages(id); len(got) != 1 {
+		t.Fatal("clearing follow-up cleared steering")
+	}
+	if got := store.PendingFollowUpMessages(id); len(got) != 0 {
+		t.Fatalf("follow-up queue not cleared: %+v", got)
+	}
+}
+
+func textOf(message llm.UserMessage) string {
+	for _, content := range message.Content {
+		if text, ok := content.(llm.TextContent); ok {
+			return text.Text
+		}
+	}
+	return ""
+}

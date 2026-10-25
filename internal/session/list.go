@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,8 @@ const summaryMaxRunes = 80
 // SessionInfo 描述一个可恢复的会话文件
 type SessionInfo struct {
 	Path    string
+	ID      string
+	Cwd     string
 	ModTime time.Time
 	Name    string
 	// Summary 为首条用户消息的截断摘要，无对话内容时为空
@@ -33,6 +36,50 @@ func ListSessions(cwd string) ([]SessionInfo, error) {
 		return nil, err
 	}
 	return listSessionsInDir(dir)
+}
+
+// ListAllSessions 列出 agent 根目录下所有项目的会话
+func ListAllSessions() ([]SessionInfo, error) {
+	root, err := SessionsRoot()
+	if err != nil {
+		return nil, err
+	}
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("session: failed to read session root: %w", err)
+	}
+	var all []SessionInfo
+	var listErrs []error
+	for _, project := range projects {
+		if !project.IsDir() {
+			continue
+		}
+		infos, err := listSessionsInDir(filepath.Join(root, project.Name()))
+		if err != nil {
+			listErrs = append(listErrs, fmt.Errorf("%s: %w", project.Name(), err))
+			continue
+		}
+		all = append(all, infos...)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].ModTime.Equal(all[j].ModTime) {
+			return all[i].Path < all[j].Path
+		}
+		return all[i].ModTime.After(all[j].ModTime)
+	})
+	return all, errors.Join(listErrs...)
+}
+
+// SessionsRoot 返回按 cwd 分组的会话根目录
+func SessionsRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
+	}
+	return filepath.Join(home, ".rivo", "agent", "sessions"), nil
 }
 
 func listSessionsInDir(dir string) ([]SessionInfo, error) {
@@ -53,9 +100,11 @@ func listSessionsInDir(dir string) ([]SessionInfo, error) {
 			continue
 		}
 		path := filepath.Join(dir, f.Name())
-		name, summary := readSessionMetadata(path)
+		id, cwd, name, summary := readSessionMetadata(path)
 		infos = append(infos, SessionInfo{
 			Path:    path,
+			ID:      id,
+			Cwd:     cwd,
 			ModTime: info.ModTime(),
 			Name:    name,
 			Summary: summary,
@@ -76,10 +125,10 @@ const summaryLineLimit = 1 << 20
 
 // readSessionMetadata 有界扫描会话文件，取最新名称与首条用户摘要，
 // 内存占用不随会话内容增长
-func readSessionMetadata(path string) (name, summary string) {
+func readSessionMetadata(path string) (id, cwd, name, summary string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", ""
+		return "", "", "", ""
 	}
 	defer f.Close()
 	reader := bufio.NewReader(f)
@@ -90,6 +139,12 @@ func readSessionMetadata(path string) (name, summary string) {
 			trimmed := bytes.TrimSpace(line)
 			var probe entryLine
 			if json.Unmarshal(trimmed, &probe) == nil {
+				if probe.Type == TypeSession {
+					var header Header
+					if json.Unmarshal(trimmed, &header) == nil {
+						id, cwd = header.ID, header.Cwd
+					}
+				}
 				switch probe.Type {
 				case TypeSessionInfo:
 					var info SessionInfoEntry
@@ -111,7 +166,7 @@ func readSessionMetadata(path string) (name, summary string) {
 			}
 		}
 		if readErr != nil {
-			return name, summary
+			return id, cwd, name, summary
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
 	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 // newSessionFileWithModel 在 dir 下创建一个已落盘、带模型记录的会话，返回文件路径
@@ -74,6 +75,37 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 	if !strings.Contains(string(data), "after resume") {
 		t.Errorf("session file does not contain the appended message; writes went elsewhere")
 	}
+}
+
+func TestOpenUsesSessionHeaderCwd(t *testing.T) {
+	dir := t.TempDir()
+	projectCwd := filepath.Join(t.TempDir(), "foreign-project")
+	if err := os.MkdirAll(projectCwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sm, err := session.NewWithID(projectCwd, dir, "foreign-cwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(sm.Path(), configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Cwd() != projectCwd {
+		t.Fatalf("App.Cwd() = %q, want session cwd %q", a.Cwd(), projectCwd)
+	}
+	for _, candidate := range a.tools {
+		if bash, ok := candidate.(*tool.Bash); ok {
+			if bash.WorkingDir != projectCwd {
+				t.Fatalf("bash working dir = %q, want session cwd %q", bash.WorkingDir, projectCwd)
+			}
+			return
+		}
+	}
+	t.Fatal("bash tool not configured")
 }
 
 func TestOpenFallsBackWhenModelUnknown(t *testing.T) {

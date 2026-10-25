@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -17,42 +19,61 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
-func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr io.Writer) int {
-	cwd, _ := os.Getwd()
-	branchBytes, _ := exec.Command("git", "branch", "--show-current").Output()
-	runtime := adapter.New(cfg, cwd, strings.TrimSpace(string(branchBytes)))
-	var a *app.App
-	var err error
-	if continueRecent {
-		a, err = resumeRecentApp(cfg, runtime.HandleEvent)
-	} else {
-		a, err = app.New(cfg, runtime.HandleEvent)
+func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
+	var runtime *adapter.Runtime
+	// panic 会跳过所有收尾逻辑并让进程直接消失;兜住它,并把子任务一起收掉
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintf(stderr, "Rivo: internal error: %v\n%s\n", recovered, debug.Stack())
+			exitCode = 1
+		}
+		if runtime != nil {
+			runtime.ShutdownSubagents()
+		}
+	}()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: failed to get working directory: %v\n", err)
+		return 2
 	}
+	branch := gitBranch(cwd)
+	runtime = adapter.New(cfg, cwd, branch)
+	a, err := openSessionTarget(cfg, target, runtime.HandleEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
+	if a.Cwd() != cwd {
+		branch = gitBranch(a.Cwd())
+	}
+	runtime.SetProjectContext(a.Cwd(), branch)
 	if msg := a.ModelFallbackMessage(); msg != "" {
 		fmt.Fprintf(stderr, "Rivo: %s\n", msg)
 	}
 	runtime.Attach(a)
 	output := newSerializedOutput(stdout)
-	model := tui.New(runtime.Snapshot(), tui.Handlers{
-		Request:           runtime.Request,
-		Context:           runtime.Context,
-		Cancel:            runtime.Cancel,
-		EnqueueSteering:   runtime.EnqueueSteering,
-		RestoreSteering:   runtime.RestoreSteering,
-		ReadClipboardData: readClipboardData,
-		SubagentRequest:   runtime.SubagentRequest,
-		SubagentSnapshot:  runtime.SubagentSnapshot,
+	model := tui.NewWithInitialPrompt(runtime.Snapshot(), tui.Handlers{
+		Request:                 runtime.Request,
+		Status:                  runtime.Status,
+		Cancel:                  runtime.Cancel,
+		EnqueueSteering:         runtime.EnqueueSteering,
+		EnqueueSteeringMessage:  runtime.EnqueueSteeringMessage,
+		RestoreSteering:         runtime.RestoreSteering,
+		RestoreSteeringMessages: runtime.RestoreSteeringMessages,
+		EnqueueFollowUp:         runtime.EnqueueFollowUp,
+		EnqueueFollowUpMessage:  runtime.EnqueueFollowUpMessage,
+		RestoreFollowUpMessages: runtime.RestoreFollowUpMessages,
+		ClearFollowUp:           runtime.ClearFollowUp,
+		ReadClipboardData:       readClipboardData,
+		SubagentRequest:         runtime.SubagentRequest,
+		SubagentSnapshot:        runtime.SubagentSnapshot,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil
 			}
 			return writeOSC52(output, text)
 		},
-	})
+	}, initialPrompt)
 	input := tui.NewInputReader(stdin)
 	defer input.Close()
 	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(tui.NewCursorWriter(output, model.CursorPosition)), tea.WithAltScreen(), tea.WithMouseAllMotion())
@@ -62,9 +83,19 @@ func runTUI(cfg app.Config, continueRecent bool, stdin, stdout *os.File, stderr 
 	runtime.Wait()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		// Bubble Tea 把 goroutine 内的 panic 转成 ErrProgramPanic,
+		// 原始堆栈只写在它自己的日志里;提示用户去哪里找
+		if errors.Is(err, tea.ErrProgramPanic) {
+			fmt.Fprintf(stderr, "Rivo: 程序内部发生 panic，堆栈见 Bubble Tea 日志（$TMPDIR 下的 bubbletea 日志）\n")
+		}
 		return 1
 	}
 	return 0
+}
+
+func gitBranch(cwd string) string {
+	branchBytes, _ := exec.Command("git", "-C", cwd, "branch", "--show-current").Output()
+	return strings.TrimSpace(string(branchBytes))
 }
 
 // serializedOutput 串行化 Bubble Tea 渲染与 OSC52 fallback 的终端写入

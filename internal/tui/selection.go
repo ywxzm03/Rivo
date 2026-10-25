@@ -71,6 +71,11 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if m.selecting {
 			m.selectionFocus = screenPoint{x: msg.X, y: msg.Y}
 			m.selecting = false
+			// 没有拖动就是一次单击：落在工具行、分组摘要或 Thinking... 上时切换展开
+			if !m.hasSelection() && m.toggleToolHit(msg.Y+m.viewport.YOffset) {
+				m.lastClickAt = time.Time{}
+				return nil
+			}
 			return m.copySelection()
 		}
 	}

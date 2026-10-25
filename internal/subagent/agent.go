@@ -139,7 +139,7 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 		AgentType:       agentType,
 		WorktreePath:    agentTask.WorktreePath,
 		Worktree:        agentTask.Worktree,
-		PendingMessages: taskpkg.CloneUserMessages(agentTask.PendingMessages),
+		PendingMessages: taskpkg.CloneUserMessages(agentTask.PendingSteering),
 		Model:           modelFromState(agentTask), Thinking: agentTask.Thinking, Continuation: true,
 	})
 	if err != nil {
@@ -336,14 +336,22 @@ func (m *Manager) installPendingDrain(taskID string, token uint64, runtime *task
 			return nil
 		}
 		m.updateProgress(taskID, token, event)
-		messages := m.store.DrainPendingMessages(taskID, token)
-		if len(messages) == 0 {
-			return nil
+		// 1.steering 在工具轮次边界注入,模型下一轮就能看到
+		if messages := m.store.DrainPendingMessages(taskID, token); len(messages) > 0 {
+			for i, message := range messages {
+				if err := runtime.Agent.SteerMessage(message); err != nil {
+					m.store.RequeuePendingMessagesFront(taskID, token, messages[i:])
+					return err
+				}
+			}
 		}
-		for i, message := range messages {
-			if err := runtime.Agent.SteerMessage(message); err != nil {
-				m.store.RequeuePendingMessagesFront(taskID, token, messages[i:])
-				return err
+		// 2.follow-up 只在当前轮彻底结束后注入,作为下一轮的用户输入
+		if messages := m.store.DrainPendingFollowUpMessages(taskID, token); len(messages) > 0 {
+			for i, message := range messages {
+				if err := runtime.Agent.FollowUpMessage(message); err != nil {
+					m.store.RequeuePendingFollowUpMessagesFront(taskID, token, messages[i:])
+					return err
+				}
 			}
 		}
 		return nil

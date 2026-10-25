@@ -32,10 +32,13 @@ type SubagentTaskView struct {
 	TotalTokens    int
 	ToolUses       int
 	PendingCount   int
-	Retain         bool
-	Revision       uint64
-	LastActivity   string
-	Messages       []Message
+	// PendingSteering / PendingFollowUp 是该任务两条队列的文本,供子任务视图渲染
+	PendingSteering []string
+	PendingFollowUp []string
+	Retain          bool
+	Revision        uint64
+	LastActivity    string
+	Messages        []Message
 }
 
 type SubagentSnapshot struct {
@@ -48,19 +51,25 @@ type SubagentRequest struct {
 	Kind    string
 	TaskID  string
 	Message *llm.UserMessage
+	// FollowUp 用于 dequeue:true 撤回 follow-up 队列,false 撤回 steering 队列
+	FollowUp bool
 }
 
 type SubagentSnapshotMsg struct {
-	Snapshot       SubagentSnapshot
-	Err            error
+	Snapshot SubagentSnapshot
+	Err      error
+	// RestoreMessage 是请求失败时要还给编辑器的输入
 	RestoreMessage *llm.UserMessage
+	// RestoreMessages 是从子任务队列撤回、要按顺序放回编辑器的输入
+	RestoreMessages []llm.UserMessage
 }
 
 type subagentRefreshMsg struct{}
 
 // startSubagentRefresh 只在没有活动 tick 链时建立唯一刷新链
 func (m *Model) startSubagentRefresh() tea.Cmd {
-	if !hasRunningSubagent(m.state.Subagents.Tasks) || m.handlers.SubagentSnapshot == nil {
+	// 正在查看的任务即使已终态也要续链:首次进入时 transcript 还没加载完
+	if m.handlers.SubagentSnapshot == nil || (!hasRunningSubagent(m.state.Subagents.Tasks) && m.viewingTaskID == "") {
 		m.subagentRefreshRunning = false
 		return nil
 	}
@@ -110,6 +119,7 @@ func (s SubagentSnapshot) sortedTasks() []SubagentTaskView {
 
 func (m *Model) applySubagentSnapshot(snapshot SubagentSnapshot) {
 	previousRows := m.subagentRows()
+	previousPending := m.pendingRows()
 	previousTask, hadPreviousTask := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
 	snapshot = shallowSubagentSnapshot(snapshot)
 	m.state.Subagents = snapshot
@@ -117,7 +127,8 @@ func (m *Model) applySubagentSnapshot(snapshot SubagentSnapshot) {
 		m.selectedTaskID = ""
 	}
 	if m.taskSelector && len(snapshot.Tasks) == 0 {
-		m.taskSelector = false
+		// 列表消失时必须把焦点交回输入框,否则编辑器保持失焦、无法输入
+		m.setTaskFocus(false)
 	}
 	messagesChanged := false
 	if m.viewingTaskID != "" {
@@ -138,7 +149,8 @@ func (m *Model) applySubagentSnapshot(snapshot SubagentSnapshot) {
 			return
 		}
 	}
-	if previousRows != m.subagentRows() {
+	// 队列区行数变化同样会改变 viewport 高度,必须重算布局
+	if previousRows != m.subagentRows() || previousPending != m.pendingRows() {
 		m.layout()
 	}
 	if messagesChanged {
@@ -170,6 +182,33 @@ func findSubagentTask(tasks []SubagentTaskView, id string) (SubagentTaskView, bo
 		}
 	}
 	return SubagentTaskView{}, false
+}
+
+// setTaskFocus 把焦点在输入框与任务列表之间切换。
+// 任务列表获得焦点时输入框失焦,按键不再落到文本上
+func (m *Model) setTaskFocus(focused bool) {
+	// 已在该状态时仍要保证有合法选中,否则列表可能停留在"全都没有选中"
+	if m.taskSelector == focused {
+		if focused && !m.mainSelected && m.selectedTaskID == "" {
+			m.mainSelected = true
+			m.layout()
+		}
+		return
+	}
+	m.taskSelector = focused
+	if focused {
+		m.editor.Blur()
+		m.clearSelection()
+		// 进入列表时光标落在 main 行,与 Claude Code 一致
+		m.mainSelected = true
+		m.selectedTaskID = ""
+	} else {
+		// 离开任务列表后光标回到 main 行,列表不能出现"全都没有选中"的状态
+		m.selectedTaskID = ""
+		m.mainSelected = true
+		m.editor.Focus()
+	}
+	m.layout()
 }
 
 func (m *Model) selectedSubagent() (SubagentTaskView, bool) {
@@ -228,7 +267,9 @@ func (m *Model) enterSelectedSubagent() tea.Cmd {
 	if m.handlers.SubagentRequest == nil {
 		return nil
 	}
-	return m.handlers.SubagentRequest(SubagentRequest{Kind: "enter", TaskID: task.ID})
+	// enter 请求返回的快照已带该任务的 transcript;
+	// 同时续上刷新链,让后续增量也能进来
+	return tea.Batch(m.handlers.SubagentRequest(SubagentRequest{Kind: "enter", TaskID: task.ID}), m.startSubagentRefresh())
 }
 
 func (m *Model) enterSubagentView(id string) {
@@ -242,9 +283,21 @@ func (m *Model) enterSubagentView(id string) {
 	m.viewingTaskID = id
 	m.selectedTaskID = id
 	m.mainSelected = false
-	m.taskSelector = false
+	// 进入视图后列表保持焦点,选中行继续显示 ❯
+	m.taskSelector = true
+	m.editor.Blur()
 	m.state.Subagents.ViewingTaskID = id
 	m.state.Messages = cloneMessages(task.Messages)
+	// 刚进入时手上只有列表投影,transcript 还没加载。清掉 revision 基准,
+	// 保证下一份快照一定被接受,而不是被"没有变化"判定丢掉
+	m.state.Subagents.Revision = 0
+	for i := range m.state.Subagents.Tasks {
+		if m.state.Subagents.Tasks[i].ID == id {
+			m.state.Subagents.Tasks[i].Revision = 0
+			m.state.Subagents.Tasks[i].Messages = nil
+			break
+		}
+	}
 	m.editor.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(blueColor))
 	m.editor.BlurredStyle.Prompt = m.editor.FocusedStyle.Prompt
 	m.editor.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(blueColor))
@@ -253,6 +306,28 @@ func (m *Model) enterSubagentView(id string) {
 	m.viewport.GotoBottom()
 	m.layout()
 	m.refreshTranscript()
+}
+
+// exitSubagentViewCmd 离开子任务视图,并通知后端停止跟踪该任务
+func (m *Model) exitSubagentViewCmd() tea.Cmd {
+	id := m.viewingTaskID
+	m.exitSubagentView()
+	if m.handlers.SubagentRequest == nil || id == "" {
+		return nil
+	}
+	return m.handlers.SubagentRequest(SubagentRequest{Kind: "exit", TaskID: id})
+}
+
+// stopViewedSubagent 停止正在查看的任务,视图保留,任务转成 killed 状态
+func (m *Model) stopViewedSubagent() tea.Cmd {
+	if m.handlers.SubagentRequest == nil || m.viewingTaskID == "" {
+		return nil
+	}
+	task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
+	if !ok || task.Status != "running" {
+		return nil
+	}
+	return m.handlers.SubagentRequest(SubagentRequest{Kind: "stop", TaskID: task.ID})
 }
 
 func (m *Model) exitSubagentView() {
@@ -282,7 +357,6 @@ func (m *Model) rebuildMessageIndex() {
 		m.messageIndex[message.ID] = i
 	}
 	m.cache = make(map[string]cachedMessage)
-	m.markdownPreview = make(map[string]string)
 }
 
 func (m *Model) rebuildMessageIndexPreserveCache() {
@@ -317,46 +391,91 @@ func taskSelectionColor(selected bool) string {
 	return dimColor
 }
 
-// taskSelectionMarker 渲染选中标记:箭头列只在选中行显示 ❯,圆点列在选中时变实心。
-// 被终止的任务保持空心,只用箭头表示选中。
-func taskSelectionMarker(selected, killed bool) string {
-	arrow := " "
+// taskCursor 渲染行首光标:选中行显示 ❯,其余留空。
+// 光标只表示这一行被选中,与运行状态无关
+func taskCursor(selected bool) string {
 	if selected {
-		arrow = "❯"
+		return "❯"
 	}
-	dot := "○"
-	if selected && !killed {
-		dot = "●"
-	}
-	return arrow + " " + dot
+	return " "
 }
 
-// taskMarkerColor 被终止的任务用红色空心圆,其余按选中态取色
-func taskMarkerColor(selected, killed bool) string {
+// taskStateDot 渲染状态圆点:实心表示当前作用域。
+// 列表未聚焦时实心表示正在查看的 transcript;列表聚焦时实心跟随选中行
+func taskStateDot(filled, killed bool) string {
+	if killed {
+		if filled {
+			return "●"
+		}
+		return "◯"
+	}
+	if filled {
+		return "⏺"
+	}
+	return "◯"
+}
+
+// taskDotColor 被终止用红色,实心用正文色,其余暗色
+func taskDotColor(filled, killed bool) string {
 	if killed {
 		return redColor
 	}
-	return taskSelectionColor(selected)
+	if filled {
+		return textColor
+	}
+	return dimColor
 }
 
 // taskListIndent 让任务列表与主 transcript 文本列对齐,不贴终端左边框
 const taskListIndent = " "
 
+// taskHint 返回任务列表上方的快捷键提示,只在该列表获得焦点时显示
+func (m *Model) taskHint() string {
+	if !m.taskSelector || len(m.state.Subagents.Tasks) == 0 {
+		return ""
+	}
+	parts := []string{"↑/↓ to select"}
+	if task, ok := m.selectedSubagent(); ok {
+		parts = append(parts, "Enter to view")
+		if task.Status == "running" {
+			parts = append(parts, "x to stop")
+		} else {
+			parts = append(parts, "x to clear")
+		}
+	}
+	parts = append(parts, "ctrl+x ctrl+k to stop all agents")
+	return colored(dimColor, ansi.Truncate("  "+strings.Join(parts, " · "), m.width, "…"))
+}
+
 func (m *Model) taskRows() []string {
 	if len(m.state.Subagents.Tasks) == 0 {
 		return nil
 	}
-	mainSelected := m.viewingTaskID == "" && m.mainSelected
-	mainMarker := colored(taskMarkerColor(mainSelected, false), taskSelectionMarker(mainSelected, false))
-	rows := []string{taskListIndent + mainMarker + " main"}
+	// 实心圆表示当前查看的作用域,❯ 表示选中行,两者独立
+	focused := m.taskSelector
+	// ❯ 只看选中行,与当前查看哪个 transcript 无关
+	mainViewed := m.viewingTaskID == ""
+	mainSelected := focused && m.mainSelected
+	// 未聚焦时实心标记正在查看的作用域;聚焦时实心跟随选中行
+	mainFilled := mainViewed
+	if focused {
+		mainFilled = mainSelected
+	}
+	mainDot := colored(taskDotColor(mainFilled, false), taskStateDot(mainFilled, false))
+	var rows []string
+	if hint := m.taskHint(); hint != "" {
+		rows = append(rows, hint, "")
+	}
+	rows = append(rows, taskListIndent+taskCursor(mainSelected)+" "+mainDot+" main")
 	for _, task := range m.state.Subagents.sortedTasks() {
-		selected := !m.mainSelected && task.ID == m.selectedTaskID
-		if m.selectedTaskID == "" && m.viewingTaskID != "" {
-			selected = task.ID == m.viewingTaskID
-		}
-
+		selected := focused && !m.mainSelected && task.ID == m.selectedTaskID
+		viewed := task.ID == m.viewingTaskID
 		killed := task.Status == "killed"
-		icon := colored(taskMarkerColor(selected, killed), taskSelectionMarker(selected, killed))
+		filled := viewed
+		if focused {
+			filled = selected
+		}
+		dot := colored(taskDotColor(filled, killed), taskStateDot(filled, killed))
 		label := taskLabel(task)
 		description := task.Description
 		if task.Status == "failed" && task.Error != "" {
@@ -372,8 +491,7 @@ func (m *Model) taskRows() []string {
 		// 把耗时和 token 用量固定在状态区右边缘。
 		// 先截断描述部分,保证后缀始终对齐。
 		suffix = ansi.Truncate(suffix, m.width, "…")
-		fixed := icon + " " + label
-		body := taskListIndent + fixed
+		body := taskListIndent + taskCursor(selected) + " " + dot + " " + label
 		if description != "" {
 			body += "  " + description
 		}
@@ -420,9 +538,10 @@ func (m *Model) subagentRows() int {
 	if len(m.state.Subagents.Tasks) == 0 {
 		return 0
 	}
+	// 任务列表是 main 行加每个任务一行,聚焦时上方还有快捷键提示与一行空行
 	rows := len(m.state.Subagents.Tasks) + 1
 	if m.taskSelector {
-		rows++
+		rows += 2
 	}
 	return rows
 }
@@ -442,4 +561,56 @@ func (m *Model) subagentDetailHeader() string {
 		line += "  " + task.LastActivity
 	}
 	return ansi.Truncate(line, m.width, "…")
+}
+
+// dequeueSubagentMessages 撤回当前子任务视图的队列消息并放回编辑器
+func (m *Model) dequeueSubagentMessages(followUp bool) tea.Cmd {
+	if m.handlers.SubagentRequest == nil || m.viewingTaskID == "" {
+		return nil
+	}
+	return m.handlers.SubagentRequest(SubagentRequest{
+		Kind: "dequeue", TaskID: m.viewingTaskID, FollowUp: followUp,
+	})
+}
+
+// restoreSubagentMessages 把撤回的子任务队列按顺序追加到编辑器
+func (m *Model) restoreSubagentMessages(messages []llm.UserMessage) {
+	if len(messages) == 0 {
+		m.status = "No queued messages to restore"
+		m.layout()
+		return
+	}
+	var parts []string
+	for _, message := range messages {
+		if text := strings.TrimSpace(m.editorTextForMessage(message)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		m.status = "No queued messages to restore"
+		m.layout()
+		return
+	}
+	current := m.editor.Value()
+	if strings.TrimSpace(current) != "" {
+		parts = append(parts, current)
+	}
+	m.editor.SetValue(strings.Join(parts, "\n\n"))
+	m.editor.CursorEnd()
+	m.completion, m.completionHidden = 0, true
+	m.resetPastes()
+	m.layout()
+}
+
+// pendingQueueTexts 返回当前视图要显示的队列文本:
+// 子任务视图读该任务的两条队列,主视图读主 agent 的
+func (m *Model) pendingQueueTexts() (steering, followUp []string) {
+	if m.viewingTaskID == "" {
+		return m.state.Steering, m.state.FollowUp
+	}
+	task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
+	if !ok {
+		return nil, nil
+	}
+	return task.PendingSteering, task.PendingFollowUp
 }

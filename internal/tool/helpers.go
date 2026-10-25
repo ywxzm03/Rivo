@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,10 +27,10 @@ func argInt(args map[string]any, key string) (int, bool) {
 
 // resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对 cwd
 func resolvePath(path string) (string, error) {
-	return resolvePathContext(context.Background(), path)
+	return resolvePathFrom(path, "")
 }
 
-func resolvePathContext(ctx context.Context, path string) (string, error) {
+func resolvePathFrom(path, cwd string) (string, error) {
 	// 1.~ 与 ~/ 展开成用户主目录
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -42,7 +41,6 @@ func resolvePathContext(ctx context.Context, path string) (string, error) {
 	}
 	// 2.相对路径按当前工作目录解析
 	if !filepath.IsAbs(path) {
-		cwd := llm.CurrentWorkingDir(ctx)
 		if cwd == "" {
 			var err error
 			cwd, err = os.Getwd()

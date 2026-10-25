@@ -11,7 +11,7 @@ import (
 
 const powershellUTF8Prefix = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\n"
 
-type PowerShell struct{}
+type PowerShell struct{ WorkingDir string }
 
 func (p *PowerShell) Name() string { return "powershell" }
 
@@ -35,7 +35,7 @@ func (p *PowerShell) Execute(ctx context.Context, args map[string]any) (llm.Tool
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	return executeShellCommand(ctx, args, "powershell", func(commandCtx context.Context, command string) (*exec.Cmd, error) {
+	return executeShellCommand(ctx, args, "powershell", p.WorkingDir, func(commandCtx context.Context, command string) (*exec.Cmd, error) {
 		return exec.CommandContext(
 			commandCtx,
 			executable,

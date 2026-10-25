@@ -7,8 +7,8 @@ type userMessageContextKey struct{}
 type toolContextKey struct{}
 type workingDirKey struct{}
 
-// ToolContext carries the executing agent's context to tools that need to spawn
-// or coordinate child work without exposing the Agent implementation.
+// ToolContext 把执行中 agent 的上下文交给需要派发或协调子任务的工具,
+// 同时不暴露 Agent 实现
 type ToolContext struct {
 	Context Context
 	Config  AgentConfig

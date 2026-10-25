@@ -239,6 +239,55 @@ func (s *Store) EvictExpired() int {
 	return evicted
 }
 
+// KillAllRunningTasks 终止全部运行中的任务。
+// 主 agent 取消或进程退出时调用:子任务的 lifecycle 已与请求解绑,
+// 没有这条路径它们会一直跑到自己结束
+func (s *Store) KillAllRunningTasks() int {
+	s.mu.Lock()
+	var agentIDs, bashIDs []string
+	for id, state := range s.tasks {
+		if state.Base().Status != StatusRunning {
+			continue
+		}
+		switch state.(type) {
+		case *AgentState:
+			agentIDs = append(agentIDs, id)
+		case *BashState:
+			bashIDs = append(bashIDs, id)
+		}
+	}
+	runtimes := make([]*AgentRuntime, 0, len(agentIDs))
+	for _, id := range agentIDs {
+		runtimes = append(runtimes, s.runtimes[id])
+	}
+	s.mu.Unlock()
+	killed := 0
+	for _, id := range agentIDs {
+		if err := KillAgent(id, s); err == nil {
+			killed++
+		}
+	}
+	// 取消只发信号。等 lifecycle 真正收尾,子 agent 才会在退出前
+	// 走完工具层的进程树清理
+	for _, runtime := range runtimes {
+		if runtime != nil && runtime.Done != nil {
+			select {
+			case <-runtime.Done:
+			case <-time.After(shutdownWait):
+			}
+		}
+	}
+	for _, id := range bashIDs {
+		if err := KillBash(id, s); err == nil {
+			killed++
+		}
+	}
+	return killed
+}
+
+// shutdownWait 是退出时等待子任务收尾的上限
+const shutdownWait = 3 * time.Second
+
 // KillBashTasksForAgent 终止某子 agent 启动且仍在运行的后台 bash 任务,
 // 返回成功终止的数量。子 agent 结束后它的 query loop 不再运行,
 // 这些任务没人能再停止,因此必须在子 agent 收尾时回收
@@ -322,7 +371,19 @@ func (s *Store) AckNotifications(count int) {
 	s.notifications = append([]Notification(nil), s.notifications[count:]...)
 }
 
+// EnqueuePendingMessage 把输入排进任务的 steering 队列,
+// 在下一个工具调用边界注入,与主 agent 的 steering 语义一致
 func (s *Store) EnqueuePendingMessage(id string, message llm.UserMessage) error {
+	return s.EnqueueTaskMessage(id, message, false)
+}
+
+// EnqueueFollowUpMessage 把输入排进任务的 follow-up 队列,
+// 在当前轮结束后注入
+func (s *Store) EnqueueFollowUpMessage(id string, message llm.UserMessage) error {
+	return s.EnqueueTaskMessage(id, message, true)
+}
+
+func (s *Store) EnqueueTaskMessage(id string, message llm.UserMessage, followUp bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -330,38 +391,104 @@ func (s *Store) EnqueuePendingMessage(id string, message llm.UserMessage) error 
 		return errors.New("subagent: task is not running")
 	}
 	message = cloneUserMessage(message)
-	task.PendingMessages = append(task.PendingMessages, message)
+	if followUp {
+		task.PendingFollowUp = append(task.PendingFollowUp, message)
+	} else {
+		task.PendingSteering = append(task.PendingSteering, message)
+	}
 	return nil
 }
 
-// PendingMessages 返回任务本地 FIFO 的防御性快照
+// PendingMessages 返回 steering 队列的防御性快照
 func (s *Store) PendingMessages(id string) []llm.UserMessage {
+	return s.pendingMessages(id, false)
+}
+
+// PendingFollowUpMessages 返回 follow-up 队列的防御性快照
+func (s *Store) PendingFollowUpMessages(id string) []llm.UserMessage {
+	return s.pendingMessages(id, true)
+}
+
+func (s *Store) pendingMessages(id string, followUp bool) []llm.UserMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
 	if !ok {
 		return nil
 	}
-	result := make([]llm.UserMessage, len(task.PendingMessages))
-	for i, message := range task.PendingMessages {
+	queue := task.PendingSteering
+	if followUp {
+		queue = task.PendingFollowUp
+	}
+	result := make([]llm.UserMessage, len(queue))
+	for i, message := range queue {
 		result[i] = cloneUserMessage(message)
 	}
 	return result
 }
 
+// DrainPendingMessages 取走 steering 队列
 func (s *Store) DrainPendingMessages(id string, token uint64) []llm.UserMessage {
+	return s.drainTaskMessages(id, token, false)
+}
+
+// DrainPendingFollowUpMessages 取走 follow-up 队列
+func (s *Store) DrainPendingFollowUpMessages(id string, token uint64) []llm.UserMessage {
+	return s.drainTaskMessages(id, token, true)
+}
+
+func (s *Store) drainTaskMessages(id string, token uint64, followUp bool) []llm.UserMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
-	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning || len(task.PendingMessages) == 0 {
+	if !ok || task.Base().LifecycleToken != token || task.Base().Status != StatusRunning {
 		return nil
 	}
-	messages := append([]llm.UserMessage(nil), task.PendingMessages...)
-	task.PendingMessages = nil
+	queue := task.PendingSteering
+	if followUp {
+		queue = task.PendingFollowUp
+	}
+	if len(queue) == 0 {
+		return nil
+	}
+	messages := append([]llm.UserMessage(nil), queue...)
+	if followUp {
+		task.PendingFollowUp = nil
+	} else {
+		task.PendingSteering = nil
+	}
 	return messages
 }
 
+// ClearSteeringMessages 清空 steering 队列,用于 TUI 撤回
+func (s *Store) ClearSteeringMessages(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if task, ok := s.tasks[id].(*AgentState); ok {
+		task.PendingSteering = nil
+	}
+}
+
+// ClearFollowUpMessages 清空 follow-up 队列,用于 TUI 撤回
+func (s *Store) ClearFollowUpMessages(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if task, ok := s.tasks[id].(*AgentState); ok {
+		task.PendingFollowUp = nil
+	}
+}
+
+// RequeuePendingMessagesFront 把未投递的 steering 放回队列头部
 func (s *Store) RequeuePendingMessagesFront(id string, token uint64, messages []llm.UserMessage) bool {
+	return s.requeueTaskMessages(id, token, messages, false)
+}
+
+// RequeuePendingFollowUpMessagesFront 把未投递的 follow-up 放回队列头部
+func (s *Store) RequeuePendingFollowUpMessagesFront(id string, token uint64, messages []llm.UserMessage) bool {
+	return s.requeueTaskMessages(id, token, messages, true)
+}
+
+func (s *Store) requeueTaskMessages(id string, token uint64, messages []llm.UserMessage, followUp bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -369,8 +496,11 @@ func (s *Store) RequeuePendingMessagesFront(id string, token uint64, messages []
 		return false
 	}
 	queue := CloneUserMessages(messages)
-	queue = append(queue, task.PendingMessages...)
-	task.PendingMessages = queue
+	if followUp {
+		task.PendingFollowUp = append(queue, task.PendingFollowUp...)
+	} else {
+		task.PendingSteering = append(queue, task.PendingSteering...)
+	}
 	return true
 }
 
@@ -493,7 +623,8 @@ func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, ui
 	task.Base().Status = StatusKilled
 	task.Base().EndTime = &now
 	task.Abort = nil
-	task.PendingMessages = nil
+	task.PendingSteering = nil
+	task.PendingFollowUp = nil
 	setEvictAfter(&task.StateBase, task.Retain, now)
 	return runtime, abort, token, nil
 }
@@ -552,17 +683,16 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 			OutputFile:     old.Base().OutputFile,
 			LifecycleToken: token,
 		},
-		AgentID:         old.AgentID,
-		Prompt:          prompt,
-		AgentType:       old.AgentType,
-		Model:           cloneModel(old.Model),
-		Thinking:        old.Thinking,
-		WorktreePath:    old.WorktreePath,
-		Worktree:        old.Worktree,
-		Progress:        old.Progress,
-		PendingMessages: nil,
-		Retain:          old.Retain,
-		MessageCount:    old.MessageCount,
+		AgentID:      old.AgentID,
+		Prompt:       prompt,
+		AgentType:    old.AgentType,
+		Model:        cloneModel(old.Model),
+		Thinking:     old.Thinking,
+		WorktreePath: old.WorktreePath,
+		Worktree:     old.Worktree,
+		Progress:     old.Progress,
+		Retain:       old.Retain,
+		MessageCount: old.MessageCount,
 	}
 	s.tasks[id] = state
 	if runtime != nil {
@@ -768,7 +898,8 @@ func cloneTaskState(task State) State {
 		copy := *state
 		copy.Base().EvictAfter = cloneDeadline(state.Base().EvictAfter)
 		copy.Abort = nil
-		copy.PendingMessages = CloneUserMessages(state.PendingMessages)
+		copy.PendingSteering = CloneUserMessages(state.PendingSteering)
+		copy.PendingFollowUp = CloneUserMessages(state.PendingFollowUp)
 		if state.Result != nil {
 			result := *state.Result
 			result.Content = append([]TextBlock(nil), state.Result.Content...)

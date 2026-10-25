@@ -25,9 +25,15 @@ type queuedRunner interface {
 	ContinueSteering(context.Context) (*llm.AssistantMessage, error)
 }
 
+type followUpRunner interface {
+	ContinueFollowUp(context.Context) (*llm.AssistantMessage, error)
+}
+
 var ErrSteeringDuringCompaction = errors.New("app: steering is unavailable during context compaction")
 
-var ErrQueuedRunnerUnavailable = errors.New("app: queued steering runner is unavailable")
+var ErrFollowUpDuringCompaction = errors.New("app: follow-up is unavailable during context compaction")
+
+var ErrQueuedRunnerUnavailable = errors.New("app: queued runner is unavailable")
 
 // 压缩原因，随 compaction 事件暴露给消费者
 const (
@@ -53,17 +59,16 @@ type Coordinator struct {
 	recovered bool
 	// promptSections 是当前基线分节，请求前与重放结果 diff
 	promptSections prompt.Sections
-	// transientMessages are request-only attachments such as subagent
-	// task-notifications; they are never committed to the session.
-	transientMessages func() []llm.Message
-	transientAck      func()
-	// taskEvictor 在每个请求前清理过期终态子任务,由装配方注入
-	taskEvictor func() int
 	// mu 只保护基线分节；runMu 串行化编排
 	mu         sync.Mutex
 	runMu      sync.Mutex
 	stateMu    sync.Mutex
 	compacting bool
+	// transientMessages 提供只在单次请求内出现的附件,例如子任务完成通知
+	transientMessages func() []llm.Message
+	// transientAck 在请求成功提交后确认这批附件已被消费
+	transientAck func()
+	taskEvictor  func() int
 }
 
 func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordinator {
@@ -102,6 +107,32 @@ func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
 	return c.Agent.Steer(userMessageText(input))
 }
 
+func (c *Coordinator) EnqueueFollowUp(input string) error {
+	return c.EnqueueFollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+// EnqueueFollowUpMessage 在压缩状态锁内接受一条 follow-up
+func (c *Coordinator) EnqueueFollowUpMessage(input llm.UserMessage) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.compacting {
+		return ErrFollowUpDuringCompaction
+	}
+	if c.Agent == nil {
+		return errors.New("app: follow-up runner is unavailable")
+	}
+	if runner, ok := c.Agent.(interface{ FollowUpMessage(llm.UserMessage) error }); ok {
+		return runner.FollowUpMessage(input)
+	}
+	if userMessageHasImages(input) {
+		return errors.New("app: runner does not support structured image follow-up")
+	}
+	if runner, ok := c.Agent.(interface{ FollowUp(string) error }); ok {
+		return runner.FollowUp(userMessageText(input))
+	}
+	return errors.New("app: follow-up runner is unavailable")
+}
+
 // SetPromptSections 设置基线分节；加锁与 preparePrompt 的读取互斥，避免并发路径下数据竞争
 func (c *Coordinator) SetPromptSections(sections prompt.Sections) {
 	c.mu.Lock()
@@ -113,48 +144,6 @@ func (c *Coordinator) PromptSections() prompt.Sections {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.promptSections
-}
-
-// SetTransientMessages installs a request-time message provider. The provider
-// is called after the persisted session projection is rebuilt and before the
-// model request is sent.
-func (c *Coordinator) SetTransientMessages(provider func() []llm.Message) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.transientMessages = provider
-}
-
-func (c *Coordinator) SetTransientAck(ack func()) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.transientAck = ack
-}
-
-// SetTaskEvictor 安装根任务 store 的过期清扫;每个请求边界调用一次。
-// 调用时只短暂持 c.mu 读取函数指针,实际清扫在锁外执行
-func (c *Coordinator) SetTaskEvictor(evict func() int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.taskEvictor = evict
-}
-
-func (c *Coordinator) evictExpiredTasks() {
-	c.mu.Lock()
-	evict := c.taskEvictor
-	c.mu.Unlock()
-	if evict != nil {
-		evict()
-	}
-}
-
-func (c *Coordinator) takeTransientMessages() []llm.Message {
-	c.mu.Lock()
-	provider := c.transientMessages
-	c.mu.Unlock()
-	if provider == nil {
-		return nil
-	}
-	return provider()
 }
 
 // preparePrompt 在进入 Agent 之前对齐 system prompt：有差异时先落盘再压入内存，
@@ -216,6 +205,52 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 }
 
 // PrepareRequest 返回会话投影快照，摘要生成失败时保留原上下文，存储失败必须停止运行
+// SetTransientMessages 安装请求级消息提供器
+func (c *Coordinator) SetTransientMessages(provider func() []llm.Message) {
+	c.mu.Lock()
+	c.transientMessages = provider
+	c.mu.Unlock()
+}
+
+// SetTransientAck 安装请求成功后的确认回调
+func (c *Coordinator) SetTransientAck(ack func()) {
+	c.mu.Lock()
+	c.transientAck = ack
+	c.mu.Unlock()
+}
+
+// SetTaskEvictor 安装请求边界的终态任务回收器
+func (c *Coordinator) SetTaskEvictor(evictor func() int) {
+	c.mu.Lock()
+	c.taskEvictor = evictor
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) takeTransientMessages() []llm.Message {
+	c.mu.Lock()
+	provider := c.transientMessages
+	c.mu.Unlock()
+	if provider == nil {
+		return nil
+	}
+	return provider()
+}
+
+func (c *Coordinator) takeTransientAck() func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.transientAck
+}
+
+func (c *Coordinator) evictExpiredTasks() {
+	c.mu.Lock()
+	evictor := c.taskEvictor
+	c.mu.Unlock()
+	if evictor != nil {
+		evictor()
+	}
+}
+
 func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
 	c.setModel(current.Config.Model)
 	// 请求边界顺带回收宽限期已过的终态子任务;通知队列不受影响
@@ -229,9 +264,7 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 	}
 	current.Context.Messages = c.m.BuildContext().Messages()
 	current.Context.Messages = append(current.Context.Messages, c.takeTransientMessages()...)
-	c.mu.Lock()
-	current.TransientAck = c.transientAck
-	c.mu.Unlock()
+	current.TransientAck = c.takeTransientAck()
 	current.Compacted = compacted
 	return current, nil
 }
@@ -292,6 +325,16 @@ func (c *Coordinator) ContinueQueued(ctx context.Context) (*llm.AssistantMessage
 		return nil, ErrQueuedRunnerUnavailable
 	}
 	return c.finishRun(ctx, reply, runErr)
+}
+
+func (c *Coordinator) ContinueFollowUp(ctx context.Context) (*llm.AssistantMessage, error) {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	if runner, ok := c.Agent.(followUpRunner); ok {
+		reply, runErr := runner.ContinueFollowUp(ctx)
+		return c.finishRun(ctx, reply, runErr)
+	}
+	return nil, ErrQueuedRunnerUnavailable
 }
 
 // finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
@@ -400,6 +443,8 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 	}
 	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态
 	rebuilt := c.m.BuildContext()
+	// 结束事件表示 compaction 边界已关闭：先解除 compacting，TUI 才能按原序转发暂存输入
+	c.setCompacting(false)
 	_ = c.emit(llm.CompactionEndEvent{
 		Reason:           reason,
 		Summary:          result.Summary,
@@ -409,6 +454,13 @@ func (c *Coordinator) compact(ctx context.Context, reason, instructions string) 
 		Usage:            result.Usage,
 	})
 	return nil
+}
+
+// setCompacting 更新压缩状态，供入队边界与结束事件共享同一临界区
+func (c *Coordinator) setCompacting(value bool) {
+	c.stateMu.Lock()
+	c.compacting = value
+	c.stateMu.Unlock()
 }
 
 // omitLastAttempt 为最后落盘的失败尝试追加 context_edit 省略

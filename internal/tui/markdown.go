@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -11,7 +12,6 @@ import (
 
 // markdownRenderer 按当前宽度复用解析器，已完成消息的输出缓存在 Model 中
 type markdownRenderer struct {
-	width     int
 	renderers map[markdownRendererKey]*glamour.TermRenderer
 	widths    []int
 }
@@ -39,9 +39,6 @@ func markdownStyle(role string) style.StyleConfig {
 	if role == "thinking" {
 		text = primitive(thinkingColor)
 		text.Italic = &yes
-	}
-	if role == "tool" {
-		text = primitive(mutedColor)
 	}
 	if role == "user" {
 		bg := userBg
@@ -102,7 +99,7 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	if r.renderers == nil {
 		r.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
 	}
-	if !containsInt(r.widths, width) {
+	if !slices.Contains(r.widths, width) {
 		r.widths = append(r.widths, width)
 		if len(r.widths) > 4 {
 			stale := r.widths[0]
@@ -114,7 +111,6 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 			}
 		}
 	}
-	r.width = width
 	key := markdownRendererKey{width: width, role: role}
 	renderer := r.renderers[key]
 	if renderer == nil {
@@ -133,48 +129,49 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 	return ansi.Hardwrap(strings.Trim(result, "\n"), width, true)
 }
 
-func containsInt(values []int, value int) bool {
-	for _, current := range values {
-		if current == value {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *Model) renderMessage(message Message) string {
+	// 每条消息独立记录命中区,避免没有工具组的消息沿用上一条的
+	m.lastMessageHits = nil
 	width := max(1, m.width-2)
-	if message.Role == "context" {
-		return colored(textColor, ansi.Wrap(message.Text, width, ""))
+	if message.Role == "command" {
+		return colored(accentColor, ansi.Wrap(message.Text, width, ""))
 	}
-	if message.Role == "notice" || message.Role == "summary" {
+	if message.Role == "status" {
+		// 状态块整体右移两格，与顶格的命令回显区分
+		return colored(textColor, "  "+strings.ReplaceAll(ansi.Wrap(message.Text, max(1, width-2), ""), "\n", "\n  "))
+	}
+	if message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
-	if message.Role == "divider" && message.Divider != nil {
-		return rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true)
+	if message.Role == "notice" {
+		// 提示行的圆点与中断提示的方块对齐，正文从第三列开始；换行后保持相同缩进
+		wrapped := ansi.Wrap(message.Text, max(1, width-3), "")
+		return colored(mutedColor, " • "+strings.ReplaceAll(wrapped, "\n", "\n   "))
 	}
 	if message.ToolGroup != nil {
-		parts := []string{m.renderToolGroup(message.ToolGroup, width)}
+		group := m.renderToolGroup(message.ToolGroup, width)
+		m.lastMessageHits = append([]toolHit(nil), m.lastToolHits...)
+		parts := []string{group}
 		if message.Text != "" {
 			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 		}
 		if message.Aborted {
-			// 取消是用户操作，正文后追加固定红色提示
-			parts = append(parts, colored(redColor, "Operation aborted"))
+			// 取消是用户操作，正文后追加固定中断提示
+			parts = append(parts, abortNotice())
 			return strings.Join(parts, "\n\n")
 		}
 		if message.Divider != nil && message.Text != "" {
-			parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
+			parts = append(parts, dividerLine(m.width, message.Divider))
 		}
 		return strings.Join(parts, "\n\n")
 	}
 	if message.Aborted {
-		// 取消是用户操作，partial 正文后追加固定红色提示
+		// 取消是用户操作，partial 正文后追加固定中断提示
 		parts := []string{}
 		if trimmed := strings.TrimSpace(message.Text); trimmed != "" {
 			parts = append(parts, m.markdown.render(trimmed, "assistant", width))
 		}
-		parts = append(parts, colored(redColor, "Operation aborted"))
+		parts = append(parts, abortNotice())
 		return strings.Join(parts, "\n")
 	}
 	if message.Role == "user" {
@@ -219,20 +216,28 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(lines, "\n")
 	}
 	var parts []string
-	if message.Thinking != "" {
-		thinking := message.Thinking
-		if m.hideThinking {
-			thinking = "Thinking..."
-		}
-		parts = append(parts, indent(m.markdown.render(thinking, "thinking", width)))
-	}
-	if message.Divider != nil && message.Text != "" {
-		parts = append(parts, rule(m.width, "worked for "+formatElapsed(message.Divider.Elapsed), mutedColor, true))
-	}
 	if message.Text != "" {
 		parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
+	}
+	if message.Divider != nil && message.Text != "" {
+		parts = append(parts, dividerLine(m.width, message.Divider))
 	}
 	return strings.Join(parts, "\n\n")
 }
 
+// dividerLine 输出回合结束行：耗时与结束时刻，纯文字不带分隔线
+func dividerLine(width int, divider *TurnDividerView) string {
+	label := "Worked for " + formatElapsed(divider.Elapsed)
+	if !divider.FinishedAt.IsZero() {
+		label += " • " + divider.FinishedAt.Format("15:04")
+	}
+	// 比正文多缩进一列，与正文块拉开一点距离
+	return colored(mutedColor, ansi.Truncate(" "+indent(label), width, "…"))
+}
+
 func indent(text string) string { return " " + strings.ReplaceAll(text, "\n", "\n ") }
+
+// abortNotice 输出中断提示：实心方块缩进一格起首，文字用更淡的灰，与普通提示区分
+func abortNotice() string {
+	return colored(faintColor, " ■ Conversation interrupted")
+}

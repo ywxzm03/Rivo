@@ -95,18 +95,21 @@ type ToolActivity struct {
 
 type AgentState struct {
 	StateBase
-	AgentID         string
-	Prompt          string
-	AgentType       string
-	Model           *llm.Model
-	Thinking        llm.ThinkingLevel
-	WorktreePath    string
-	Worktree        bool
-	Error           string
-	Result          *AgentResult
-	Progress        *AgentProgress
-	Abort           context.CancelFunc
-	PendingMessages []llm.UserMessage
+	AgentID      string
+	Prompt       string
+	AgentType    string
+	Model        *llm.Model
+	Thinking     llm.ThinkingLevel
+	WorktreePath string
+	Worktree     bool
+	Error        string
+	Result       *AgentResult
+	Progress     *AgentProgress
+	Abort        context.CancelFunc
+	// PendingSteering 在下一轮工具调用前注入;PendingFollowUp 在当前轮结束后注入。
+	// 与主 agent 的两条队列语义一致
+	PendingSteering []llm.UserMessage
+	PendingFollowUp []llm.UserMessage
 	Retain          bool
 	// MessageCount 是 sidechain transcript 已提交的消息数。transcript 常驻磁盘,
 	// 内存只保留这个长度,供 TUI 判断是否需要增量读取

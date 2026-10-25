@@ -22,7 +22,7 @@ const (
 	grepMaxLine      = 500
 )
 
-type Grep struct{}
+type Grep struct{ WorkingDir string }
 
 func (g *Grep) Name() string { return "grep" }
 
@@ -122,7 +122,7 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
-	absPath, isDirectory, err := resolveGrepPath(ctx, options.searchPath)
+	absPath, isDirectory, err := resolveGrepPath(options.searchPath, g.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -174,8 +174,8 @@ func boolArg(args map[string]any, key string) bool {
 	return value
 }
 
-func resolveGrepPath(ctx context.Context, searchPath string) (string, bool, error) {
-	absPath, err := resolvePathContext(ctx, searchPath)
+func resolveGrepPath(searchPath, workingDir string) (string, bool, error) {
+	absPath, err := resolvePathFrom(searchPath, workingDir)
 	if err != nil {
 		return "", false, err
 	}

@@ -124,3 +124,32 @@ func TestProjectSubagentTasksSealsTerminalTail(t *testing.T) {
 		t.Fatalf("terminal tool group = %+v", views[0].Messages[0].ToolGroup)
 	}
 }
+
+// 子任务 transcript 里的工具调用必须可渲染:参数来自磁盘,已完整
+func TestProjectSubagentMessagesRendersToolCalls(t *testing.T) {
+	messages := []llm.Message{
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ThinkingContent{Thinking: "let me look"},
+			llm.ToolCall{ID: "c1", Name: "read", Arguments: map[string]any{"path": "main.go"}},
+		}},
+		llm.ToolResultMessage{ToolCallID: "c1", Content: []llm.Content{llm.TextContent{Text: "package main"}}},
+	}
+	projected := projectSubagentMessages("a1", 0, messages)
+	if len(projected) != 1 || projected[0].ToolGroup == nil {
+		t.Fatalf("projected = %+v", projected)
+	}
+	group := projected[0].ToolGroup
+	if len(group.Calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(group.Calls))
+	}
+	call := group.Calls[0]
+	if !call.ArgsComplete {
+		t.Fatal("ArgsComplete must be true for calls read from disk")
+	}
+	if call.Name != "read" || call.Result != "package main" {
+		t.Fatalf("call = %+v", call)
+	}
+	if len(group.Thinking) != 1 {
+		t.Fatalf("thinking = %d, want 1", len(group.Thinking))
+	}
+}

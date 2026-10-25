@@ -1,13 +1,14 @@
 package tui
 
 import (
-	"runtime"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 const timeDoublePress = 500 * time.Millisecond
@@ -17,7 +18,7 @@ type slashCommand struct{ name, description string }
 var commands = []slashCommand{
 	{"tree", "Select a user message to restore conversation and/or code"},
 	{"model", "<provider/model> — Select model (opens selector UI)"},
-	{"thinking", "<level> — Set thinking level"},
+	{"effort", "<level> — Set reasoning effort"},
 	{"resume", "Resume a previous session"},
 	{"rename", "<new Name> — Rename the current session"},
 	{"new", "Start a new session"},
@@ -25,7 +26,8 @@ var commands = []slashCommand{
 	{"clear", "Clear the current conversation context"},
 	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
-	{"context", "Show current context usage"},
+	{"clear-follow-up", "Clear queued follow-up messages"},
+	{"status", "Show model, context usage and session info"},
 	{"exit", "Exit Rivo"},
 }
 
@@ -59,6 +61,9 @@ func (m *Model) completionRows(count int) int {
 	return min(count, min(5, room))
 }
 
+// completionIndent 是候选列表相对输入框的缩进，与斜杠命令的视觉层次对齐
+const completionIndent = "  "
+
 func (m *Model) completionView() string {
 	items := m.completionItems()
 	rows := m.completionRows(len(items))
@@ -71,13 +76,14 @@ func (m *Model) completionView() string {
 		command := items[i]
 		prefix, color := "  ", textColor
 		if i == m.completion {
-			prefix, color = "→ ", accentColor
+			prefix, color = "❯ ", accentColor
 		}
 		primary := min(32, max(10, m.width/3))
-		name := prefix + command.name
-		line := colored(color, name)
+		// 整块右移，候选名不贴左边界；缩进不参与列宽计算，描述列仍然对齐
+		label := prefix + command.name
+		line := completionIndent + colored(color, label)
 		if m.width > primary+12 {
-			line += strings.Repeat(" ", max(1, primary-ansi.StringWidth(name))) + colored(mutedColor, command.description)
+			line += strings.Repeat(" ", max(1, primary-ansi.StringWidth(label))) + colored(mutedColor, command.description)
 		}
 		lines = append(lines, ansi.Truncate(line, m.width, "…"))
 	}
@@ -88,16 +94,30 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
-	// Leaving a subagent view always wins over transcript navigation. Otherwise
-	// Escape can be consumed by the jump-to-bottom pill and strand the user in
-	// the child transcript until it happens to be at the bottom.
+	// 子任务视图的 Esc 分两级:运行中的任务先被停止并留在视图,
+	// 紧接着再按一次退回 main;任务已停止时一次 Esc 就退回
 	if msg.String() == "esc" && m.viewingTaskID != "" {
-		if m.handlers.SubagentRequest != nil {
-			cmd := m.handlers.SubagentRequest(SubagentRequest{Kind: "exit", TaskID: m.viewingTaskID})
-			m.exitSubagentView()
+		if m.lastEscapeAt != (time.Time{}) && m.clock().Sub(m.lastEscapeAt) <= timeDoublePress {
+			cmd := m.exitSubagentViewCmd()
+			m.lastEscapeAt = time.Time{}
 			return cmd
 		}
-		m.exitSubagentView()
+		if m.taskSelector {
+			m.setTaskFocus(false)
+			m.lastEscapeAt = m.clock()
+			return nil
+		}
+		if task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID); ok && task.Status != "running" {
+			// 已停止的任务没有可停的东西,直接退回 main
+			m.lastEscapeAt = time.Time{}
+			return m.exitSubagentViewCmd()
+		}
+		m.lastEscapeAt = m.clock()
+		return m.stopViewedSubagent()
+	}
+	// 列表聚焦时 Esc 先退出列表
+	if msg.String() == "esc" && m.taskSelector {
+		m.setTaskFocus(false)
 		return nil
 	}
 	if msg.String() == "esc" && m.jumpPillVisible() && !(m.busy && len(m.state.Steering) > 0) {
@@ -107,51 +127,65 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.selector != nil {
 		return m.selectorKey(msg)
 	}
-	if msg.String() == "esc" && m.taskSelector {
-		m.taskSelector = false
-		m.selectedTaskID = ""
-		m.mainSelected = false
-		m.layout()
-		return nil
-	}
-	// 输入框为空时 x 才表示 stop/evict,否则它是普通字符,必须落到编辑器
-	if msg.String() == "x" && m.editor.Value() == "" {
-		if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
-			kind := "evict"
-			if task.Status == "running" {
-				kind = "stop"
-			}
-			return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
-		}
-	}
-	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
-		switch msg.String() {
-		case "up":
-			m.taskSelector = true
-			if m.selectSubagent(-1) {
-				return nil
-			}
-		case "down":
-			m.taskSelector = true
-			if m.selectSubagent(1) {
-				return nil
-			}
-		case "enter":
-			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
-				return nil
-			}
-			return m.enterSelectedSubagent()
-		}
-	}
+	// 队列撤回键优先于任务选择:Option+Up/Down 不能被列表当成普通按键吃掉
 	if isSteeringDequeueKey(msg) {
+		// 子任务视图撤回的是该任务自己的队列,不是主 agent 的
 		if m.viewingTaskID != "" {
-			return nil
+			return m.dequeueSubagentMessages(false)
 		}
 		if m.restoreQueuedSteering() == 0 {
 			m.status = "No queued messages to restore"
 		}
 		m.layout()
 		return nil
+	}
+	if isFollowUpDequeueKey(msg) {
+		if m.viewingTaskID != "" {
+			return m.dequeueSubagentMessages(true)
+		}
+		if m.restoreQueuedFollowUp() == 0 {
+			m.status = "No queued follow-up messages to restore"
+		}
+		m.layout()
+		return nil
+	}
+	// 任务列表聚焦时按键用于选择;输入字符会自动把焦点交回输入框
+	if len(m.state.Subagents.Tasks) > 0 && m.taskSelector {
+		switch msg.String() {
+		case "up":
+			// 已在 main 行时再 Up 离开列表,回到输入框
+			if m.mainSelected {
+				m.setTaskFocus(false)
+				return nil
+			}
+			m.selectSubagent(-1)
+			return nil
+		case "down":
+			m.selectSubagent(1)
+			return nil
+		case "enter":
+			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
+				return nil
+			}
+			return m.enterSelectedSubagent()
+		case "x":
+			if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
+				kind := "evict"
+				if task.Status == "running" {
+					kind = "stop"
+				}
+				return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
+			}
+			return nil
+		case "tab":
+			// 列表聚焦时 Tab 仍然提交 follow-up,焦点保持不变
+			return m.submitFollowUp()
+		default:
+			// 打字即离开列表,字符继续落到输入框
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.setTaskFocus(false)
+			}
+		}
 	}
 	// 终端 bracketed paste 整段到达，只有粘贴走折叠路径
 	if msg.Paste {
@@ -206,7 +240,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "esc":
 		if m.busy {
-			m.restoreQueuedSteering()
+			m.restoreQueuedMessages()
 			m.canceling = true
 			m.status = "Cancelling…"
 			if m.handlers.Cancel != nil {
@@ -216,11 +250,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "ctrl+l":
 		return m.openSelector("model", "")
+	case "ctrl+q":
+		m.hideTools = !m.hideTools
+		m.refreshTranscript()
+		return nil
 	case "ctrl+t":
-		m.hideThinking = !m.hideThinking
+		// 隐藏状态下忽略展开开关，恢复后回到原来的展开偏好
+		if m.hideTools {
+			return nil
+		}
+		m.showThinking = !m.showThinking
 		m.refreshTranscript()
 		return nil
 	case "ctrl+o":
+		if m.hideTools {
+			return nil
+		}
 		m.showAllTools = !m.showAllTools
 		m.refreshTranscript()
 		return nil
@@ -251,27 +296,40 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return cmd
 	case "enter":
 		return m.submit()
+	case "tab":
+		// 主 agent 运行中,或正在看一个运行中的子任务,都支持 Tab 排 follow-up
+		if m.busy || m.viewingTaskID != "" {
+			return m.submitFollowUp()
+		}
 	case "backspace":
 		if m.backspaceAtMarker() {
 			m.layout()
 			return nil
 		}
 	case "up":
-		// 部分 macOS 终端把 Option+Up 发成普通 Up，有可见 steering 时优先撤回
-		if shouldRestoreSteeringOnPlainUp(runtime.GOOS) && m.busy && m.viewingTaskID == "" {
-			restored := m.restoreQueuedSteering()
-			if restored > 0 {
-				m.layout()
+		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
+			// 输入框首行的 Up 把焦点上移到任务列表,不插入字符也不翻历史。
+			// 队列撤回改用 Shift+Left,不再占用 Up
+			if len(m.state.Subagents.Tasks) > 0 {
+				m.setTaskFocus(true)
+				if !m.mainSelected || m.selectedTaskID != "" {
+					m.selectSubagent(-1)
+				}
 				return nil
 			}
-		}
-		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
 			m.browseHistory(-1)
 			return nil
 		}
 	case "down":
 		line := m.editor.LineInfo()
 		if m.editor.Line() == m.editor.LineCount()-1 && line.RowOffset == line.Height-1 {
+			// 输入框末行的 Down 把焦点下移到任务列表。
+			// 队列撤回改用 Shift+Right,不再占用 Down
+			if len(m.state.Subagents.Tasks) > 0 {
+				m.setTaskFocus(true)
+				m.selectSubagent(1)
+				return nil
+			}
 			m.browseHistory(1)
 			return nil
 		}
@@ -286,10 +344,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 	}
 	return cmd
-}
-
-func shouldRestoreSteeringOnPlainUp(goos string) bool {
-	return goos == "darwin"
 }
 
 func (m *Model) quit() tea.Cmd {
@@ -327,7 +381,11 @@ func (m *Model) browseHistory(direction int) {
 	m.layout()
 }
 
-func (m *Model) submit() tea.Cmd {
+func (m *Model) submit() tea.Cmd { return m.submitWithQueue(false) }
+
+func (m *Model) submitFollowUp() tea.Cmd { return m.submitWithQueue(true) }
+
+func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 	input := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if input == "" {
 		return nil
@@ -347,9 +405,14 @@ func (m *Model) submit() tea.Cmd {
 			m.notice("Subagent task is no longer available")
 			return nil
 		}
+		// 与主 agent 一致:Enter 进 steering,Alt+Enter 进 follow-up;
+		// 终态任务只能 continue
 		kind := "continue"
 		if task.Status == "running" {
 			kind = "queue"
+			if followUp {
+				kind = "followup"
+			}
 		}
 		m.editor.Reset()
 		m.resetPastes()
@@ -370,10 +433,15 @@ func (m *Model) submit() tea.Cmd {
 			return nil
 		}
 		if m.compacting {
-			m.notice("Cannot submit input while context compaction is running.")
-			return nil
+			if strings.HasPrefix(input, "/") && !isQueueControlCommand(input) {
+				m.notice("Commands are unavailable while context compaction is running.")
+				return nil
+			}
+			if !isQueueControlCommand(input) {
+				return m.stageCompactionMessage(input, message, followUp)
+			}
 		}
-		if strings.HasPrefix(input, "/") {
+		if strings.HasPrefix(input, "/") && !isQueueControlCommand(input) {
 			if input == "/tree" || strings.HasPrefix(input, "/tree ") {
 				m.notice("Wait for the current operation to finish before opening the tree.")
 			} else {
@@ -381,24 +449,36 @@ func (m *Model) submit() tea.Cmd {
 			}
 			return nil
 		}
-		if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil {
-			return nil
+		if !isQueueControlCommand(input) {
+			if followUp {
+				if m.handlers.Request == nil && m.handlers.EnqueueFollowUp == nil && m.handlers.EnqueueFollowUpMessage == nil {
+					return nil
+				}
+			} else if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil && m.handlers.EnqueueSteeringMessage == nil {
+				return nil
+			}
+			m.history = append(m.history, input)
+			m.historyMessages = append(m.historyMessages, message)
+			m.historyPos = len(m.history)
+			m.draft = ""
+			m.draftMessage = nil
+			m.editor.Reset()
+			m.resetPastes()
+			m.completionHidden = true
+			m.layout()
+			if followUp {
+				if hasImages {
+					return m.dispatchFollowUpMessage(input, &message)
+				}
+				return m.dispatchFollowUp(input)
+			}
+			if hasImages {
+				return m.dispatchSteeringMessage(input, &message)
+			}
+			return m.dispatchSteering(input)
 		}
-		m.history = append(m.history, input)
-		m.historyMessages = append(m.historyMessages, message)
-		m.historyPos = len(m.history)
-		m.draft = ""
-		m.draftMessage = nil
-		m.editor.Reset()
-		m.resetPastes()
-		m.completionHidden = true
-		m.layout()
-		if hasImages {
-			return m.dispatchSteeringMessage(input, &message)
-		}
-		return m.dispatchSteering(input)
 	}
-	if !m.busy && m.handlers.Request == nil && m.handlers.Context == nil {
+	if !m.busy && m.handlers.Request == nil && m.handlers.Status == nil {
 		if hasImages {
 			return nil
 		}
@@ -455,7 +535,7 @@ func (m *Model) submit() tea.Cmd {
 		return m.openSelector("model", arg)
 	case "/tree":
 		return m.openSelector("tree", arg)
-	case "/thinking":
+	case "/effort":
 		if arg == "" {
 			return m.openSelector("thinking", "")
 		}
@@ -464,21 +544,29 @@ func (m *Model) submit() tea.Cmd {
 				return m.dispatch("thinking", level)
 			}
 		}
-		m.notice("Unknown thinking level. Available: " + strings.Join(m.currentModel().Levels, ", "))
+		m.notice("Unknown effort level. Available: " + strings.Join(m.currentModel().Levels, ", "))
 	case "/resume":
 		return m.openSelector("resume", arg)
 	case "/compact":
 		return m.dispatch("compact", arg)
-	case "/context":
+	case "/clear-follow-up":
 		if arg != "" {
-			m.notice("Usage: /context")
+			m.notice("Usage: /clear-follow-up")
 			return nil
 		}
-		if m.handlers.Context == nil {
-			m.notice("Context usage is unavailable")
+		count := m.clearQueuedFollowUp()
+		m.notice(fmt.Sprintf("Cleared %d follow-up message(s)", count))
+		return nil
+	case "/status":
+		if arg != "" {
+			m.notice("Usage: /status")
 			return nil
 		}
-		return m.handlers.Context()
+		if m.handlers.Status == nil {
+			m.notice("Status is unavailable")
+			return nil
+		}
+		return m.handlers.Status()
 	case "/rename":
 		if arg == "" {
 			m.notice("Usage: /rename <new Name>")
@@ -494,5 +582,32 @@ func (m *Model) submit() tea.Cmd {
 	default:
 		m.notice("Unknown command: " + name)
 	}
+	return nil
+}
+
+func isQueueControlCommand(input string) bool {
+	name := input
+	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
+		name = input[:index]
+	}
+	return name == "/clear-follow-up"
+}
+
+func (m *Model) stageCompactionMessage(input string, message llm.UserMessage, followUp bool) tea.Cmd {
+	kind := queuedSteering
+	if followUp {
+		kind = queuedFollowUp
+	}
+	m.compactionQueuedMessages = append(m.compactionQueuedMessages, compactionQueuedMessage{message: cloneUserMessage(message), kind: kind})
+	m.history = append(m.history, input)
+	m.historyMessages = append(m.historyMessages, cloneUserMessage(message))
+	m.historyPos = len(m.history)
+	m.draft = ""
+	m.draftMessage = nil
+	m.editor.Reset()
+	m.resetPastes()
+	m.completionHidden = true
+	m.status = "Compacting context…"
+	m.layout()
 	return nil
 }

@@ -22,20 +22,11 @@ func shellParameters() map[string]any {
 		"type":     "object",
 		"required": []string{"command"},
 		"properties": map[string]any{
-			"command": map[string]any{"type": "string", "description": "Shell command to execute"},
-			"timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+			"command":           map[string]any{"type": "string", "description": "Shell command to execute"},
+			"timeout":           map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+			"run_in_background": map[string]any{"type": "boolean", "description": "Run the command as a background BashTask and return its task ID"},
 		},
 	}
-}
-
-func bashParameters() map[string]any {
-	parameters := shellParameters()
-	properties := parameters["properties"].(map[string]any)
-	properties["run_in_background"] = map[string]any{
-		"type":        "boolean",
-		"description": "Run the command in the background and return a task ID",
-	}
-	return parameters
 }
 
 // executeShellCommand 执行 shell 命令并统一处理取消、超时、退出码和输出
@@ -43,6 +34,7 @@ func executeShellCommand(
 	ctx context.Context,
 	args map[string]any,
 	toolName string,
+	workingDir string,
 	buildCommand func(context.Context, string) (*exec.Cmd, error),
 ) (llm.ToolResult, error) {
 	command, timeout, err := parseShellArgs(args, toolName)
@@ -56,10 +48,8 @@ func executeShellCommand(
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cwd := llm.CurrentWorkingDir(ctx)
-	if cwd == "" {
-		var err error
-		cwd, err = os.Getwd()
+	if workingDir == "" {
+		workingDir, err = os.Getwd()
 		if err != nil {
 			return llm.ToolResult{}, err
 		}
@@ -68,7 +58,7 @@ func executeShellCommand(
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	cmd.Dir = cwd
+	cmd.Dir = workingDir
 	cmd.Env = shellEnvironment()
 	configureShellProcess(cmd)
 	output := newShellOutputAccumulator()

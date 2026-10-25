@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -53,11 +52,31 @@ type Runtime struct {
 	compactionNoticeSeq uint64
 	pendingSkillInput   *skillInput
 	// subagentTranscripts 缓存每个被查看任务已投影的 transcript 前缀,
-	// 完整 transcript 始终常驻磁盘。它由独立的锁保护,
-	// 这样 transcript 磁盘读不会阻塞事件投影
+	// 完整 transcript 始终常驻磁盘。它由独立锁保护,磁盘读不阻塞事件投影
 	subagentMu          sync.Mutex
 	subagentRevision    uint64
 	subagentTranscripts map[string]*transcriptCache
+}
+
+// subagentSnapshotLocked 投影子任务面板。app 指针在主锁下取,
+// transcript 投影在独立的 subagentMu 下进行
+func (r *Runtime) subagentSnapshotLocked() tui.SubagentSnapshot {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return tui.SubagentSnapshot{}
+	}
+	store := activeApp.SubagentStore()
+	if store == nil {
+		return tui.SubagentSnapshot{}
+	}
+	r.subagentMu.Lock()
+	defer r.subagentMu.Unlock()
+	viewingTaskID := store.ViewingTaskID()
+	tasks := r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
+	r.subagentRevision++
+	return tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {
@@ -90,6 +109,25 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
 		}
 	}
+	if req.Kind == "follow-up" {
+		var err error
+		var revision uint64
+		if activeApp == nil {
+			err = app.ErrFollowUpUnavailable
+		} else {
+			if req.Message != nil {
+				err = activeApp.EnqueueFollowUpMessage(*req.Message)
+			} else {
+				err = activeApp.EnqueueFollowUp(req.Value)
+			}
+			if err == nil {
+				revision = activeApp.FollowUpRevision()
+			}
+		}
+		return func() tea.Msg {
+			return tui.FollowUpResultMsg{ID: req.ID, Value: req.Value, Message: req.Message, Revision: revision, Err: err}
+		}
+	}
 	value := req.Value
 	if req.Kind == "run" {
 		var err error
@@ -98,6 +136,22 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			return func() tea.Msg {
 				return tui.OperationDoneMsg{ID: req.ID, Err: err, EditorValue: userMessageEditorTextOrEmpty(req.Message), EditorMessage: req.Message, RestoreEditor: req.Message != nil}
 			}
+		}
+	}
+	// 记录操作前设置，完成后只在值真正变化时输出提示
+	previousModel, previousThinking, previousName := "", "", ""
+	if activeApp != nil {
+		switch req.Kind {
+		case "model":
+			model := activeApp.CurrentModel()
+			previousModel = model.Provider + "/" + model.ID
+		case "thinking":
+			previousThinking = string(activeApp.CurrentThinkingLevel())
+			if previousThinking == "" {
+				previousThinking = string(llm.ThinkingLevelOff)
+			}
+		case "rename":
+			previousName = activeApp.SessionName()
 		}
 	}
 	r.mu.Lock()
@@ -204,7 +258,6 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 
 		r.mu.Unlock()
 		snapshot.Sessions = listSessionOptions(snapshot.Cwd)
-		// 操作结束的快照同样要带子任务面板,否则 reset 路径会把任务列表清空
 		snapshot.Subagents = r.subagentSnapshotLocked()
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
@@ -212,8 +265,16 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		var notice string
 		switch req.Kind {
 		case "rename":
-			if result.Err == nil {
-				notice = "Session renamed: " + snapshot.SessionName
+			if result.Err == nil && snapshot.SessionName != previousName {
+				notice = "Thread name changed to " + snapshot.SessionName
+			}
+		case "model":
+			if result.Err == nil && snapshot.CurrentModel.Key() != previousModel {
+				notice = "Model changed to " + snapshot.CurrentModel.ID
+			}
+		case "thinking":
+			if result.Err == nil && snapshot.Thinking != previousThinking {
+				notice = "Thinking changed to " + snapshot.Thinking
 			}
 		case "new":
 			if result.Err == nil {
@@ -275,7 +336,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	var message *tui.Message
 	var previousID string
 	var status string
-	steeringChanged := false
+	queueChanged := false
 	previousToolAnchor := r.activeToolAnchorID
 	switch event := event.(type) {
 	case llm.AgentStartEvent:
@@ -293,7 +354,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			r.sealToolGroupLocked()
 			r.userMessages++
 			if r.userMessages > 1 {
-				steeringChanged = true
+				queueChanged = true
 				r.userID = fmt.Sprintf("%s/live/%d/user/%d", r.namespace, r.sequence, r.userMessages)
 			}
 			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
@@ -346,7 +407,7 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			message.ID = r.sourceID(event.SourceID, "message")
 			r.renameMessageLocked(previousID, message.ID)
 			if message.ToolGroup != nil {
-				message.ToolGroup = cloneToolGroup(message.ToolGroup)
+				message.ToolGroup = message.ToolGroup.Clone()
 				message.ToolGroup.ID = message.ID + "/tools"
 			}
 		}
@@ -414,7 +475,11 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	if status != "" {
 		notifications = append(notifications, tui.StatusMsg(status))
 	}
-	if steeringChanged && r.app != nil {
+	if queueChanged && r.app != nil {
+		notifications = append(notifications, tui.QueueStateMsg{
+			Steering: r.app.SteeringMessages(), SteeringInputs: r.app.SteeringUserMessages(), SteeringRevision: r.app.SteeringRevision(),
+			FollowUp: r.app.FollowUpMessages(), FollowUpInputs: r.app.FollowUpUserMessages(), FollowUpRevision: r.app.FollowUpRevision(),
+		})
 		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.SteeringMessages(), Inputs: r.app.SteeringUserMessages(), Revision: r.app.SteeringRevision()})
 	}
 	send := r.send
@@ -423,12 +488,6 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	if send != nil {
 		for _, message := range notifications {
 			send(message)
-		}
-		// Agent/Bash tools can outlive the parent turn. Publish the root-store
-		// task projection as soon as a parent event may have changed it; the
-		// TUI then keeps polling only while a task remains running.
-		if _, ok := event.(llm.ToolExecutionEndEvent); ok {
-			send(tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot()})
 		}
 	}
 	return nil
@@ -503,7 +562,7 @@ func (r *Runtime) resetProjectionLocked() {
 func (r *Runtime) partialAssistantLocked() *tui.Message {
 	for i := len(r.messages) - 1; i >= 0; i-- {
 		message := r.messages[i]
-		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.Thinking != "" || message.ToolGroup != nil || message.Aborted) {
+		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.ToolGroup != nil || message.Aborted) {
 			copy := message
 			return &copy
 		}
@@ -525,22 +584,10 @@ func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Mess
 		converted.Role, converted.Text = "user", textContent(message.Content)
 		converted.Images = imageViews(message.Content)
 		converted.Skill = skillInvocation(converted.Text)
-	case llm.AssistantMessage:
-		converted.Role = "assistant"
-		for _, content := range message.Content {
-			switch content := content.(type) {
-			case llm.TextContent:
-				converted.Text += content.Text
-			case llm.ThinkingContent:
-				converted.Thinking += content.Thinking
-			}
-		}
-	case llm.ToolResultMessage:
-		return tui.Message{}, false
 	default:
 		return tui.Message{}, false
 	}
-	return converted, converted.Text != "" || converted.Thinking != "" || len(converted.Images) > 0
+	return converted, converted.Text != "" || len(converted.Images) > 0
 }
 
 func imageViews(contents []llm.Content) []tui.ImageView {
@@ -606,29 +653,11 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	steering := r.app.SteeringMessages()
 	steeringInputs := r.app.SteeringUserMessages()
+	followUp := r.app.FollowUpMessages()
+	followUpInputs := r.app.FollowUpUserMessages()
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
-}
-
-// subagentSnapshotLocked 投影子任务面板。app 指针在主锁下取,transcript
-// 投影则在独立的 subagentMu 下进行:磁盘读不能落在事件投影的主锁上
-func (r *Runtime) subagentSnapshotLocked() tui.SubagentSnapshot {
-	r.mu.Lock()
-	activeApp := r.app
-	r.mu.Unlock()
-	if activeApp == nil {
-		return tui.SubagentSnapshot{}
-	}
-	store := activeApp.SubagentStore()
-	if store == nil {
-		return tui.SubagentSnapshot{}
-	}
-	r.subagentMu.Lock()
-	defer r.subagentMu.Unlock()
-	viewingTaskID := store.ViewingTaskID()
-	tasks := r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
-	r.subagentRevision++
-	return tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills,
+		Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision(), FollowUp: followUp, FollowUpInputs: followUpInputs, FollowUpRevision: r.app.FollowUpRevision()}
 }
 
 func listSessionOptions(cwd string) []tui.SessionOption {
@@ -657,6 +686,12 @@ func (r *Runtime) snapshot() tui.Snapshot {
 	return snapshot
 }
 
+// thinkingLevelOrder 是档位从低到高的固定顺序，选择器与快捷键都按它展示
+var thinkingLevelOrder = []llm.ThinkingLevel{
+	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
+	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
+}
+
 func thinkingLevels(model llm.Model) []string {
 	if !model.Reasoning {
 		return []string{"off"}
@@ -665,15 +700,23 @@ func thinkingLevels(model llm.Model) []string {
 		return []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 	}
 	levels := make([]string, 0, len(model.ThinkingLevelMap))
-	for level := range model.ThinkingLevelMap {
-		levels = append(levels, string(level))
+	for _, level := range thinkingLevelOrder {
+		if _, ok := model.ThinkingLevelMap[level]; ok {
+			levels = append(levels, string(level))
+		}
 	}
-	sort.Strings(levels)
 	return levels
 }
 
 func New(cfg app.Config, cwd, branch string) *Runtime {
 	return &Runtime{cfg: cfg, cwd: cwd, branch: branch}
+}
+
+// SetProjectContext 在打开会话后更新显示用的项目上下文
+func (r *Runtime) SetProjectContext(cwd, branch string) {
+	r.mu.Lock()
+	r.cwd, r.branch = cwd, branch
+	r.mu.Unlock()
 }
 
 func (r *Runtime) Attach(a *app.App) {
@@ -732,24 +775,85 @@ func (r *Runtime) EnqueueSteeringMessage(value llm.UserMessage) error {
 	return activeApp.EnqueueSteeringMessage(value)
 }
 
+func (r *Runtime) RestoreFollowUpMessages() []llm.UserMessage {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.TakeFollowUpMessages()
+}
+
+func (r *Runtime) ClearFollowUp() []llm.UserMessage {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return nil
+	}
+	return activeApp.ClearFollowUp()
+}
+
+func (r *Runtime) EnqueueFollowUp(value string) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrFollowUpUnavailable
+	}
+	return activeApp.EnqueueFollowUp(value)
+}
+
+func (r *Runtime) EnqueueFollowUpMessage(value llm.UserMessage) error {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return app.ErrFollowUpUnavailable
+	}
+	return activeApp.EnqueueFollowUpMessage(value)
+}
+
 func (r *Runtime) HandleEvent(event llm.AgentEvent) error { return r.handleEvent(event) }
 func (r *Runtime) Request(request tui.Request) tea.Cmd    { return r.request(request) }
 
-// Context 返回只读的 context 查询命令，不创建 App operation
-func (r *Runtime) Context() tea.Cmd {
+// Status 返回只读的会话状态命令，不创建 App operation
+func (r *Runtime) Status() tea.Cmd {
 	return func() tea.Msg {
 		r.mu.Lock()
 		activeApp := r.app
 		r.mu.Unlock()
 		if activeApp == nil {
-			return tui.ContextUsageMsg{Err: errors.New("context usage is unavailable")}
+			return tui.SessionStatusMsg{Err: errors.New("status is unavailable")}
 		}
+		model := activeApp.CurrentModel()
 		usage := activeApp.ContextUsage()
-		return tui.ContextUsageMsg{Tokens: usage.Tokens, ContextWindow: usage.ContextWindow, Available: usage.Available}
+		return tui.SessionStatusMsg{
+			Model:         model.ID,
+			Provider:      model.Provider,
+			ThreadName:    activeApp.SessionName(),
+			SessionID:     activeApp.SessionID(),
+			Transcript:    activeApp.SessionPath(),
+			Tokens:        usage.Tokens,
+			ContextWindow: usage.ContextWindow,
+			Available:     usage.Available,
+		}
 	}
 }
-func (r *Runtime) Cancel()                { r.cancelCurrent() }
-func (r *Runtime) Wait()                  { r.waitCurrent() }
+func (r *Runtime) Cancel() { r.cancelCurrent() }
+func (r *Runtime) Wait()   { r.waitCurrent() }
+
+// ShutdownSubagents 终止所有运行中的子任务与后台命令
+func (r *Runtime) ShutdownSubagents() int {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return 0
+	}
+	return activeApp.ShutdownSubagents()
+}
 func (r *Runtime) Snapshot() tui.Snapshot { return r.snapshot() }
 
 func preserveDisplayMetadata(messages, previous []tui.Message) []tui.Message {
@@ -759,14 +863,14 @@ func preserveDisplayMetadata(messages, previous []tui.Message) []tui.Message {
 	}
 	for i := range messages {
 		before := old[messages[i].ID]
-		messages[i].Elapsed, messages[i].Divider = before.Elapsed, before.Divider
+		messages[i].Divider = before.Divider
 		messages[i].Revision = before.Revision + 1
 		if messages[i].ToolGroup != nil && before.ToolGroup != nil {
 			for j := range messages[i].ToolGroup.Calls {
 				call := &messages[i].ToolGroup.Calls[j]
 				if index := findToolCall(before.ToolGroup, call.ID); index >= 0 {
 					oldCall := before.ToolGroup.Calls[index]
-					call.Elapsed, call.StartedAt, call.EndedAt = oldCall.Elapsed, oldCall.StartedAt, oldCall.EndedAt
+					call.StartedAt = oldCall.StartedAt
 				}
 			}
 		}

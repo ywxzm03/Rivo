@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,11 +28,15 @@ Options:
       --cost <path>       Print cost totals for a JSONL session and exit
       --continue          Continue the most recent session
       --resume            Alias of --continue
+      --session <path|id> Open a session by path, exact ID, or ID prefix
+      --session-id <id>   Open an exact project ID, or create it when missing
       --print, -p         Non-interactive mode: process prompt and exit
       --provider <name>   Provider for --model (requires --model)
       --model <pattern>   Model id, provider/model, or substring, with optional :level suffix
-      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max
+      --effort <level>    Reasoning effort: off, minimal, low, medium, high, xhigh, max
 
+With a terminal, a positional prompt is submitted automatically in the TUI.
+Without a terminal, a positional prompt runs once and exits.
 With --print, the prompt comes from positional arguments or piped stdin.
 `
 
@@ -46,6 +51,14 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 
 // repl 组装 Agent 并进入交互模式，continueRecent 为 true 时恢复最近会话
 func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
+	target := sessionTarget{kind: targetNew}
+	if continueRecent {
+		target.kind = targetRecent
+	}
+	return replTarget(cfg, target, stdin, stdout, stderr)
+}
+
+func replTarget(cfg app.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if warning, ok := ev.(llm.WarningEvent); ok {
 			_, err := fmt.Fprintf(stderr, "[warning] %s\n", warning.Message)
@@ -79,14 +92,8 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 		return nil
 	}
 
-	// 1.组装 Agent：恢复最近会话或新建
-	var a *app.App
-	var err error
-	if continueRecent {
-		a, err = resumeRecentApp(cfg, onEvent)
-	} else {
-		a, err = app.New(cfg, onEvent)
-	}
+	// 1.按 CLI 目标组装 Agent
+	a, err := openSessionTarget(cfg, target, onEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
@@ -109,11 +116,7 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 	}, func(ctx context.Context, instructions string) error {
 		return a.Compact(ctx, instructions)
 	}, func() ([]session.SessionInfo, error) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		return session.ListSessions(cwd)
+		return session.ListSessions(a.Cwd())
 	}, func(path string) error {
 		na, err := app.Open(path, cfg, onEvent)
 		if err != nil {
@@ -146,6 +149,92 @@ func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, erro
 		return app.New(cfg, onEvent)
 	}
 	return app.Open(infos[0].Path, cfg, onEvent)
+}
+
+type targetKind uint8
+
+const (
+	targetNew targetKind = iota
+	targetRecent
+	targetPath
+	targetID
+)
+
+type sessionTarget struct {
+	kind targetKind
+	path string
+	id   string
+}
+
+func openSessionTarget(cfg app.Config, target sessionTarget, onEvent llm.AgentEventSink) (*app.App, error) {
+	switch target.kind {
+	case targetRecent:
+		return resumeRecentApp(cfg, onEvent)
+	case targetPath:
+		return app.Open(target.path, cfg, onEvent)
+	case targetID:
+		return app.NewWithSessionID(cfg, target.id, onEvent)
+	default:
+		return app.New(cfg, onEvent)
+	}
+}
+
+func resolveSessionTarget(cwd, sessionArg, sessionID string, continueRecent bool) (sessionTarget, error) {
+	if sessionArg != "" {
+		if strings.ContainsAny(sessionArg, `/\\`) || strings.HasSuffix(sessionArg, ".jsonl") {
+			path := sessionArg
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cwd, path)
+			}
+			path = filepath.Clean(path)
+			return sessionTarget{kind: targetPath, path: path}, nil
+		}
+		local, err := session.ListSessions(cwd)
+		if err != nil {
+			return sessionTarget{}, err
+		}
+		if match := matchSession(local, sessionArg); match != nil {
+			return sessionTarget{kind: targetPath, path: match.Path}, nil
+		}
+		all, err := session.ListAllSessions()
+		if err != nil {
+			return sessionTarget{}, err
+		}
+		if match := matchSession(all, sessionArg); match != nil {
+			return sessionTarget{kind: targetPath, path: match.Path}, nil
+		}
+		return sessionTarget{}, fmt.Errorf("no session found matching %q", sessionArg)
+	}
+	if sessionID != "" {
+		local, err := session.ListSessions(cwd)
+		if err != nil {
+			return sessionTarget{}, err
+		}
+		for _, info := range local {
+			if info.ID == sessionID {
+				return sessionTarget{kind: targetPath, path: info.Path}, nil
+			}
+		}
+		return sessionTarget{kind: targetID, id: sessionID}, nil
+	}
+	if continueRecent {
+		return sessionTarget{kind: targetRecent}, nil
+	}
+	return sessionTarget{kind: targetNew}, nil
+}
+
+func matchSession(infos []session.SessionInfo, value string) *session.SessionInfo {
+	for i := range infos {
+		if infos[i].ID == value {
+			return &infos[i]
+		}
+	}
+	for i := range infos {
+		if strings.HasPrefix(infos[i].ID, value) {
+			return &infos[i]
+		}
+	}
+	return nil
 }
 
 func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context, string) error, compact func(context.Context, string) error, listSessions func() ([]session.SessionInfo, error), resume func(string) error, reload func()) int {
@@ -206,18 +295,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		switch args[i] {
-		case "--cost", "--provider", "--model", "--thinking":
+		case "--cost", "--provider", "--model", "--effort":
 			i++
 		}
 	}
-	// 2.正式解析：位置参数仅 --print 模式可用作提示词
+	// 2.正式解析：位置参数既可作为 TUI/REPL 初始 prompt，也可用于 --print
 	var (
 		continueRecent bool
 		printRequested bool
+		sessionArg     string
+		sessionID      string
 		costPath       string
 		providerArg    string
 		modelArg       string
-		thinkingArg    string
+		effortArg      string
 		positional     []string
 	)
 	for i := 0; i < len(args); i++ {
@@ -236,9 +327,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			costPath = args[i]
 		case "--continue", "--resume":
 			continueRecent = true
+		case "--session", "--session-id":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
+				return 2
+			}
+			i++
+			if arg == "--session" {
+				sessionArg = args[i]
+			} else {
+				sessionID = args[i]
+			}
 		case "--print", "-p":
 			printRequested = true
-		case "--provider", "--model", "--thinking":
+		case "--provider", "--model", "--effort":
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
 				return 2
@@ -249,8 +351,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				providerArg = args[i]
 			case "--model":
 				modelArg = args[i]
-			case "--thinking":
-				thinkingArg = args[i]
+			case "--effort":
+				effortArg = args[i]
 			}
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -262,13 +364,24 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if costPath != "" {
-		if continueRecent || printRequested || providerArg != "" || modelArg != "" || thinkingArg != "" || len(positional) > 0 {
+		if continueRecent || printRequested || sessionArg != "" || sessionID != "" || providerArg != "" || modelArg != "" || effortArg != "" || len(positional) > 0 {
 			fmt.Fprintln(stderr, "Rivo: --cost cannot be combined with runtime options or a prompt")
 			return 2
 		}
 		return costMode(costPath, stdout, stderr)
 	}
-	if !printRequested && len(positional) > 0 {
+	if sessionID != "" {
+		if sessionArg != "" || continueRecent {
+			fmt.Fprintln(stderr, "Rivo: --session-id cannot be combined with --session, --continue, or --resume")
+			return 2
+		}
+		if err := session.ValidateID(sessionID); err != nil {
+			fmt.Fprintf(stderr, "Rivo: invalid --session-id %q: %v\n", sessionID, err)
+			return 2
+		}
+	}
+
+	if len(positional) > 0 && strings.HasPrefix(positional[0], "-") {
 		fmt.Fprintf(stderr, "Rivo: unsupported argument %q\n", positional[0])
 		fmt.Fprintln(stderr, "Run 'Rivo --help' for usage.")
 		return 2
@@ -283,9 +396,22 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 	}
-	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, thinkingArg); err != nil {
+	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, effortArg); err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: failed to get working directory: %v\n", err)
+		return 2
+	}
+	target, err := resolveSessionTarget(cwd, sessionArg, sessionID, continueRecent)
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 2
+	}
+	if target.kind == targetID {
+		fmt.Fprintf(stderr, "Rivo: warning: no project session found with id %q; creating a new session with that id\n", target.id)
 	}
 
 	// 3.print 模式：单轮执行后退出
@@ -295,13 +421,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Rivo: %v\n", err)
 			return 2
 		}
-		return printMode(cfg, prompt, continueRecent, stdout, stderr)
+		return printModeTarget(cfg, prompt, target, stdout, stderr)
+	}
+	var initialPrompt string
+	if len(positional) > 0 {
+		initialPrompt = strings.Join(positional, " ")
 	}
 	// 终端交互使用全屏 TUI，管道/测试流保留逐行入口
 	if terminalStreams(stdin, stdout) {
-		return runTUI(cfg, continueRecent, stdin.(*os.File), stdout.(*os.File), stderr)
+		return runTUI(cfg, target, initialPrompt, stdin.(*os.File), stdout.(*os.File), stderr)
 	}
-	return repl(cfg, continueRecent, stdin, stdout, stderr)
+	if initialPrompt != "" {
+		return printModeTarget(cfg, initialPrompt, target, stdout, stderr)
+	}
+	return replTarget(cfg, target, stdin, stdout, stderr)
 }
 
 // costMode 读取指定 JSONL 会话并输出其累计 token 与美元费用
@@ -411,6 +544,15 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 		}
 	}
 	return 0
+}
+
+func printModeTarget(cfg app.Config, prompt string, target sessionTarget, stdout, stderr io.Writer) int {
+	a, err := openSessionTarget(cfg, target, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		return 1
+	}
+	return printMode(cfg, prompt, false, stdout, stderr, a)
 }
 
 // handleResume 打印会话列表并读取编号完成恢复，返回 false 表示输入读取失败

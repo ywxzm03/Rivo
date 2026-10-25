@@ -17,7 +17,7 @@ import (
 
 const lsDefaultLimit = 500
 
-type Ls struct{}
+type Ls struct{ WorkingDir string }
 
 func (l *Ls) Name() string { return "ls" }
 
@@ -64,7 +64,7 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, 
 	}
 
 	// 2.解析路径并确认是目录
-	absPath, err := resolvePathContext(ctx, path)
+	absPath, err := resolvePathFrom(path, l.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

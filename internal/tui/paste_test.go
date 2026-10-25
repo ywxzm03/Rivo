@@ -285,7 +285,7 @@ func TestClipboardPasteFolds(t *testing.T) {
 
 func TestFooterSingleLineStillGreen(t *testing.T) {
 	m := testModel(120, 30)
-	footer := ansi.Strip(m.statusBar())
+	footer := ansi.Strip(m.footer())
 	if strings.Count(footer, "\n") != 0 {
 		t.Fatalf("footer single line regression: %q", footer)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,24 @@ func TestBashExecutesAndCombinesOutput(t *testing.T) {
 	}
 	if result.Details != nil {
 		t.Errorf("Details = %#v, want nil", result.Details)
+	}
+}
+
+func TestBashUsesConfiguredWorkingDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash working directory test requires Unix shell")
+	}
+	workingDir := t.TempDir()
+	result, err := (&Bash{WorkingDir: workingDir}).Execute(context.Background(), map[string]any{"command": "pwd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(workingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(bashText(result)); got != want {
+		t.Fatalf("pwd = %q, want %q", got, want)
 	}
 }
 

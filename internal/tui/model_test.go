@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +20,22 @@ import (
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	os.Exit(m.Run())
+}
+
+func TestInitialPromptDispatchesOnce(t *testing.T) {
+	var requests []Request
+	m := NewWithInitialPrompt(Snapshot{}, Handlers{Request: func(request Request) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}}, "next prompt")
+	_ = m.Init()
+	_ = m.Init()
+	if len(requests) != 1 || requests[0].Kind != "run" || requests[0].Value != "next prompt" {
+		t.Fatalf("initial requests = %+v, want one run request", requests)
+	}
+	if !m.busy {
+		t.Fatal("initial prompt did not mark the operation busy")
+	}
 }
 
 func TestMarkdownRendererBoundsWidthAndRoleCache(t *testing.T) {
@@ -49,17 +65,20 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 	}
 }
 
-func TestAnimatedToolFramesReuseStaticMarkdownPreview(t *testing.T) {
+// 工具行的点击命中按消息缓存：同一帧内重复渲染不改变命中数量
+func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	m.showAllTools = true
-	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "**result**", Status: ToolPending, StartedAt: time.Now()}}}
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess, ArgsComplete: true}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
-	m.renderMessage(m.state.Messages[0])
-	first := len(m.markdownPreview)
-	m.renderMessage(m.state.Messages[0])
-	if len(m.markdownPreview) != first || first == 0 {
-		t.Fatalf("static tool markdown was reparsed: before=%d after=%d", first, len(m.markdownPreview))
+	m.refreshTranscript()
+	first := len(m.lastToolHits)
+	if first != 1 {
+		t.Fatalf("hits = %d, want 1", first)
+	}
+	m.refreshTranscript()
+	if len(m.lastToolHits) != first || m.lastToolHits[0] != m.cache["tools"].hits[0] {
+		t.Fatalf("hits changed between renders: %+v", m.lastToolHits)
 	}
 }
 
@@ -102,6 +121,9 @@ func assertFrame(t *testing.T, m *Model) {
 		if selectorRows != m.selector.height(m.height-2) {
 			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), selectorRows)
 		}
+	} else {
+		// 输入态在视口与输入框之间固定留一行空白
+		dock++
 	}
 	if got := m.viewport.Height + dock; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
@@ -125,7 +147,7 @@ func TestLayout(t *testing.T) {
 	for _, size := range [][2]int{{120, 30}, {80, 24}, {60, 15}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			m := testModel(size[0], size[1])
-			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Thinking: "Let me think", Text: "```go\n" + strings.Repeat("long_code", 40), Elapsed: 12 * time.Second}}
+			m.state.Messages = []Message{{ID: "u", Role: "user", Text: strings.Repeat("中文 👋 **bold** ", 30)}, {ID: "a", Role: "assistant", Text: "```go\n" + strings.Repeat("long_code", 40)}}
 			m.refreshTranscript()
 			assertFrame(t, m)
 			for i, line := range strings.Split(m.renderMessage(m.state.Messages[0]), "\n") {
@@ -209,6 +231,113 @@ func TestBusySubmitRoutesPlainTextToSteering(t *testing.T) {
 	}
 }
 
+func TestBusyTabRoutesPlainTextToFollowUp(t *testing.T) {
+	m := testModel(60, 15)
+	var request Request
+	m.handlers.Request = func(got Request) tea.Cmd {
+		request = got
+		return nil
+	}
+	m.busy, m.status = true, "Working"
+	typeText(m, "follow up this run")
+	press(m, tea.KeyTab)
+	if request.Kind != "follow-up" || request.Value != "follow up this run" {
+		t.Fatalf("request = %+v, want follow-up request", request)
+	}
+	if m.editor.Value() != "" || !m.busy {
+		t.Fatal("follow-up submission cleared busy state incorrectly")
+	}
+}
+
+func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
+	m := testModel(60, 15)
+	m.busy, m.status = true, "Working"
+	m.state.FollowUp = []string{"follow-up"}
+	m.state.FollowUpInputs = []llm.UserMessage{textUserMessage("follow-up")}
+	typeText(m, "/clear-follow-up")
+	press(m, tea.KeyEnter)
+	if len(m.state.FollowUp) != 0 || len(m.state.FollowUpInputs) != 0 {
+		t.Fatalf("follow-up state = %v/%v, want empty", m.state.FollowUp, m.state.FollowUpInputs)
+	}
+	if !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Cleared 1 follow-up message") {
+		t.Fatalf("clear notice = %+v", m.state.Messages[len(m.state.Messages)-1])
+	}
+}
+
+func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
+	m := testModel(60, 15)
+	var routed []string
+	m.handlers.EnqueueSteeringMessage = func(message llm.UserMessage) error {
+		routed = append(routed, "steering:"+userMessageText(message))
+		return nil
+	}
+	m.handlers.EnqueueFollowUpMessage = func(message llm.UserMessage) error {
+		routed = append(routed, "follow-up:"+userMessageText(message))
+		return nil
+	}
+	m.busy, m.compacting = true, true
+	m.operationIsRun = true
+	typeText(m, "steer during compact")
+	press(m, tea.KeyEnter)
+	typeText(m, "follow during compact")
+	press(m, tea.KeyTab)
+	if len(m.compactionQueuedMessages) != 2 || len(routed) != 0 {
+		t.Fatalf("staged = %+v, routed = %v", m.compactionQueuedMessages, routed)
+	}
+	m.Update(StatusMsg("Working"))
+	if len(m.compactionQueuedMessages) != 0 {
+		t.Fatal("compaction staged messages were not cleared after flush")
+	}
+	if !reflect.DeepEqual(routed, []string{"steering:steer during compact", "follow-up:follow during compact"}) {
+		t.Fatalf("routed = %v", routed)
+	}
+	if !reflect.DeepEqual(m.state.Steering, []string{"steer during compact"}) || !reflect.DeepEqual(m.state.FollowUp, []string{"follow during compact"}) {
+		t.Fatalf("queue mirror = %v/%v", m.state.Steering, m.state.FollowUp)
+	}
+}
+
+// 回填图片 follow-up 后必须仍可组装出原图片，验证 marker 与 images 表同步
+func TestRestoreFollowUpKeepsImageAttached(t *testing.T) {
+	m := testModel(60, 15)
+	image := llm.ImageContent{Data: "aGk=", MIMEType: "image/png"}
+	queued := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "look"}, image}}
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage { return []llm.UserMessage{queued} }
+	m.busy = true
+	if restored := m.restoreQueuedFollowUp(); restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+	built, ok := m.buildUserMessage()
+	if !ok {
+		t.Fatal("restored editor produced no message")
+	}
+	var images int
+	for _, content := range built.Content {
+		if got, ok := content.(llm.ImageContent); ok {
+			images++
+			if got != image {
+				t.Fatalf("image = %+v, want %+v", got, image)
+			}
+		}
+	}
+	if images != 1 {
+		t.Fatalf("image content count = %d, want 1", images)
+	}
+}
+
+func TestCompactionFailureRestoresStagedInput(t *testing.T) {
+	m := testModel(60, 15)
+	m.handlers.EnqueueSteeringMessage = func(llm.UserMessage) error { return fmt.Errorf("queue unavailable") }
+	m.busy, m.compacting = true, true
+	typeText(m, "restore after compact failure")
+	press(m, tea.KeyEnter)
+	m.Update(StatusMsg("Compaction failed"))
+	if got := m.editor.Value(); got != "restore after compact failure" {
+		t.Fatalf("editor = %q, want staged input restored", got)
+	}
+	if len(m.compactionQueuedMessages) != 0 {
+		t.Fatal("staged input retained after restoration")
+	}
+}
 func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 	m := testModel(80, 24)
 	var requests []Request
@@ -223,7 +352,7 @@ func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 	}
 	m.busy, m.status = true, "Working"
 	typeText(m, "draft")
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if restored != 1 {
 		t.Fatalf("restore calls = %d, want one call", restored)
 	}
@@ -256,7 +385,7 @@ func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
 	m.busy, m.status = true, "Working"
 	typeText(m, "same message")
 	press(m, tea.KeyEnter)
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if len(queued) != 0 {
 		t.Fatalf("backend queue = %+v, want empty after dequeue", queued)
 	}
@@ -268,59 +397,12 @@ func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
 	}
 }
 
-func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'[', 'A'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'O', 'A'}, Alt: true},
-	} {
-		m := testModel(80, 24)
-		m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-		m.busy = true
-		m.Update(key)
-		if got := m.editor.Value(); got != "queued" {
-			t.Fatalf("key %q restored editor = %q, want queued", key.String(), got)
-		}
-	}
-}
-
-func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
-	if !shouldRestoreSteeringOnPlainUp(runtime.GOOS) {
-		t.Skip("plain Up fallback is macOS-specific")
-	}
-	m := testModel(80, 24)
-	m.busy = true
-	m.state.Steering = []string{"queued"}
-	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if got := m.editor.Value(); got != "queued" {
-		t.Fatalf("editor = %q, want queued message", got)
-	}
-	if len(m.state.Steering) != 0 {
-		t.Fatalf("steering = %+v, want empty", m.state.Steering)
-	}
-}
-
-func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
-	for _, test := range []struct {
-		goos string
-		want bool
-	}{
-		{goos: "darwin", want: true},
-		{goos: "linux", want: false},
-		{goos: "windows", want: false},
-	} {
-		if got := shouldRestoreSteeringOnPlainUp(test.goos); got != test.want {
-			t.Fatalf("shouldRestoreSteeringOnPlainUp(%q) = %v, want %v", test.goos, got, test.want)
-		}
-	}
-}
-
 func TestOperationDonePreservesSteeringWithdrawalAgainstStaleSnapshot(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
 	m.state.Steering = []string{"queued"}
 	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "queued" {
 		t.Fatalf("editor = %q, want queued message", got)
 	}
@@ -339,7 +421,7 @@ func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
 	m.state.Steering = []string{"first", "second"}
 	m.layout()
 	plain := ansi.Strip(m.View())
-	for _, want := range []string{"Steering: first", "Steering: second", "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"} {
+	for _, want := range []string{"Steering: first", "Steering: second", "↳ " + steeringDequeueKeyLabel() + " to edit steering"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view = %q, missing %q", plain, want)
 		}
@@ -347,18 +429,71 @@ func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
 	assertFrame(t, m)
 }
 
-func TestSteeringDequeueKeyLabelByOS(t *testing.T) {
+// 队列撤回用横向键,与任务列表的 Up/Down 选择互不冲突
+func TestDequeueKeyLabels(t *testing.T) {
+	if got := steeringDequeueKeyLabel(); got != "shift+left" {
+		t.Fatalf("steering label = %q", got)
+	}
+	if got := followUpDequeueKeyLabel(); got != "shift+right" {
+		t.Fatalf("follow-up label = %q", got)
+	}
+}
+
+func TestShiftRightRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
+	m := testModel(80, 24)
+	restored := 0
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		restored++
+		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	}
+	m.busy, m.status = true, "Working"
+	m.state.Steering = []string{"keep steering"}
+	typeText(m, "draft")
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
+	if restored != 1 {
+		t.Fatalf("restore calls = %d, want one call", restored)
+	}
+	if got, want := m.editor.Value(), "queued follow-up\n\ndraft"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if len(m.state.Steering) != 1 || m.state.Steering[0] != "keep steering" {
+		t.Fatalf("steering = %v, want untouched", m.state.Steering)
+	}
+}
+
+func TestFollowUpDequeueKeyVariants(t *testing.T) {
 	for _, test := range []struct {
-		goos string
-		want string
+		name string
+		key  tea.KeyMsg
+		want bool
 	}{
-		{goos: "darwin", want: "option+up"},
-		{goos: "windows", want: "alt+up"},
-		{goos: "linux", want: "alt+up"},
+		{name: "shift-right", key: tea.KeyMsg{Type: tea.KeyShiftRight}, want: true},
+		{name: "shift-left", key: tea.KeyMsg{Type: tea.KeyShiftLeft}, want: false},
+		{name: "plain-right", key: tea.KeyMsg{Type: tea.KeyRight}, want: false},
+		{name: "alt-right", key: tea.KeyMsg{Type: tea.KeyRight, Alt: true}, want: false},
 	} {
-		if got := steeringDequeueKeyLabelForOS(test.goos); got != test.want {
-			t.Fatalf("steeringDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			if got := isFollowUpDequeueKey(test.key); got != test.want {
+				t.Fatalf("isFollowUpDequeueKey(%q) = %v, want %v", test.key.String(), got, test.want)
+			}
+		})
+	}
+}
+
+func TestPlainDownWithoutFollowUpNavigatesHistory(t *testing.T) {
+	m := testModel(80, 24)
+	restored := 0
+	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+		restored++
+		return []llm.UserMessage{textUserMessage("queued")}
+	}
+	typeText(m, "draft")
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.editor.Value(); got != "draft" {
+		t.Fatalf("editor = %q, want draft after history navigation", got)
+	}
+	if restored != 0 {
+		t.Fatalf("restore calls = %d, want none without visible follow-up", restored)
 	}
 }
 
@@ -434,7 +569,7 @@ func TestEmptySteeringRestoreKeepsSnapshotWithoutReplayingIt(t *testing.T) {
 	m.state.Steering = []string{"already consumed"}
 	m.state.SteeringInputs = []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "already consumed"}}}}
 	m.handlers.RestoreSteeringMessages = func() []llm.UserMessage { return nil }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "" {
 		t.Fatalf("editor = %q, want no stale replay", got)
 	}
@@ -492,7 +627,7 @@ func TestCompletionAndSelectors(t *testing.T) {
 	if m.selector != nil || !m.editor.Focused() || m.closing {
 		t.Fatal("Ctrl+C should cancel selector")
 	}
-	typeText(m, "/thin")
+	typeText(m, "/eff")
 	press(m, tea.KeyEnter)
 	if m.selector == nil || m.selector.kind != "thinking" {
 		t.Fatal("Enter must complete and execute")
@@ -743,24 +878,27 @@ func TestStreamingUpsertFlushAndScroll(t *testing.T) {
 
 func TestFooterSingleLine(t *testing.T) {
 	m := testModel(120, 30)
-	status := ansi.Strip(m.statusBar())
-	if strings.Count(status, "\n") != 0 {
-		t.Fatalf("status bar should be a single line: %q", status)
+	footer := ansi.Strip(m.footer())
+	if strings.Count(footer, "\n") != 0 {
+		t.Fatalf("footer should be a single line: %q", footer)
 	}
-	if ansi.StringWidth(status) != 120 {
-		t.Fatalf("status bar width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(status), status)
+	if ansi.StringWidth(footer) != 120 {
+		t.Fatalf("footer width = %d, want 120 (full-width aligned): %q", ansi.StringWidth(footer), footer)
 	}
-	if !strings.HasPrefix(status, "/project/Rivo [feat(tui)/fullscreen-tui]") || !strings.HasSuffix(status, "model-00 • high") {
-		t.Fatalf("status bar should align cwd and model/thinking: %q", status)
+	if !strings.HasPrefix(footer, "/project/Rivo • \uf418 feat(tui)/fullscreen-tui") {
+		t.Fatalf("footer should start with cwd • icon branch: %q", footer)
+	}
+	if !strings.HasSuffix(footer, "model-00 • high") {
+		t.Fatalf("footer should end with model and thinking: %q", footer)
 	}
 }
 
 func TestFooterWithoutBranch(t *testing.T) {
 	m := testModel(120, 30)
 	m.state.Branch = ""
-	status := ansi.Strip(m.statusBar())
-	if !strings.HasPrefix(status, "/project/Rivo") || strings.Contains(status, "[") {
-		t.Fatalf("empty branch should drop brackets: %q", status)
+	footer := ansi.Strip(m.footer())
+	if !strings.HasPrefix(footer, "/project/Rivo ") || strings.Contains(footer, "\uf418") || strings.Contains(footer, "Rivo •") {
+		t.Fatalf("empty branch should drop the separator and icon: %q", footer)
 	}
 }
 
@@ -772,18 +910,18 @@ func TestSnapshotIsolationAndFooter(t *testing.T) {
 		t.Fatal("snapshot aliases nested slices")
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(m.statusBar()), "(provider-0)") {
-		t.Fatal("wide status bar should include provider")
+	if strings.Contains(ansi.Strip(m.footer()), "(provider-") {
+		t.Fatalf("footer should never show the provider: %q", ansi.Strip(m.footer()))
 	}
 	s = testState()
 	s.ModelKey, s.Thinking = s.Models[3].Key(), "low"
 	m.Update(OperationDoneMsg{Snapshot: &s})
-	if !strings.Contains(ansi.Strip(m.statusBar()), "model-03 • low") {
-		t.Fatalf("snapshot status bar = %q", ansi.Strip(m.statusBar()))
+	if !strings.Contains(ansi.Strip(m.footer()), "model-03 • low") {
+		t.Fatalf("snapshot footer = %q", ansi.Strip(m.footer()))
 	}
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
-	if strings.Contains(ansi.Strip(m.statusBar()), "(provider-") {
-		t.Fatal("narrow status bar should omit provider")
+	if strings.Contains(ansi.Strip(m.footer()), "provider-") {
+		t.Fatal("narrow footer should still omit provider")
 	}
 }
 
@@ -861,7 +999,8 @@ func TestTerminalMouseAndClipboardInput(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	m.editor.SetValue("hello")
 	m.layout()
-	y := m.viewport.Height + 1
+	// 视口与输入框之间有一行空白，编辑器首行下移一行
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	cmd := func() tea.Msg {
 		_, command := m.Update(tea.MouseMsg{X: 6, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
@@ -897,7 +1036,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	m.handlers.WriteClipboard = func(value string) error { copied = value; return nil }
 	now := time.Unix(1000, 0)
 	m.clock = func() time.Time { return now }
-	y := m.viewport.Height + 1
+	y := m.viewport.Height + 2
 	m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	now = now.Add(100 * time.Millisecond)
 	_, cmd := m.Update(tea.MouseMsg{X: 3, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
@@ -908,7 +1047,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 	if copied != "hello" || m.editor.Value() != "hello world" {
 		t.Fatalf("double click copied %q or changed input to %q", copied, m.editor.Value())
 	}
-	border := ansi.Strip(m.frameLines()[m.viewport.Height])
+	border := ansi.Strip(m.frameLines()[m.viewport.Height+1])
 	if !strings.HasSuffix(border, " copied! ──") || !strings.Contains(border, "Working") {
 		t.Fatalf("copy confirmation must be on the right beside working status: %q", border)
 	}

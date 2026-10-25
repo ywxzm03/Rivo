@@ -2,9 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -16,11 +13,14 @@ import (
 
 const jumpToBottomLabel = " Jump to bottom ↓ "
 
+// branchIcon 是 git 分支图标（Nerd Font octicon git-branch），放在分支名左侧
+const branchIcon = "\uf418"
+
 type jumpPillBounds struct {
 	left, right, y int
 }
 
-// layout 先为底部状态区和输入坞分配高度，再把剩余空间交给消息视口
+// layout 先为 footer 和输入坞分配高度，再把剩余空间交给消息视口
 func (m *Model) layout() {
 	if m.width == 0 {
 		return
@@ -53,16 +53,19 @@ func (m *Model) layout() {
 	if previousWidth != m.editor.Width() || previousHeight != m.editor.Height() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
-	// Reserve one row for the combined cwd/model status bar in the bottom status area.
-	dock := 1 + m.pendingRows() + m.editor.Height() + 2 + m.subagentRows()
+	dock := m.pendingRows() + m.editor.Height() + 2
 	if m.selector != nil {
 		m.selector.input.Width = max(1, m.width-3)
-		dock = 1 + m.selector.height(max(1, m.height-2)) + m.subagentRows()
+		dock = m.selector.height(max(1, m.height-2))
 	} else {
-		dock += m.completionRows(len(m.completionItems()))
+		// 视口与输入框上边框之间保留一行空白，避免长消息贴边
+		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
-	m.viewport.Height = max(0, m.height-dock)
+	// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
+	// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
+	// 补白就落在任务列表下方,看起来像是底部多了几行空行
+	m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -87,7 +90,18 @@ func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int)
 }
 
 // View 只拼接显示缓存，不调用后台运行器或 Markdown 解析器
-func (m *Model) View() string {
+// View 渲染一帧。panic 时先转储堆栈再原样抛出
+func (m *Model) View() (view string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			dumpPanic("view", recovered)
+			panic(recovered)
+		}
+	}()
+	return m.view()
+}
+
+func (m *Model) view() string {
 	if m.width == 0 {
 		return ""
 	}
@@ -99,13 +113,10 @@ func (m *Model) View() string {
 		lines = append(lines, make([]string, m.height-len(lines))...)
 	}
 	if len(lines) > m.height {
-		// 输入坞高度已预先测量，只有异常子组件才会溢出，此时保住固定底栏边界
-		if m.height <= 1 {
-			lines = lines[len(lines)-1:]
-		} else {
-			footerStart := max(0, len(lines)-1)
-			lines = append(lines[:min(m.height-1, footerStart)], lines[footerStart:]...)
-		}
+		// 输入坞高度已预先测量，只有异常子组件才会溢出。
+		// 从底部整体保留 m.height 行:输入框、footer、任务行都在底部,
+		// 被裁掉的只会是 transcript 顶部,用户仍有完整输入入口
+		lines = lines[len(lines)-m.height:]
 	}
 	m.paintJumpPill(lines)
 	for i := range lines {
@@ -128,7 +139,6 @@ func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
 		return jumpPillBounds{}, false
 	}
 	left := (m.width - width) / 2
-	// The transcript starts at the first frame row; overlay its last visible row.
 	return jumpPillBounds{left: left, right: left + width, y: m.viewport.Height - 1}, true
 }
 
@@ -172,23 +182,40 @@ func (m *Model) jumpToBottom() {
 }
 
 func (m *Model) frameLines() []string {
-	lines := make([]string, 0, m.height)
+	var lines []string
 	if m.viewport.Height > 0 {
-		lines = append(lines, splitFrameLines(m.viewport.View())...)
+		// viewport 内容不足时不补行,会让整帧比终端矮,
+		// 补白就落到任务列表下方。这里按声明高度补齐
+		body := splitFrameLines(m.viewport.View())
+		for len(body) < m.viewport.Height {
+			body = append(body, "")
+		}
+		lines = append(lines, body...)
 	}
 	if m.selector != nil {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
-		if m.viewingTaskID == "" {
-			lines = append(lines, m.pendingLines()...)
+		// 子任务视图显示该任务自己的队列;主视图显示主 agent 的
+		lines = append(lines, m.pendingLines()...)
+		// 消息区与输入框之间留一行空白，长消息不会贴上边框。
+		// 视口已被压到 0 行时省略它,否则总行数会溢出并挤掉输入框
+		if m.viewport.Height > 0 {
+			lines = append(lines, "")
+		}
+		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
+		if completions := m.completionView(); completions != "" {
+			lines = append(lines, splitFrameLines(completions)...)
 		}
 		label := ""
+		borderColor := inputBorder
 		if m.busy {
+			// 运行中的旋转器与状态文字用主题紫，与选中态一致
 			label = m.spinner.View() + " " + m.status
+			borderColor = accentColor
 		} else if m.status != "" {
 			label = m.status
 		}
-		borderColor := inputBorder
+		// 子任务视图的输入框边框用蓝色,并在标签位置显示任务详情
 		if m.viewingTaskID != "" {
 			label = m.subagentDetailHeader()
 			borderColor = blueColor
@@ -198,75 +225,75 @@ func (m *Model) frameLines() []string {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
 			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
-				border = rule(m.width-ansi.StringWidth(notice), label, inputBorder, false) + colored(mutedColor, notice)
+				border = rule(m.width-ansi.StringWidth(notice), label, borderColor, false) + colored(mutedColor, notice)
 			}
 		}
 		lines = append(lines, border)
 		lines = append(lines, splitFrameLines(m.editor.View())...)
-		lines = append(lines, rule(m.width, "", inputBorder, false))
-		if completions := m.completionView(); completions != "" {
-			lines = append(lines, splitFrameLines(completions)...)
-		}
+		// 上下两条边框同色，运行中一起变紫
+		lines = append(lines, rule(m.width, "", borderColor, false))
 	}
-	// Keep cwd/branch and model/thinking on the same row at the top of the bottom status area.
-	lines = append(lines, m.statusBar())
-	if m.taskSelector {
-		lines = append(lines, colored(dimColor, "↑/↓ to select"))
-	}
+	lines = append(lines, splitFrameLines(m.footer())...)
 	lines = append(lines, m.taskRows()...)
 	return lines
 }
 
 // pendingRows 返回队列区域占用的行数
+// pendingRows 与 pendingLines 共用同一套布局计算,避免两处公式漂移
+// 导致多出或缺少一行
 func (m *Model) pendingRows() int {
-	if m.viewingTaskID != "" || m.selector != nil || len(m.state.Steering) == 0 {
+	if m.selector != nil {
 		return 0
 	}
-	rows := len(m.state.Steering) + 2
-	available := max(0, m.height-(m.editor.Height()+2)-m.completionRows(len(m.completionItems()))-1-m.subagentRows())
-	return min(rows, available)
+	return len(m.pendingLines())
 }
 
-// pendingLines 显示每条待消费消息和撤回提示
+// pendingLines 显示两类待消费消息和各自的回填提示
 func (m *Model) pendingLines() []string {
-	if len(m.state.Steering) == 0 {
+	steering, followUp := m.pendingQueueTexts()
+	if len(steering) == 0 && len(followUp) == 0 {
 		return nil
 	}
 	lines := []string{""}
-	for _, message := range m.state.Steering {
+	for _, message := range steering {
 		if index := strings.IndexByte(message, '\n'); index >= 0 {
 			message = message[:index]
 		}
 		lines = append(lines, ansi.Truncate(colored(dimColor, "Steering: "+message), m.width, "…"))
 	}
-	hint := "↳ " + steeringDequeueKeyLabel() + " to edit all queued messages"
-	lines = append(lines, ansi.Truncate(colored(dimColor, hint), m.width, "…"))
-	rows := m.pendingRows()
-	if len(lines) > rows {
-		if rows <= 0 {
-			return nil
+	for _, message := range followUp {
+		if index := strings.IndexByte(message, '\n'); index >= 0 {
+			message = message[:index]
 		}
-		if rows == 1 {
-			return lines[len(lines)-1:]
-		}
-		// 保留空行与提示，同时尽量多显示最早的消息
-		visible := append([]string(nil), lines[:rows-1]...)
-		visible = append(visible, lines[len(lines)-1])
-		return visible
+		lines = append(lines, ansi.Truncate(colored(dimColor, "Follow-up: "+message), m.width, "…"))
 	}
-	return lines
+	if len(steering) > 0 {
+		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+steeringDequeueKeyLabel()+" to edit steering"), m.width, "…"))
+	}
+	if len(followUp) > 0 {
+		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+followUpDequeueKeyLabel()+" to edit follow-up"), m.width, "…"))
+	}
+	// 队列区可用的行数:除输入坞、候选列表与任务列表外都归队列
+	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems()))-m.subagentRows())
+	// 优先保留消息与提示行,空行只在有富余时出现。
+	// 高度不足时整体不显示,避免只剩一个孤立空行
+	body := lines[1:]
+	if available <= 0 || len(body) == 0 {
+		return nil
+	}
+	if available >= len(body)+1 {
+		return append([]string{""}, body...)
+	}
+	if available == 1 {
+		return body[:1]
+	}
+	return append([]string{""}, body[:available-1]...)
 }
 
-func steeringDequeueKeyLabel() string {
-	return steeringDequeueKeyLabelForOS(runtime.GOOS)
-}
+// 队列撤回用横向键,避开与任务列表的 Up/Down 选择冲突
+func steeringDequeueKeyLabel() string { return "shift+left" }
 
-func steeringDequeueKeyLabelForOS(goos string) string {
-	if goos == "darwin" {
-		return "option+up"
-	}
-	return "alt+up"
-}
+func followUpDequeueKeyLabel() string { return "shift+right" }
 
 func splitFrameLines(view string) []string {
 	view = strings.TrimSuffix(view, "\n")
@@ -308,73 +335,25 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-// statusBar 在输入框下方同时显示工作目录、分支、模型和 thinking
-func (m *Model) statusBar() string {
-	left := m.cwdLabel()
-	right := m.modelStatus()
-	if m.width <= 0 {
-		return ""
-	}
-	left = ansi.Truncate(left, m.width, "…")
-	right = ansi.Truncate(right, max(0, m.width-ansi.StringWidth(left)-1), "…")
-	if ansi.StringWidth(left)+ansi.StringWidth(right) >= m.width {
-		left = truncateCwdLabel(left, max(0, m.width-ansi.StringWidth(right)-1))
-		right = ansi.Truncate(right, max(0, m.width-ansi.StringWidth(left)-1), "…")
-	}
-	gap := max(0, m.width-ansi.StringWidth(left)-ansi.StringWidth(right))
-	return colored(dimColor, left) + strings.Repeat(" ", gap) + colored(dimColor, right)
-}
-
-func truncateCwdLabel(label string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	branchStart := strings.LastIndex(label, " [")
-	if branchStart < 0 || !strings.HasSuffix(label, "]") {
-		return ansi.Truncate(label, width, "…")
-	}
-	branch := label[branchStart:]
-	branchWidth := ansi.StringWidth(branch)
-	if branchWidth >= width {
-		return ansi.Truncate(branch, width, "…")
-	}
-	return ansi.Truncate(label[:branchStart], width-branchWidth, "…") + branch
-}
-
-func (m *Model) cwdLabel() string {
-	cwd := m.state.Cwd
-	if home, err := os.UserHomeDir(); err == nil {
-		if cwd == home {
-			cwd = "~"
-		} else if strings.HasPrefix(cwd, home+string(filepath.Separator)) {
-			cwd = "~" + strings.TrimPrefix(cwd, home)
-		}
-	}
+// footer 输出单行状态栏：左侧工作目录与分支，右侧模型与思考等级，两端对齐
+func (m *Model) footer() string {
+	cwd := shortenToolPath(m.state.Cwd)
 	if m.state.Branch != "" {
-		cwd += " [" + m.state.Branch + "]"
+		// 分支前用 git 图标，与目录之间用小点分隔
+		cwd += " • " + branchIcon + " " + m.state.Branch
 	}
-	return cwd
-}
-
-func (m *Model) modelStatus() string {
+	left := colored(dimColor, ansi.Truncate(cwd, m.width, "…"))
 	model := m.currentModel()
 	right := model.ID
 	if len(model.Levels) > 1 {
 		level := m.state.Thinking
 		if level == "off" {
-			level = "thinking off"
+			level = "effort off"
 		}
 		right += " • " + level
 	}
-	withProvider := "(" + model.Provider + ") " + right
-	if m.width >= 60 && len(m.state.Models) > 1 {
-		providers := make(map[string]bool)
-		for _, model := range m.state.Models {
-			providers[model.Provider] = true
-		}
-		if len(providers) > 1 && ansi.StringWidth(withProvider) <= m.width {
-			right = withProvider
-		}
-	}
-	return right
+	available := m.width - ansi.StringWidth(ansi.Strip(left))
+	right = colored(dimColor, ansi.Truncate(right, max(0, available), "…"))
+	gap := strings.Repeat(" ", max(0, m.width-ansi.StringWidth(ansi.Strip(left))-ansi.StringWidth(ansi.Strip(right))))
+	return left + gap + right
 }

@@ -36,6 +36,7 @@ const noVisionNote = "[Current model does not support images. The image will be 
 
 type Read struct {
 	SupportsImages bool
+	WorkingDir     string
 }
 
 func (r *Read) Name() string { return "read" }
@@ -91,7 +92,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 
 	// 1.解析路径后整读
-	absPath, err := resolvePathContext(ctx, path)
+	absPath, err := resolvePathFrom(path, r.WorkingDir)
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

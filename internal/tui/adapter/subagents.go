@@ -45,6 +45,7 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 			return tui.SubagentSnapshotMsg{Err: app.ErrSteeringUnavailable, RestoreMessage: request.Message}
 		}
 		var err error
+		var restored []llm.UserMessage
 		switch request.Kind {
 		case "enter":
 			if !activeApp.EnterSubagentView(request.TaskID) {
@@ -52,17 +53,29 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 			}
 		case "exit":
 			activeApp.ExitSubagentView()
-		case "queue":
+		case "queue", "followup":
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				err = activeApp.QueueSubagentMessage(request.TaskID, *request.Message)
+				err = activeApp.QueueSubagentMessage(request.TaskID, *request.Message, request.Kind == "followup")
 			}
 		case "continue":
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
 				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, taskMessageText(*request.Message))
+			}
+		case "dequeue":
+			// 从子任务队列撤回:与主 agent 一样,取出后交回编辑器
+			store := activeApp.SubagentStore()
+			if store == nil {
+				err = fmt.Errorf("app: subagent manager is unavailable")
+			} else if request.FollowUp {
+				restored = store.PendingFollowUpMessages(request.TaskID)
+				store.ClearFollowUpMessages(request.TaskID)
+			} else {
+				restored = store.PendingMessages(request.TaskID)
+				store.ClearSteeringMessages(request.TaskID)
 			}
 		case "stop":
 			err = activeApp.StopSubagent(request.TaskID)
@@ -71,7 +84,7 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 				err = fmt.Errorf("subagent task %s cannot be evicted", request.TaskID)
 			}
 		}
-		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err}
+		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: restored}
 		if err != nil {
 			result.RestoreMessage = request.Message
 		}
@@ -216,7 +229,9 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 		case *task.AgentState:
 			view.Retain = task.Retain
 			view.AgentType, view.Prompt, view.WorktreePath = task.AgentType, task.Prompt, task.WorktreePath
-			view.PendingCount = len(task.PendingMessages)
+			view.PendingSteering = messageTexts(task.PendingSteering)
+			view.PendingFollowUp = messageTexts(task.PendingFollowUp)
+			view.PendingCount = len(view.PendingSteering) + len(view.PendingFollowUp)
 			view.Revision = subagentTaskRevision(base, task.MessageCount, view.PendingCount)
 			if task.ID == viewingTaskID {
 				view.Messages = r.subagentTranscript(store, task)
@@ -298,19 +313,18 @@ func projectSubagentMessages(taskID string, start int, messages []llm.Message) [
 				projected = append(projected, tui.Message{ID: id, Role: "user", Text: text, Images: images})
 			}
 		case llm.AssistantMessage:
-			var text, thinking string
-			group := &tui.ToolGroupView{ID: id + "/tools", Sealed: true}
+			var text string
+			group := &tui.ToolGroupView{ID: id + "/tools"}
 			for contentIndex, content := range current.Content {
 				switch content := content.(type) {
 				case llm.TextContent:
 					text += content.Text
 				case llm.ThinkingContent:
-					thinking += content.Thinking
-					group.Thinking = append(group.Thinking, tui.ThinkingBlockView{Index: contentIndex, Text: content.Thinking})
+					group.Thinking = append(group.Thinking, tui.ThinkingBlockView{Index: contentIndex, Round: index, Text: content.Thinking})
 				case llm.ToolCall:
-					// 还没有结果的调用必须显示为 pending,否则尾部投影会把
-					// 正在执行的工具误标成成功
-					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolPending}
+					// 从磁盘读到的调用参数已经完整,ArgsComplete 必须置真,
+					// 否则渲染层会把它当成"参数还在流式写入"而跳过
+					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolPending, ArgsComplete: true, Round: index}
 					if result, ok := results[content.ID]; ok {
 						call.Result = formatTaskToolResult(result)
 						call.Status = tui.ToolSuccess
@@ -324,8 +338,8 @@ func projectSubagentMessages(taskID string, start int, messages []llm.Message) [
 			if len(group.Calls) == 0 && len(group.Thinking) == 0 {
 				group = nil
 			}
-			if text != "" || thinking != "" || group != nil {
-				projected = append(projected, tui.Message{ID: id, Role: "assistant", Text: text, Thinking: thinking, ToolGroup: group})
+			if text != "" || group != nil {
+				projected = append(projected, tui.Message{ID: id, Role: "assistant", Text: text, ToolGroup: group})
 			}
 		}
 	}
@@ -371,4 +385,18 @@ func formatTaskToolResult(result llm.ToolResultMessage) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// messageTexts 把队列消息投影成首行文本
+func messageTexts(messages []llm.UserMessage) []string {
+	if len(messages) == 0 {
+		return nil
+	}
+	texts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if text := taskMessageText(message); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return texts
 }
