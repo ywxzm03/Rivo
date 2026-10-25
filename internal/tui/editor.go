@@ -74,7 +74,7 @@ func (m *Model) completionView() string {
 		command := items[i]
 		prefix, color := "  ", textColor
 		if i == m.completion {
-			prefix, color = "→ ", accentColor
+			prefix, color = "❯ ", accentColor
 		}
 		primary := min(32, max(10, m.width/3))
 		name := prefix + command.name

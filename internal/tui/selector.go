@@ -207,7 +207,7 @@ func (s *selector) view(width, budget int) string {
 		item := s.filtered[i]
 		cursor, check := "  ", "  "
 		if i == s.selected {
-			cursor = "→ "
+			cursor = "❯ "
 		}
 		if item.current {
 			check = "✓ "

@@ -184,6 +184,10 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, m.pendingLines()...)
 		// 消息区与输入框之间留一行空白，长消息不会贴上边框
 		lines = append(lines, "")
+		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
+		if completions := m.completionView(); completions != "" {
+			lines = append(lines, splitFrameLines(completions)...)
+		}
 		label := ""
 		if m.busy {
 			label = m.spinner.View() + " " + m.status
@@ -201,9 +205,6 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, border)
 		lines = append(lines, splitFrameLines(m.editor.View())...)
 		lines = append(lines, rule(m.width, "", inputBorder, false))
-		if completions := m.completionView(); completions != "" {
-			lines = append(lines, splitFrameLines(completions)...)
-		}
 	}
 	lines = append(lines, splitFrameLines(m.footer())...)
 	return lines

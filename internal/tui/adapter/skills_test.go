@@ -223,7 +223,7 @@ func TestLinkedSkillReloadsIntoCompletionAndInvocation(t *testing.T) {
 		model := tui.New(*done.Snapshot, tui.Handlers{Request: func(req tui.Request) tea.Cmd { request = req; return nil }})
 		model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(input)})
-		if view := ansi.Strip(model.View()); !strings.Contains(view, "→ skill:pdf-tools") {
+		if view := ansi.Strip(model.View()); !strings.Contains(view, "❯ skill:pdf-tools") {
 			t.Fatalf("input %q: completion missing from %q", input, view)
 		}
 		model.Update(tea.KeyMsg{Type: tea.KeyTab})
