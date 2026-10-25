@@ -175,11 +175,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "ctrl+l":
 		return m.openSelector("model", "")
+	case "ctrl+q":
+		m.hideTools = !m.hideTools
+		m.refreshTranscript()
+		return nil
 	case "ctrl+t":
+		// 隐藏状态下忽略展开开关，恢复后回到原来的展开偏好
+		if m.hideTools {
+			return nil
+		}
 		m.showThinking = !m.showThinking
 		m.refreshTranscript()
 		return nil
 	case "ctrl+o":
+		if m.hideTools {
+			return nil
+		}
 		m.showAllTools = !m.showAllTools
 		m.refreshTranscript()
 		return nil

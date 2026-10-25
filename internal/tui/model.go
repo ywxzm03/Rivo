@@ -273,6 +273,8 @@ type cachedMessage struct {
 	width        int
 	showThinking bool
 	allTools     bool
+	// hidden 记录 Ctrl+Q 遮罩状态，切换时必须重画
+	hidden bool
 	// expanded 是单击展开状态的指纹，任何一处切换都要重画
 	expanded string
 	view     string
@@ -308,9 +310,11 @@ type Model struct {
 	status                   string
 	showThinking             bool
 	showAllTools             bool
-	lastCtrlC                time.Time
-	flushPending             bool
-	cache                    map[string]cachedMessage
+	// hideTools 是 Ctrl+Q 的遮罩：整段工具组与思考块只剩一行提示
+	hideTools    bool
+	lastCtrlC    time.Time
+	flushPending bool
+	cache        map[string]cachedMessage
 	// expandedGroups / expandedCalls / expandedThoughts 记录单击展开的组、调用与思考块
 	expandedGroups   map[string]bool
 	expandedCalls    map[string]bool
@@ -1255,7 +1259,7 @@ func (m *Model) resetSessionUI() {
 	m.completionHidden = true
 	m.selector = nil
 	m.editor.Focus()
-	m.showThinking, m.showAllTools = false, false
+	m.showThinking, m.showAllTools, m.hideTools = false, false, false
 	m.clearSelection()
 	m.cache = make(map[string]cachedMessage)
 	m.lastMessageHits = nil
@@ -1290,10 +1294,10 @@ func (m *Model) refreshTranscript() {
 		if m.busy && message.ToolGroup != nil {
 			animate = groupRunning(message.ToolGroup.Calls)
 		}
-		if animate || cached.revision != message.Revision || cached.width != m.width || cached.showThinking != m.showThinking || cached.allTools != m.showAllTools || cached.expanded != m.expandSignature() {
+		if animate || cached.revision != message.Revision || cached.width != m.width || cached.showThinking != m.showThinking || cached.allTools != m.showAllTools || cached.hidden != m.hideTools || cached.expanded != m.expandSignature() {
 			m.lastMessageHits = nil
 			view := m.renderMessage(message)
-			cached = cachedMessage{revision: message.Revision, width: m.width, showThinking: m.showThinking, allTools: m.showAllTools, expanded: m.expandSignature(), view: view, hits: m.lastMessageHits}
+			cached = cachedMessage{revision: message.Revision, width: m.width, showThinking: m.showThinking, allTools: m.showAllTools, hidden: m.hideTools, expanded: m.expandSignature(), view: view, hits: m.lastMessageHits}
 			m.cache[message.ID] = cached
 		}
 		for _, hit := range cached.hits {

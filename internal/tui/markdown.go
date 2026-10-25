@@ -230,7 +230,7 @@ func (m *Model) renderMessage(message Message) string {
 		return strings.Join(lines, "\n")
 	}
 	var parts []string
-	if message.Thinking != "" {
+	if message.Thinking != "" && !m.hideTools {
 		if !m.showThinking {
 			parts = append(parts, boldItalicText("Thinking..."))
 		} else {

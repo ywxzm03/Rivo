@@ -31,7 +31,7 @@ func renderToolGroupWithState(group *ToolGroupView, width int, state toolRenderS
 
 // toolRenderState 汇总当前的展开状态
 func (m *Model) toolRenderState() toolRenderState {
-	state := toolRenderState{allExpanded: m.showAllTools, showThinking: m.showThinking, groups: m.expandedGroups, calls: m.expandedCalls, thoughts: m.expandedThoughts}
+	state := toolRenderState{allExpanded: m.showAllTools, showThinking: m.showThinking, hideTools: m.hideTools, groups: m.expandedGroups, calls: m.expandedCalls, thoughts: m.expandedThoughts}
 	return state
 }
 

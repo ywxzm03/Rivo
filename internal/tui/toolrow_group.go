@@ -14,9 +14,11 @@ type toolRenderState struct {
 	allExpanded bool
 	// showThinking 是 Ctrl+T 的全局开关，展开每个思考块
 	showThinking bool
-	groups       map[string]bool
-	calls        map[string]bool
-	thoughts     map[string]bool
+	// hideTools 是 Ctrl+Q 的遮罩，整段只剩一行隐藏提示
+	hideTools bool
+	groups    map[string]bool
+	calls     map[string]bool
+	thoughts  map[string]bool
 }
 
 func (s toolRenderState) callExpanded(group *ToolGroupView, call ToolCallView) bool {
@@ -65,8 +67,26 @@ func renderToolRows(group *ToolGroupView, width int, state toolRenderState, now 
 	if len(group.Calls) == 0 && len(thinkingBlocks(group)) == 0 {
 		return "", nil
 	}
+	// 隐藏状态只留一行提示，调用与思考都不上屏，也不产生点击命中
+	if state.hideTools {
+		return hiddenToolRowsLine(group, width), nil
+	}
 	lines, hits := renderToolRowCalls(group, width, state, now)
 	return strings.Join(lines, "\n"), hits
+}
+
+// hiddenToolRowsLine 汇总被隐藏的调用数与思考轮数，并提示恢复键
+func hiddenToolRowsLine(group *ToolGroupView, width int) string {
+	parts := make([]string, 0, 2)
+	if count := len(group.Calls); count > 0 {
+		parts = append(parts, countNoun(count, "tool call", "tool calls"))
+	}
+	if count := len(thinkingBlocks(group)); count > 0 {
+		parts = append(parts, countNoun(count, "thinking block", "thinking blocks"))
+	}
+	// 前导空格与调用行的 ` ⦁ ` 对齐
+	label := " • " + strings.Join(parts, " and ") + " hidden (ctrl+q)"
+	return colored(faintColor, ansi.Truncate(label, width, "…"))
 }
 
 // thinkingBlocks 返回组里所有非空思考块
