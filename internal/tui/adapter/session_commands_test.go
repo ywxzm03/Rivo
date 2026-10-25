@@ -70,7 +70,7 @@ func TestModelAndThinkingCommandsReportNotices(t *testing.T) {
 	m := tui.New(r.Snapshot(), tui.Handlers{Request: r.request})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	// 1.命令走真实提交路径，完成消息带回提示
-	for _, input := range []string{"/model deepseek/deepseek-v4-pro", "/thinking low"} {
+	for _, input := range []string{"/model deepseek/deepseek-v4-pro", "/effort low"} {
 		done := submitAndSettle(t, m, input)
 		if done.Err != nil {
 			t.Fatalf("%s: %v", input, done.Err)
@@ -82,7 +82,7 @@ func TestModelAndThinkingCommandsReportNotices(t *testing.T) {
 		t.Fatalf("frame = %q, want both change notices", view)
 	}
 	// 2.值未变化时静默：重复选中当前模型/等级/名称都不产生提示
-	for _, input := range []string{"/model deepseek/deepseek-v4-pro", "/thinking low"} {
+	for _, input := range []string{"/model deepseek/deepseek-v4-pro", "/effort low"} {
 		done := submitAndSettle(t, m, input)
 		if done.Err != nil || done.Notice != "" {
 			t.Fatalf("%s repeated: %+v, want silence", input, done)

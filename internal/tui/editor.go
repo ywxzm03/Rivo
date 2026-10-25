@@ -19,7 +19,7 @@ type slashCommand struct{ name, description string }
 var commands = []slashCommand{
 	{"tree", "Select a user message to restore conversation and/or code"},
 	{"model", "<provider/model> — Select model (opens selector UI)"},
-	{"thinking", "<level> — Set thinking level"},
+	{"effort", "<level> — Set reasoning effort"},
 	{"resume", "Resume a previous session"},
 	{"rename", "<new Name> — Rename the current session"},
 	{"new", "Start a new session"},
@@ -441,7 +441,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 		return m.openSelector("model", arg)
 	case "/tree":
 		return m.openSelector("tree", arg)
-	case "/thinking":
+	case "/effort":
 		if arg == "" {
 			return m.openSelector("thinking", "")
 		}
@@ -450,7 +450,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 				return m.dispatch("thinking", level)
 			}
 		}
-		m.notice("Unknown thinking level. Available: " + strings.Join(m.currentModel().Levels, ", "))
+		m.notice("Unknown effort level. Available: " + strings.Join(m.currentModel().Levels, ", "))
 	case "/resume":
 		return m.openSelector("resume", arg)
 	case "/compact":

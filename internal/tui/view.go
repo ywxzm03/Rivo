@@ -348,7 +348,7 @@ func (m *Model) footer() string {
 	if len(model.Levels) > 1 {
 		level := m.state.Thinking
 		if level == "off" {
-			level = "thinking off"
+			level = "effort off"
 		}
 		right += " • " + level
 	}

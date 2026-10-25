@@ -730,7 +730,7 @@ func TestCompletionAndSelectors(t *testing.T) {
 	if m.selector != nil || !m.editor.Focused() || m.closing {
 		t.Fatal("Ctrl+C should cancel selector")
 	}
-	typeText(m, "/thin")
+	typeText(m, "/eff")
 	press(m, tea.KeyEnter)
 	if m.selector == nil || m.selector.kind != "thinking" {
 		t.Fatal("Enter must complete and execute")

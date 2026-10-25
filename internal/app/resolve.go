@@ -9,12 +9,12 @@ import (
 )
 
 // ApplyOverrides 把 CLI 参数覆盖到配置上：--provider 必须与 --model 同给，
-// --thinking 校验七档等级，--model 支持 provider/model、精确/子串匹配与 :level 后缀
+// --effort 校验七档等级，--model 支持 provider/model、精确/子串匹配与 :level 后缀
 func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) error {
 	// 1.思考等级：CLI 显式指定优先于 pattern 后缀与 settings 默认
 	if thinking != "" {
 		if !knownThinkingLevel(thinking) {
-			return fmt.Errorf("unknown thinking level %q (supported: off, minimal, low, medium, high, xhigh, max)", thinking)
+			return fmt.Errorf("unknown effort level %q (supported: off, minimal, low, medium, high, xhigh, max)", thinking)
 		}
 		cfg.ThinkingLevel = llm.ThinkingLevel(thinking)
 	}

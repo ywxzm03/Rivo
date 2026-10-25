@@ -205,7 +205,7 @@ func (p *previewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "model":
 		input = "/model "
 	case "thinking":
-		input = "/thinking "
+		input = "/effort "
 	case "resume":
 		input = "/resume "
 	case "working":
