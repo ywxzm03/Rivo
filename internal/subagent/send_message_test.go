@@ -102,7 +102,35 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 	if !factorySpec.Continuation || factorySpec.WorktreePath != "/tmp/wt" || factorySpec.AgentType != "explore" {
 		t.Fatalf("factory spec = %#v", factorySpec)
 	}
+	// 恢复来的 worktree 保留用户工作,不能安装清理钩子
+	if factorySpec.Worktree {
+		t.Fatalf("factory spec = %#v, want Worktree disabled for resumed worktree", factorySpec)
+	}
 	waitForTaskStatus(t, manager.Store(), "agent-evicted-1", taskpkg.StatusCompleted)
+}
+
+func TestSendMessageResumeKeepsOwnedWorktree(t *testing.T) {
+	manager := sendMessageManager(t)
+	var factorySpec taskpkg.AgentSpec
+	base := manager.factory
+	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		factorySpec = spec
+		return base(ctx, spec)
+	})
+	// 元数据标明该 worktree 由子 agent 创建,恢复时依然不能回收
+	manager.SetResumeResolver(func(string) (taskpkg.ResumeSource, bool) {
+		return taskpkg.ResumeSource{
+			ID: "agent-evicted-2", AgentType: "work", Description: "old work",
+			OutputFile: "/tmp/agent-evicted-2.jsonl", WorktreePath: "/tmp/wt", WorktreeOwned: true,
+		}, true
+	})
+	if _, err := manager.SendMessage(context.Background(), "agent-evicted-2", "continue please"); err != nil {
+		t.Fatal(err)
+	}
+	if factorySpec.WorktreePath != "/tmp/wt" || factorySpec.Worktree {
+		t.Fatalf("factory spec = %#v, want path kept and cleanup disabled", factorySpec)
+	}
+	waitForTaskStatus(t, manager.Store(), "agent-evicted-2", taskpkg.StatusCompleted)
 }
 
 func TestSendMessageRejectsUnknownTask(t *testing.T) {

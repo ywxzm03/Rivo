@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
+
+// panelGracePeriod 是终态任务在根投影中保留的时长,
+// 让 TUI 面板有机会展示结束状态后再自动驱逐
+const panelGracePeriod = 30 * time.Second
 
 // Store 是任务状态、lifecycle runtime 句柄和通知的唯一所有者
 type Store struct {
@@ -121,24 +126,16 @@ func (s *Store) Snapshot() []State {
 // viewing 只是展示层元数据,绝不启动或恢复任务。
 func (s *Store) EnterView(id string) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.tasks[id]; !ok {
-		s.mu.Unlock()
 		return false
 	}
 	s.viewingTaskID = id
-	s.mu.Unlock()
-	// 磁盘 bootstrap 在 store 锁之外进行;打开 transcript 期间运行中的任务
-	// 仍可继续发布进度。
-	s.LoadTaskMessages(id)
 	return true
 }
 
 func (s *Store) ExitView() {
 	s.mu.Lock()
-	if task, ok := s.tasks[s.viewingTaskID].(*AgentState); ok && !task.Retain {
-		task.Messages = nil
-		task.DiskLoaded = false
-	}
 	s.viewingTaskID = ""
 	s.mu.Unlock()
 }
@@ -149,31 +146,28 @@ func (s *Store) ViewingTaskID() string {
 	return s.viewingTaskID
 }
 
-// LoadTaskMessages 在视图打开时加载一次 sidechain transcript。
-// 之后重复的 TUI 快照复用内存副本,不必每帧重新解析 JSONL 文件。
-func (s *Store) LoadTaskMessages(id string) bool {
+// ReadTaskMessages 从任务的 sidechain transcript 按字节偏移增量读取消息,
+// 返回消息和新的偏移。transcript 常驻磁盘,内存里不保留完整副本;
+// 调用方缓存已投影的前缀,只消费新增部分。
+// sidechain 不做压缩,因此按文件序读取 message entry 就等于它的展示上下文。
+func (s *Store) ReadTaskMessages(id string, offset int64) ([]llm.Message, int64, error) {
 	s.mu.Lock()
 	task, ok := s.tasks[id].(*AgentState)
-	if !ok || task.DiskLoaded || task.Base().OutputFile == "" {
+	if !ok {
 		s.mu.Unlock()
-		return ok
+		return nil, offset, fmt.Errorf("subagent: task %s not found", id)
 	}
 	path := task.Base().OutputFile
 	s.mu.Unlock()
-	sm, err := session.Open(path, "")
-	if err != nil {
-		return false
+	if path == "" {
+		return nil, offset, nil
 	}
-	messages := sm.BuildContext().Messages()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.tasks[id].(*AgentState)
-	if !ok || current.Base().OutputFile != path {
-		return false
+	messages, next, err := session.ReadMessages(path, offset)
+	if errors.Is(err, os.ErrNotExist) {
+		// transcript 在首条消息落盘前还不存在,按空增量处理
+		return nil, offset, nil
 	}
-	current.Messages = append([]llm.Message(nil), messages...)
-	current.DiskLoaded = true
-	return true
+	return messages, next, err
 }
 
 // Evict 从易失的根投影中移除终态任务。
@@ -185,19 +179,45 @@ func (s *Store) Evict(id string) bool {
 	if !ok || !task.Base().Status.Terminal() {
 		return false
 	}
+	s.evictLocked(id)
+	return true
+}
+
+// EvictExpired 驱逐宽限期已过、且通知已投递过的终态任务,返回驱逐数量
+func (s *Store) EvictExpired() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	evicted := 0
+	for id, state := range s.tasks {
+		agent, ok := state.(*AgentState)
+		if !ok || !agent.Base().Status.Terminal() || !agent.Base().Notified || agent.EvictAfter == nil {
+			continue
+		}
+		if now.Before(*agent.EvictAfter) {
+			continue
+		}
+		// 正在查看的 transcript 不自动回收,否则面板会在阅读中途消失;
+		// ExitView 之后的下一次清扫即可回收
+		if id == s.viewingTaskID {
+			continue
+		}
+		s.evictLocked(id)
+		evicted++
+	}
+	return evicted
+}
+
+// evictLocked 从根投影移除任务,调用方必须持有 s.mu
+func (s *Store) evictLocked(id string) {
 	delete(s.tasks, id)
 	delete(s.runtimes, id)
 	if s.viewingTaskID == id {
 		s.viewingTaskID = ""
 	}
-	filtered := s.notifications[:0]
-	for _, notification := range s.notifications {
-		if notification.TaskID != id {
-			filtered = append(filtered, notification)
-		}
-	}
-	s.notifications = filtered
-	return true
+	// 不删除 s.notifications 中该任务的条目:驱逐时通知可能还没被模型消费,
+	// 一并删掉父 agent 就永远收不到结果。队列与任务 registry 解耦,
+	// 通知只由 AckNotifications 移除
 }
 
 func (s *Store) EnqueueNotification(id string, token uint64, notification Notification) bool {
@@ -248,7 +268,6 @@ func (s *Store) EnqueuePendingMessage(id string, message llm.UserMessage) error 
 	}
 	message = cloneUserMessage(message)
 	task.PendingMessages = append(task.PendingMessages, message)
-	task.Messages = append(task.Messages, message)
 	return nil
 }
 
@@ -314,6 +333,8 @@ func (s *Store) UpdateAgentProgress(id string, token uint64, update func(*AgentP
 	return true
 }
 
+// RecordAgentMessages 记录 sidechain transcript 的消息条数。
+// 消息本身只落盘,内存不常驻完整 transcript;TUI 需要时按偏移从磁盘增量读取。
 func (s *Store) RecordAgentMessages(id string, token uint64, messages []llm.Message) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -321,16 +342,7 @@ func (s *Store) RecordAgentMessages(id string, token uint64, messages []llm.Mess
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
-	if task.Base().ID != s.viewingTaskID && !task.Retain {
-		// sidechain transcript 是持久化的。内存副本只保留给当前展示中
-		// (或被显式 retain)的任务,避免多个长跑 agent 成倍放大父 context。
-		task.Messages = nil
-		return true
-	}
-	task.Messages = append([]llm.Message(nil), messages...)
-	for _, pending := range task.PendingMessages {
-		task.Messages = append(task.Messages, cloneUserMessage(pending))
-	}
+	task.MessageCount = len(messages)
 	return true
 }
 
@@ -373,19 +385,14 @@ func (s *Store) completeAgent(id string, token uint64, result *AgentResult, err 
 	task.Base().EndTime = &now
 	task.Abort = nil
 	task.UnregisterCleanup = nil
+	setEvictAfter(task, now)
 	if err != nil {
 		task.Base().Status = StatusFailed
 		task.Error = err.Error()
-		if task.Base().ID != s.viewingTaskID && !task.Retain {
-			task.Messages = nil
-		}
 		return true
 	}
 	task.Base().Status = StatusCompleted
 	task.Result = result
-	if task.Base().ID != s.viewingTaskID && !task.Retain {
-		task.Messages = nil
-	}
 	return true
 }
 
@@ -412,20 +419,39 @@ func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, fu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
-	runtime := s.runtimes[id]
-	if !ok || runtime == nil || task.Base().Status != StatusRunning {
+	if !ok || task.Base().Status != StatusRunning {
 		return nil, nil, nil, 0, &StopTaskError{Code: "not_running", Message: "task is not running"}
 	}
 	now := time.Now()
 	token := task.Base().LifecycleToken
 	abort := task.Abort
 	cleanup := task.UnregisterCleanup
+	// runtime 要等 AttachAgentRuntime 才挂上,启动窗口内它是 nil。
+	// 此时状态照常转移,runtime 缺失只意味着没有可取消的句柄;
+	// 后续 AttachAgentRuntime 会因任务已非 running 而失败。
+	runtime := s.runtimes[id]
+	if runtime == nil {
+		// 没有 lifecycle 就再也没有回调能投递通知,直接标记已通知,
+		// 否则这个终态任务永远不满足驱逐条件
+		task.Base().Notified = true
+	}
 	task.Base().Status = StatusKilled
 	task.Base().EndTime = &now
 	task.Abort = nil
 	task.UnregisterCleanup = nil
 	task.PendingMessages = nil
+	setEvictAfter(task, now)
 	return runtime, abort, cleanup, token, nil
+}
+
+// setEvictAfter 在终态转移时写入面板宽限期;Retain 任务永不驱逐
+func setEvictAfter(task *AgentState, now time.Time) {
+	if task.Retain {
+		task.EvictAfter = nil
+		return
+	}
+	deadline := now.Add(panelGracePeriod)
+	task.EvictAfter = &deadline
 }
 
 // ContinuationRuntime 返回当前 runtime 和 token,调用方据此取消它
@@ -484,10 +510,8 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 		Progress:            old.Progress,
 		PendingMessages:     nil,
 		Retain:              old.Retain,
-		DiskLoaded:          old.DiskLoaded,
-		Messages:            append([]llm.Message(nil), old.Messages...),
+		MessageCount:        old.MessageCount,
 		ContentReplacements: cloneContentReplacements(old.ContentReplacements),
-		EvictAfter:          old.EvictAfter,
 	}
 	s.tasks[id] = state
 	if runtime != nil {
@@ -644,9 +668,6 @@ func cloneTaskState(task State) State {
 		copy.Abort = nil
 		copy.UnregisterCleanup = nil
 		copy.PendingMessages = append([]llm.UserMessage(nil), state.PendingMessages...)
-		// Messages 是不可变追加序列:写入方只 append 新消息,从不改写已有元素,
-		// 因此共享底层数组安全,避免每次 snapshot 复制整份 transcript
-		copy.Messages = state.Messages
 		copy.ContentReplacements = cloneContentReplacements(state.ContentReplacements)
 		copy.Model = cloneModel(state.Model)
 		if state.Progress != nil {

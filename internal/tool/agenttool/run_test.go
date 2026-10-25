@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -228,5 +229,80 @@ func TestRunIgnoresParentModelWhenExplicit(t *testing.T) {
 	// 显式指定的 model 必须覆盖父 model
 	if got := runtime.Agent.AgentConfig.Model; got.Provider != "explicit" || got.ID != "chosen" {
 		t.Fatalf("model = %#v, want explicit/chosen", got)
+	}
+}
+
+func TestRunInstallsWorktreeCleanupForNewWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	runner := testRunner(t)
+	initRepo(t, runner.ParentCwd)
+	runtime, err := runner.Run(context.Background(), taskpkg.AgentSpec{
+		ID: "agent-wt", AgentType: "work", Description: "isolated", Prompt: "go", Worktree: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if runtime.Cancel != nil {
+			runtime.Cancel()
+		}
+		_ = exec.Command("git", "-C", runner.ParentCwd, "worktree", "remove", "--force", runtime.WorktreePath).Run()
+	}()
+	// 1.子 agent 自己创建的 worktree 必须带回收钩子,且元数据标明归属
+	if runtime.WorktreePath == "" || runtime.WorktreeCleanup == nil {
+		t.Fatalf("runtime = %#v, want cleanup hook", runtime)
+	}
+	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-agent-wt.meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta metadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.WorktreeOwned || meta.WorktreePath != runtime.WorktreePath {
+		t.Fatalf("metadata = %#v, want owned worktree", meta)
+	}
+}
+
+func TestRunSkipsWorktreeCleanupForResumedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	runner := testRunner(t)
+	initRepo(t, runner.ParentCwd)
+	first, err := runner.Run(context.Background(), taskpkg.AgentSpec{
+		ID: "agent-wt", AgentType: "work", Description: "isolated", Prompt: "go", Worktree: true,
+		InitialMessages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Cancel != nil {
+		first.Cancel()
+	}
+	defer func() {
+		_ = exec.Command("git", "-C", runner.ParentCwd, "worktree", "remove", "--force", first.WorktreePath).Run()
+	}()
+	// 1.恢复沿用同一个 worktree:即使元数据标明它由子 agent 创建,也不能装回收钩子
+	resumed, err := runner.Run(context.Background(), taskpkg.AgentSpec{
+		ID: "agent-wt", AgentType: "work", Description: "isolated", Prompt: "continue",
+		Worktree: true, WorktreePath: first.WorktreePath, Continuation: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if resumed.Cancel != nil {
+			resumed.Cancel()
+		}
+	}()
+	if resumed.WorktreePath != first.WorktreePath {
+		t.Fatalf("resumed worktree = %q, want %q", resumed.WorktreePath, first.WorktreePath)
+	}
+	if resumed.WorktreeCleanup != nil {
+		t.Fatal("resumed worktree must be kept until cleaned manually")
 	}
 }

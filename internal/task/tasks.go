@@ -31,7 +31,8 @@ func KillAgent(taskID string, store *Store) error {
 	}
 	if abort != nil {
 		abort()
-	} else if runtime.Cancel != nil {
+	} else if runtime != nil && runtime.Cancel != nil {
+		// 启动窗口内 runtime 还没挂上,状态已转移为 killed,没有可取消的句柄
 		runtime.Cancel()
 	}
 	if unregister != nil {

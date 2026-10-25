@@ -185,6 +185,8 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		notificationMu.Unlock()
 		manager.Store().AckNotifications(count)
 	})
+	// 每个请求前回收宽限期已过的终态子任务
+	coord.SetTaskEvictor(manager.Store().EvictExpired)
 	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {

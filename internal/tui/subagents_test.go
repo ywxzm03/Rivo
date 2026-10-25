@@ -428,3 +428,54 @@ func TestSubagentViewKeepsMainMessagesAndNavigates(t *testing.T) {
 		t.Fatalf("main transcript after exit = %q", view)
 	}
 }
+
+// 详情页里输入框有内容时 x 是普通字符,不能触发 stop/evict
+func TestSubagentViewTypesXInsteadOfStoppingWhenEditorHasText(t *testing.T) {
+	var requests []SubagentRequest
+	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
+		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
+	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}})
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.enterSubagentView("agent-1")
+	typeText(m, "fi")
+	typeText(m, "x")
+	if got := m.editor.Value(); got != "fix" {
+		t.Fatalf("editor value = %q, want %q", got, "fix")
+	}
+	if len(requests) != 0 {
+		t.Fatalf("x triggered a subagent request: %#v", requests)
+	}
+	// 1.清空输入框后 x 恢复 stop 语义
+	m.editor.Reset()
+	typeText(m, "x")
+	if len(requests) != 1 || requests[0].Kind != "stop" || requests[0].TaskID != "agent-1" {
+		t.Fatalf("stop request = %#v", requests)
+	}
+	if got := m.editor.Value(); got != "" {
+		t.Fatalf("stop key leaked into the editor: %q", got)
+	}
+}
+
+// 主视图里输入框为空时 x 仍是 stop/evict;有内容时是普通字符
+func TestMainViewXRequiresEmptyEditor(t *testing.T) {
+	var requests []SubagentRequest
+	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
+		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
+	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
+		requests = append(requests, request)
+		return nil
+	}})
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.selectedTaskID = "agent-1"
+	typeText(m, "a")
+	typeText(m, "x")
+	if got := m.editor.Value(); got != "ax" {
+		t.Fatalf("editor value = %q, want %q", got, "ax")
+	}
+	if len(requests) != 0 {
+		t.Fatalf("x triggered a subagent request while typing: %#v", requests)
+	}
+}

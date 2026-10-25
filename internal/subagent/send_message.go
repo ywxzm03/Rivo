@@ -71,7 +71,12 @@ func (m *Manager) resumeEvicted(ctx context.Context, taskID, prompt string) (Sen
 	// 2.按 continuation 语义装配 runtime:factory 会打开已有 transcript
 	runtime, err := m.factory(ctx, taskpkg.AgentSpec{
 		ID: stateID, Description: source.Description, Prompt: prompt, AgentType: agentType,
-		WorktreePath: source.WorktreePath, Continuation: true,
+		WorktreePath: source.WorktreePath,
+		// 恢复来的 worktree 有意不安装清理:续跑的会话会把用户工作写进该目录,
+		// 即使 metadata 记录了它由子 agent 创建(source.WorktreeOwned)也一律保留,
+		// 只能手动清理
+		Worktree:     false,
+		Continuation: true,
 	})
 	if err != nil {
 		m.store.DiscardReserved(stateID)

@@ -93,23 +93,24 @@ type ToolActivity struct {
 
 type AgentState struct {
 	StateBase
-	AgentID             string
-	Prompt              string
-	AgentType           string
-	SelectedAgent       string
-	Model               *llm.Model
-	Thinking            llm.ThinkingLevel
-	WorktreePath        string
-	Worktree            bool
-	Error               string
-	Result              *AgentResult
-	Progress            *AgentProgress
-	Abort               context.CancelFunc
-	UnregisterCleanup   func()
-	PendingMessages     []llm.UserMessage
-	Retain              bool
-	DiskLoaded          bool
-	Messages            []llm.Message
+	AgentID           string
+	Prompt            string
+	AgentType         string
+	SelectedAgent     string
+	Model             *llm.Model
+	Thinking          llm.ThinkingLevel
+	WorktreePath      string
+	Worktree          bool
+	Error             string
+	Result            *AgentResult
+	Progress          *AgentProgress
+	Abort             context.CancelFunc
+	UnregisterCleanup func()
+	PendingMessages   []llm.UserMessage
+	Retain            bool
+	// MessageCount 是 sidechain transcript 已提交的消息数。transcript 常驻磁盘,
+	// 内存只保留这个长度,供 TUI 判断是否需要增量读取
+	MessageCount        int
 	ContentReplacements map[string][]llm.Content
 	EvictAfter          *time.Time
 }
@@ -132,7 +133,6 @@ type AgentRuntime struct {
 type AgentInput struct {
 	Description  string             `json:"description"`
 	Prompt       string             `json:"prompt"`
-	Name         string             `json:"name,omitempty"`
 	SubagentType *string            `json:"subagent_type,omitempty"`
 	Worktree     *bool              `json:"worktree,omitempty"`
 	Thinking     *llm.ThinkingLevel `json:"thinking,omitempty"`
@@ -204,6 +204,9 @@ type ResumeSource struct {
 	Description  string
 	OutputFile   string
 	WorktreePath string
+	// WorktreeOwned 表示该 worktree 由子 agent 创建。恢复路径只记录该信息,
+	// 不会据此安装清理:恢复后的会话会把用户工作写进 worktree
+	WorktreeOwned bool
 }
 
 // ResumeResolver 查找已被 store 淘汰的任务,false 表示 transcript 已不存在

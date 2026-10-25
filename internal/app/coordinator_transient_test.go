@@ -31,3 +31,24 @@ func TestCoordinatorTransientMessagesAreRequestOnly(t *testing.T) {
 		t.Fatal("transient task notification was persisted into the parent session")
 	}
 }
+
+func TestCoordinatorPrepareRequestRunsTaskEvictor(t *testing.T) {
+	sm := session.New("/work", t.TempDir())
+	coord := NewCoordinator(sm, nil)
+	calls := 0
+	coord.SetTaskEvictor(func() int {
+		calls++
+		return 1
+	})
+	request := agent.PreparedRequest{Context: llm.Context{Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "input"}}}}}}
+	if _, err := coord.PrepareRequest(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.PrepareRequest(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	// 每个请求边界都要回收一次,不能只在首次请求时生效
+	if calls != 2 {
+		t.Fatalf("evictor calls = %d, want one per request", calls)
+	}
+}

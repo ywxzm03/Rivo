@@ -18,55 +18,106 @@ type Bash struct {
 	Background BackgroundRunner
 }
 
-// ReadOnlyBash keeps the Bash schema available to Explore/Plan while rejecting
-// commands that can mutate files or launch an unrestricted interpreter.
-type ReadOnlyBash struct{ Bash *Bash }
-
-func NewReadOnlyBash(bash *Bash) *ReadOnlyBash { return &ReadOnlyBash{Bash: bash} }
-
-func (b *ReadOnlyBash) Name() string { return b.Bash.Name() }
-func (b *ReadOnlyBash) Description() string {
-	return b.Bash.Description() + " Read-only mode permits inspection commands only."
-}
-func (b *ReadOnlyBash) Parameters() map[string]any { return b.Bash.Parameters() }
-func (b *ReadOnlyBash) PromptSnippet() string      { return b.Bash.PromptSnippet() }
-func (b *ReadOnlyBash) PromptGuidelines() []string {
-	return append(b.Bash.PromptGuidelines(), "In read-only mode, use Bash only for inspection commands.")
-}
-func (b *ReadOnlyBash) ExecutionMode() llm.ToolExecutionMode { return b.Bash.ExecutionMode() }
-
-func (b *ReadOnlyBash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	command, _ := args["command"].(string)
-	if !readOnlyShellCommand(command) || args["run_in_background"] == true {
-		return llm.ToolResult{}, fmt.Errorf("bash: command is unavailable in read-only mode")
+// guardShellCommand 拦截灾难性命令。explore/plan 的只读性由工具池与 prompt 保证,
+// 这里只挡住模型无论如何都不该执行的操作
+func guardShellCommand(command string) error {
+	// 1.控制字符会被 bash 静默丢弃,让校验与实际执行产生分歧
+	if controlCharPattern.MatchString(command) {
+		return fmt.Errorf("bash: command contains non-printable control characters")
 	}
-	return b.Bash.Execute(ctx, args)
+	// 2.逐段检查,避免 `ls; rm -rf /` 这类复合命令绕过
+	for _, segment := range splitShellSegments(command) {
+		if reason := dangerousShellSegment(segment); reason != "" {
+			return fmt.Errorf("bash: %s", reason)
+		}
+	}
+	return nil
 }
 
-func readOnlyShellCommand(command string) bool {
-	if strings.TrimSpace(command) == "" || strings.ContainsAny(command, ";|&><`$(){}\r\n") {
-		return false
-	}
-	fields := strings.Fields(command)
+// controlCharPattern 匹配 bash 会静默丢弃的不可打印字符,保留 \t \n \r
+var controlCharPattern = regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]`)
+
+// splitShellSegments 按 shell 运算符切分命令
+func splitShellSegments(command string) []string {
+	return strings.FieldsFunc(command, func(r rune) bool {
+		return r == ';' || r == '|' || r == '&' || r == '\n' || r == '(' || r == ')'
+	})
+}
+
+// dangerousShellSegment 返回该片段被拒绝的原因,空字符串表示放行
+func dangerousShellSegment(segment string) string {
+	fields := strings.Fields(strings.TrimSpace(segment))
 	if len(fields) == 0 {
-		return false
+		return ""
 	}
-	allowed := map[string]bool{"ls": true, "pwd": true, "cat": true, "head": true, "tail": true, "grep": true, "rg": true, "git": true, "wc": true, "file": true, "stat": true}
-	if strings.ContainsAny(fields[0], "/\\") || !allowed[fields[0]] {
-		return false
+	// 3.zsh 模块内建命令在 bash 下不存在,拦掉可避免解析器分歧
+	if zshModuleCommands[fields[0]] {
+		return fmt.Sprintf("zsh module command %q is not allowed", fields[0])
 	}
-	if fields[0] == "git" && len(fields) > 1 {
-		gitReadOnly := map[string]bool{"status": true, "log": true, "diff": true, "show": true, "branch": true, "rev-parse": true, "ls-files": true}
-		if !gitReadOnly[fields[1]] {
-			return false
+	// 4.递归删除根目录或家目录
+	if fields[0] == "rm" && hasRecursiveForceFlag(fields[1:]) && targetsCriticalPath(fields[1:]) {
+		return "refusing to recursively delete a critical path"
+	}
+	// 5.写块设备会不可逆地破坏磁盘
+	if fields[0] == "dd" && writesBlockDevice(fields[1:]) {
+		return "refusing to write directly to a block device"
+	}
+	return ""
+}
+
+var zshModuleCommands = map[string]bool{
+	"zmodload": true, "emulate": true, "sysopen": true, "sysread": true,
+	"syswrite": true, "sysseek": true, "zpty": true, "ztcp": true,
+	"zsocket": true, "zf_rm": true, "zf_mv": true, "zf_ln": true,
+	"zf_chmod": true, "zf_chown": true, "zf_mkdir": true, "zf_rmdir": true,
+	"zf_chgrp": true,
+}
+
+// hasRecursiveForceFlag 判断 rm 是否同时带递归与强制
+func hasRecursiveForceFlag(args []string) bool {
+	recursive, force := false, false
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
 		}
-		for _, field := range fields[2:] {
-			if strings.Contains(field, "output") || field == "-o" || strings.Contains(field, "exec") || strings.Contains(field, "external-diff") || field == "--ext-diff" {
-				return false
-			}
+		if strings.ContainsAny(arg, "rR") {
+			recursive = true
+		}
+		if strings.Contains(arg, "f") {
+			force = true
 		}
 	}
-	return true
+	return recursive && force
+}
+
+// targetsCriticalPath 判断 rm 的目标是否包含根目录或家目录本身
+func targetsCriticalPath(args []string) bool {
+	home, _ := os.UserHomeDir()
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		cleaned := strings.TrimRight(arg, "/")
+		if cleaned == "" || cleaned == "/" || cleaned == "." || cleaned == ".." ||
+			cleaned == "/*" || cleaned == "~" || (home != "" && cleaned == home) {
+			return true
+		}
+	}
+	return false
+}
+
+// writesBlockDevice 判断 dd 的 of= 是否指向块设备
+func writesBlockDevice(args []string) bool {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "of=") {
+			continue
+		}
+		target := strings.TrimPrefix(arg, "of=")
+		if strings.HasPrefix(target, "/dev/") && !strings.HasPrefix(target, "/dev/null") {
+			return true
+		}
+	}
+	return false
 }
 
 type BackgroundRunner interface {
@@ -77,9 +128,37 @@ func (b *Bash) Name() string { return "bash" }
 
 func (b *Bash) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
-func (b *Bash) PromptSnippet() string { return "Execute bash commands (ls, grep, find, etc.)" }
+func (b *Bash) PromptSnippet() string { return "Execute bash commands" }
 
-func (b *Bash) PromptGuidelines() []string { return nil }
+// PromptGuidelines 引导模型优先使用内置工具,并把 bash 限定在工具做不到的场合
+func (b *Bash) PromptGuidelines() []string {
+	return []string{
+		// 1.工具偏好:内置工具在审查与授权上体验更好
+		"Prefer the find tool for file pattern matching, and the ls tool for listing a directory; use bash `find` or `ls` only when a dedicated tool cannot accomplish the task",
+		"Prefer the grep tool for searching file contents; use bash `grep` or `rg` only when a dedicated tool cannot accomplish the task",
+		"Prefer the edit tool for editing files; use bash `sed` or `awk` only when a dedicated tool cannot accomplish the task",
+		"Prefer the write tool for creating files; use bash redirection or heredocs only when a dedicated tool cannot accomplish the task",
+		"Output text directly to communicate; do not use bash `echo` or `printf` for messages to the user",
+		// 2.多命令组织
+		"When several independent commands can run in parallel, issue multiple bash tool calls in a single message instead of chaining them",
+		"When commands depend on each other, chain them with `&&` in one bash call",
+		"Use `;` only when you need to run commands sequentially but do not care whether earlier ones fail",
+		"Do not use newlines to separate commands; newlines are fine inside quoted strings",
+		// 3.通用约定
+		"Before creating files or directories, use `ls` to verify the parent directory exists and is the correct location",
+		"Always quote file paths that contain spaces with double quotes",
+		"Maintain the current working directory by using absolute paths; only use `cd` when the user explicitly asks for it",
+		// 4.git 约定
+		"Prefer creating a new commit over amending an existing one",
+		"Before destructive git operations such as `git reset --hard`, `git push --force`, or `git checkout --`, consider whether a safer alternative reaches the same goal; only use them when they are truly the best approach",
+		"Never skip hooks with `--no-verify` or bypass signing unless the user has explicitly asked for it; if a hook fails, investigate and fix the underlying issue",
+		// 5.sleep 约定
+		"Do not sleep between commands that can run immediately; just run them",
+		"For long-running commands use `run_in_background` instead of sleeping; you are notified when the task completes, so do not poll",
+		"Do not retry failing commands in a sleep loop; diagnose the root cause instead",
+		"If you must poll an external process, use a check command rather than sleeping first, and keep any sleep short",
+	}
+}
 
 func (b *Bash) Description() string {
 	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds or run_in_background=true to start a BashTask and return its task ID.", defaultMaxLines, defaultMaxBytes/1024)
@@ -90,6 +169,11 @@ func (b *Bash) Parameters() map[string]any {
 }
 
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
+	command, _ := args["command"].(string)
+	// 主 agent 与子 agent 共用同一层灾难性命令拦截
+	if err := guardShellCommand(command); err != nil {
+		return llm.ToolResult{}, err
+	}
 	if background, ok := args["run_in_background"].(bool); ok && background {
 		if b.Background == nil {
 			return llm.ToolResult{}, fmt.Errorf("bash: background execution is unavailable")

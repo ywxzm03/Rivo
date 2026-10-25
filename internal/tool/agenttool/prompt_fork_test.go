@@ -1,6 +1,7 @@
 package agenttool
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -79,9 +80,12 @@ func TestBuildForkMessagesFillsMissingToolResults(t *testing.T) {
 	if second.ToolCallID != "tool-2" || second.Content[0].(llm.TextContent).Text != forkPlaceholder {
 		t.Fatalf("missing result was not filled: %#v", second)
 	}
-	// 2.末尾追加 fork 指令
+	// 2.末尾追加 fork 指令,含 boilerplate 前缀与 directive 正文
 	directive := child[len(child)-1].(llm.UserMessage).Content[0].(llm.TextContent).Text
-	if directive != "Your directive: inspect the result" {
+	if !containsFold(directive, "<fork-boilerplate>") {
+		t.Fatalf("fork boilerplate missing: %q", directive)
+	}
+	if !containsFold(directive, "Your directive: inspect the result") {
 		t.Fatalf("directive = %q", directive)
 	}
 }
@@ -134,4 +138,102 @@ func lower(r rune) rune {
 		return r + ('a' - 'A')
 	}
 	return r
+}
+
+func TestForkDirectiveCarriesBoilerplateAndNoNestedAgent(t *testing.T) {
+	directive := buildForkDirective("audit the branch", "/repo", "")
+	// 1.boilerplate 必须在 directive 之前
+	if !strings.HasPrefix(directive, "<fork-boilerplate>") {
+		t.Fatalf("boilerplate is not the prefix: %q", directive)
+	}
+	if !strings.Contains(directive, "</fork-boilerplate>") {
+		t.Fatal("boilerplate is not closed")
+	}
+	// 2.关键行为约束必须保留
+	for _, rule := range []string{"Do NOT converse", "Do NOT editorialize", "Scope:", "under 500 words"} {
+		if !strings.Contains(directive, rule) {
+			t.Fatalf("rule %q missing from boilerplate", rule)
+		}
+	}
+	// 3.禁止嵌套调用 Agent 的提醒放在最后
+	if !strings.HasSuffix(strings.TrimSpace(directive), forkNoNestedAgent) {
+		t.Fatalf("nested-agent reminder is not last: %q", directive)
+	}
+	// 4.没有 worktree 时不出现隔离说明
+	if strings.Contains(directive, "isolated git worktree") {
+		t.Fatal("worktree notice leaked without a worktree")
+	}
+}
+
+func TestForkDirectiveIncludesWorktreeNotice(t *testing.T) {
+	directive := buildForkDirective("work", "/repo", "/wt")
+	// worktree 场景要同时给出父 cwd 与 worktree 路径,并声明改动隔离
+	for _, want := range []string{"/repo", "/wt", "isolated git worktree", "will not affect the parent's files"} {
+		if !strings.Contains(directive, want) {
+			t.Fatalf("worktree notice missing %q", want)
+		}
+	}
+	// notice 必须排在 directive 正文之前
+	if strings.Index(directive, "isolated git worktree") > strings.Index(directive, "Your directive:") {
+		t.Fatal("worktree notice should precede the directive")
+	}
+}
+
+// fork 前缀共享父消息引用,尾部深拷贝:子 slice 的改写不得回写父 transcript
+func TestBuildForkMessagesSharesPrefixAndIsolatesTail(t *testing.T) {
+	parent := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "parent prompt"}}},
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{ID: "tool-1", Name: "read"},
+			llm.ToolCall{ID: "tool-2", Name: "grep"},
+		}},
+		llm.ToolResultMessage{ToolCallID: "tool-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "existing"}}},
+	}
+	child := buildForkMessages(parent, "go", "", "/repo")
+	// 1.前缀(最后一条 assistant 之前)共享同一份 Content 底层数组
+	parentText := parent[0].(llm.UserMessage).Content
+	childText := child[0].(llm.UserMessage).Content
+	if len(parentText) != 1 || len(childText) != 1 {
+		t.Fatalf("prefix content = %d/%d, want 1/1", len(parentText), len(childText))
+	}
+	if &parentText[0] != &childText[0] {
+		t.Fatal("fork prefix was deep copied instead of shared")
+	}
+	// 2.子 slice 改写不影响父 slice
+	child[0] = llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "rewritten"}}}
+	child[2] = llm.ToolResultMessage{ToolCallID: "tool-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "rewritten"}}}
+	if parent[0].(llm.UserMessage).Content[0].(llm.TextContent).Text != "parent prompt" {
+		t.Fatal("child slice rewrite leaked into the parent prefix")
+	}
+	if parent[2].(llm.ToolResultMessage).Content[0].(llm.TextContent).Text != "existing" {
+		t.Fatal("child slice rewrite leaked into the parent tail")
+	}
+	// 3.子 agent 的 append 不得写进父的 backing array
+	capacity := cap(child)
+	parentLen := len(parent)
+	child = append(child, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "extra"}}})
+	if cap(child) == capacity {
+		t.Fatal("fork slice has spare capacity: appends could alias the parent array")
+	}
+	if len(parent) != parentLen {
+		t.Fatalf("parent length changed to %d, want %d", len(parent), parentLen)
+	}
+}
+
+// 尾部 tool result 的占位替换只发生在深拷贝上,父的原有顺序保持原样
+func TestBuildForkMessagesDoesNotReorderParentTail(t *testing.T) {
+	parent := []llm.Message{
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{ID: "tool-1", Name: "read"},
+			llm.ToolCall{ID: "tool-2", Name: "grep"},
+		}},
+		llm.ToolResultMessage{ToolCallID: "tool-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "existing"}}},
+	}
+	buildForkMessages(parent, "go", "", "/repo")
+	if len(parent) != 2 {
+		t.Fatalf("parent tail length = %d, want 2", len(parent))
+	}
+	if parent[1].(llm.ToolResultMessage).ToolCallID != "tool-1" {
+		t.Fatalf("parent tail was reordered: %#v", parent[1])
+	}
 }

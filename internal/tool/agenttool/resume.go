@@ -11,9 +11,13 @@ import (
 
 // metadata 是随 transcript 一起落盘的任务元数据
 type metadata struct {
-	AgentType    string `json:"agentType"`
-	Description  string `json:"description"`
+	AgentType   string `json:"agentType"`
+	Description string `json:"description"`
+	// WorktreePath 是任务的工作目录,恢复时据此把子 agent 放回原 worktree
 	WorktreePath string `json:"worktreePath,omitempty"`
+	// WorktreeOwned 记录该 worktree 由子 agent 创建、理论上可回收。
+	// 恢复路径只读取不回收:恢复后的会话会把用户工作写进该目录
+	WorktreeOwned bool `json:"worktreeOwned,omitempty"`
 }
 
 // ResumeResolver 从 eviction 后仍留存的 sidechain 文件重建任务身份。
@@ -46,6 +50,7 @@ func ResumeResolver(sessionDir string) taskpkg.ResumeResolver {
 		}
 		source.Description = meta.Description
 		source.WorktreePath = meta.WorktreePath
+		source.WorktreeOwned = meta.WorktreeOwned
 		return source, true
 	}
 }

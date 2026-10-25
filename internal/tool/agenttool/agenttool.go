@@ -28,7 +28,7 @@ func New(launcher Launcher) *Tool {
 func (t *Tool) Name() string { return "agent" }
 
 func (t *Tool) Description() string {
-	return "Launch an asynchronous subagent for an independent task."
+	return agentToolDescription
 }
 
 func (t *Tool) Parameters() map[string]any {
@@ -36,19 +36,30 @@ func (t *Tool) Parameters() map[string]any {
 		"type":     "object",
 		"required": []string{"description", "prompt"},
 		"properties": map[string]any{
-			"description":   map[string]any{"type": "string", "description": "Short task description"},
-			"prompt":        map[string]any{"type": "string", "description": "Task instructions"},
-			"name":          map[string]any{"type": "string"},
-			"subagent_type": map[string]any{"type": "string"},
-			"worktree":      map[string]any{"type": "boolean"},
-			"thinking":      map[string]any{"type": "string", "enum": []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}},
-			"model":         map[string]any{"type": "string"},
+			"description": map[string]any{"type": "string", "description": "3-5 word summary of the task"},
+			"prompt":      map[string]any{"type": "string", "description": "Task instructions. For a fresh agent this must be self-contained; for a fork it is a directive, not background."},
+			"subagent_type": map[string]any{
+				"type":        "string",
+				"description": agentTypeEnumDescription(),
+			},
+			"worktree": map[string]any{"type": "boolean", "description": "Run the task in an isolated git worktree"},
+			"thinking": map[string]any{"type": "string", "enum": []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}},
+			"model":    map[string]any{"type": "string", "description": "provider/model; ignored for forks"},
 		},
 	}
 }
 
-func (t *Tool) PromptSnippet() string                { return "Launch an asynchronous subagent" }
-func (t *Tool) PromptGuidelines() []string           { return nil }
+// agentTypeEnumDescription 把内置 agent 的用途说明拼成 subagent_type 的文档
+func agentTypeEnumDescription() string {
+	return "Omit to fork yourself and inherit this conversation. Or name an agent type — the built-ins are:\n" +
+		"- explore: " + agentTypeDescriptions["explore"] + "\n" +
+		"- plan: " + agentTypeDescriptions["plan"] + "\n" +
+		"- work: " + agentTypeDescriptions["work"] + "\n" +
+		"Custom agent names defined in .rivo/agent/agents/<name>.md or the user agent directory are also accepted."
+}
+
+func (t *Tool) PromptSnippet() string                { return agentToolSnippet }
+func (t *Tool) PromptGuidelines() []string           { return agentToolGuidelines() }
 func (t *Tool) ExecutionMode() llm.ToolExecutionMode { return llm.ToolExecutionParallel }
 
 // Execute 解析工具参数并派发任务,返回启动信息

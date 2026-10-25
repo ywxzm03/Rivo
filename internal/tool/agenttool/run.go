@@ -34,17 +34,18 @@ type Runner struct {
 func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
 	cwd := r.ParentCwd
 	worktreePath := spec.WorktreePath
+	worktreeBase := ""
 	createdWorktree := false
 	runnerSucceeded := false
 	// 1.失败路径要回收刚创建的空 worktree,避免留下垃圾目录
 	defer func() {
 		if createdWorktree && !runnerSucceeded {
-			_ = cleanupSubagentWorktree(worktreePath, r.ParentCwd, metadataPathFor(worktreePath, r.SessionDir, spec.ID))
+			_ = cleanupSubagentWorktree(worktreePath, r.ParentCwd, worktreeBase, metadataPathFor(worktreePath, r.SessionDir, spec.ID))
 		}
 	}()
 	if spec.Worktree && worktreePath == "" {
 		var err error
-		worktreePath, err = createSubagentWorktree(r.ParentCwd, r.SessionDir, spec.ID)
+		worktreePath, worktreeBase, err = createSubagentWorktree(r.ParentCwd, r.SessionDir, spec.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +64,8 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	metadataPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".meta.json"
 	if !spec.Continuation || createdWorktree {
-		if err := writeMetadata(metadataPath, metadata{AgentType: spec.AgentType, Description: spec.Description, WorktreePath: worktreePath}); err != nil {
+		meta := metadata{AgentType: spec.AgentType, Description: spec.Description, WorktreePath: worktreePath, WorktreeOwned: createdWorktree}
+		if err := writeMetadata(metadataPath, meta); err != nil {
 			return nil, err
 		}
 	}
@@ -140,8 +142,10 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	runtime := &taskpkg.AgentRuntime{
 		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, ContentReplacementState: replacementState, Done: make(chan struct{}),
 	}
-	if spec.Worktree && worktreePath != "" {
-		runtime.WorktreeCleanup = func() bool { return cleanupSubagentWorktree(worktreePath, r.ParentCwd, metadataPath) }
+	// 只有本生命周期新建的 worktree 才装回收钩子:恢复沿用的 worktree 里可能已有
+	// 用户工作,与 Claude Code 一致,一律保留到用户手动清理
+	if createdWorktree && worktreePath != "" {
+		runtime.WorktreeCleanup = func() bool { return cleanupSubagentWorktree(worktreePath, r.ParentCwd, worktreeBase, metadataPath) }
 	}
 	// 6.fork 首轮续跑父上下文;continuation 追加一条 user 消息后继续
 	if fork && !spec.Continuation && spec.ParentContext != nil {

@@ -55,7 +55,6 @@ func TestExecuteParsesFullInput(t *testing.T) {
 	result, err := tool.Execute(context.Background(), map[string]any{
 		"description":   "inspect tree",
 		"prompt":        "list files",
-		"name":          "scout",
 		"subagent_type": "explore",
 		"worktree":      true,
 		"thinking":      "high",
@@ -65,7 +64,7 @@ func TestExecuteParsesFullInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := launcher.input
-	if input.Description != "inspect tree" || input.Prompt != "list files" || input.Name != "scout" {
+	if input.Description != "inspect tree" || input.Prompt != "list files" {
 		t.Fatalf("basic fields = %#v", input)
 	}
 	if input.SubagentType == nil || *input.SubagentType != "explore" {

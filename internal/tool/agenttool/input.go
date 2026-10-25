@@ -21,10 +21,6 @@ func parseInput(args map[string]any) (taskpkg.AgentInput, error) {
 		return input, err
 	}
 	// 2.可选字段:未提供时保持 nil,让 Manager 走默认值
-	input.Name, err = optionalString(args, "name")
-	if err != nil {
-		return input, err
-	}
 	subagentType, err := optionalString(args, "subagent_type")
 	if err != nil {
 		return input, err

@@ -114,7 +114,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return nil
 	}
-	if msg.String() == "x" && (m.viewingTaskID != "" || m.editor.Value() == "") {
+	// 输入框为空时 x 才表示 stop/evict,否则它是普通字符,必须落到编辑器
+	if msg.String() == "x" && m.editor.Value() == "" {
 		if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
 			kind := "evict"
 			if task.Status == "running" {

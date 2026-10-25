@@ -53,6 +53,9 @@ type Runtime struct {
 	compactionNoticeSeq uint64
 	pendingSkillInput   *skillInput
 	subagentRevision    uint64
+	// subagentTranscripts 缓存每个被查看任务已投影的 transcript 前缀,
+	// 完整 transcript 始终常驻磁盘
+	subagentTranscripts map[string]*transcriptCache
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {
@@ -603,7 +606,7 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	viewingTaskID := ""
 	if store := r.app.SubagentStore(); store != nil {
 		viewingTaskID = store.ViewingTaskID()
-		tasks = projectSubagentTasks(store.Snapshot(), viewingTaskID)
+		tasks = r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
 	}
 	r.subagentRevision++
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,

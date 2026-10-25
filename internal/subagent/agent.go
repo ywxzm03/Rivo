@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -194,9 +196,28 @@ func thinkingValue(thinking *llm.ThinkingLevel) llm.ThinkingLevel {
 
 func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput) {
 	started := time.Now()
+	// goroutine 边界是唯一可靠的 panic 捕获点。panic 会跳过终态转换、runtime 移除和
+	// Done 关闭,任务永久卡在 running,所以在这里兜成 failed 并走完整清理路径
 	defer func() {
-		if runtime.Cancel != nil {
-			runtime.Cancel()
+		// 先注册资源释放,它在收尾逻辑之后执行:即使 failAgent 自己 panic,
+		// cancel、runtime 移除和 Done 关闭也照常发生
+		defer func() {
+			if runtime.Cancel != nil {
+				runtime.Cancel()
+			}
+			m.store.RemoveRuntime(taskID, token)
+			close(runtime.Done)
+		}()
+		// 收尾路径自身的 panic 只记录,不能带崩进程
+		defer func() {
+			if nested := recover(); nested != nil {
+				fmt.Fprintf(os.Stderr, "agent: panic while finishing task %s: %v\n%s\n", taskID, nested, debug.Stack())
+			}
+		}()
+		recovered := recover()
+		if recovered != nil {
+			fmt.Fprintf(os.Stderr, "agent: panic in task %s: %v\n%s\n", taskID, recovered, debug.Stack())
+			m.failAgent(taskID, token, runtime, input, fmt.Errorf("agent: panic: %v", recovered), started)
 		}
 	}()
 	run := runtime.Run
@@ -228,14 +249,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 		m.cleanupWorktree(taskID, token, runtime)
 		m.store.EnqueueNotification(taskID, token, notification)
 	} else if runErr != nil {
-		transitioned := m.store.FailAgent(taskID, token, runErr)
-		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusFailed, Summary: runErr.Error(), DurationMs: time.Since(started).Milliseconds()})
-		m.cleanupWorktree(taskID, token, runtime)
-		if transitioned {
-			m.store.EnqueueNotification(taskID, token, notification)
-		} else if task, ok := m.store.Task(taskID); ok && task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled {
-			m.store.EnqueueNotification(taskID, token, m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusKilled, Summary: input.Description, DurationMs: time.Since(started).Milliseconds()}))
-		}
+		m.failAgent(taskID, token, runtime, input, runErr, started)
 	} else {
 		result := agentResult(taskID, input, reply, time.Since(started))
 		transitioned := m.store.CompleteAgent(taskID, token, &result)
@@ -245,8 +259,19 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 			m.store.EnqueueNotification(taskID, token, notification)
 		}
 	}
-	m.store.RemoveRuntime(taskID, token)
-	close(runtime.Done)
+}
+
+// failAgent 把任务转成 failed、清理 worktree 并入队 failed 通知。
+// 正常失败和 panic 恢复共用这条路径
+func (m *Manager) failAgent(taskID string, token uint64, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput, cause error, started time.Time) {
+	transitioned := m.store.FailAgent(taskID, token, cause)
+	notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusFailed, Summary: cause.Error(), DurationMs: time.Since(started).Milliseconds()})
+	m.cleanupWorktree(taskID, token, runtime)
+	if transitioned {
+		m.store.EnqueueNotification(taskID, token, notification)
+	} else if task, ok := m.store.Task(taskID); ok && task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled {
+		m.store.EnqueueNotification(taskID, token, m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusKilled, Summary: input.Description, DurationMs: time.Since(started).Milliseconds()}))
+	}
 }
 
 func (m *Manager) cleanupWorktree(taskID string, token uint64, runtime *taskpkg.AgentRuntime) {

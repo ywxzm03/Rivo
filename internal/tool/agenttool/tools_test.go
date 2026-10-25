@@ -27,64 +27,97 @@ func toolNames(tools []llm.Tool) []string {
 	return names
 }
 
-func TestReadOnlyToolsKeepInspectionToolsAndReadOnlyBash(t *testing.T) {
+func TestReadOnlyToolsKeepInspectionToolsAndBash(t *testing.T) {
 	got := readOnlyTools(testParentTools())
 	want := []string{"bash", "find", "grep", "ls", "read"}
 	if names := toolNames(got); !equalStrings(names, want) {
 		t.Fatalf("read-only tools = %v, want %v", names, want)
 	}
-	// 1.bash 必须降级为只读版本,否则 explore/plan 能写文件
+	// bash 保持完整能力,只读性由工具池裁剪与 prompt 约束保证
 	for _, candidate := range got {
 		if candidate.Name() == "bash" {
-			if _, ok := candidate.(*toolpkg.ReadOnlyBash); !ok {
-				t.Fatalf("bash tool type = %T, want *toolpkg.ReadOnlyBash", candidate)
+			if _, ok := candidate.(*toolpkg.Bash); !ok {
+				t.Fatalf("bash tool type = %T, want *toolpkg.Bash", candidate)
 			}
 		}
 	}
 }
 
-func TestChildToolsKeepWorkToolsAndRemoveTaskStop(t *testing.T) {
+func TestChildToolsKeepTaskStopForEveryChild(t *testing.T) {
 	sm := session.New(t.TempDir(), t.TempDir())
-	got := childTools(testParentTools(), true, sm, taskpkg.NewStore())
-	want := []string{"agent", "bash", "edit", "find", "grep", "ls", "powershell", "read", "write"}
-	if names := toolNames(got); !equalStrings(names, want) {
-		t.Fatalf("work tools = %v, want %v", names, want)
+	for _, fork := range []bool{true, false} {
+		got := childTools(testParentTools(), fork, sm, taskpkg.NewStore())
+		// TaskStop 对所有子 agent 可见,便于终止自己启动的后台任务
+		found := false
+		for _, candidate := range got {
+			if candidate.Name() == "TaskStop" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("fork=%v: TaskStop missing from child tools", fork)
+		}
 	}
 }
 
-func TestChildToolsDropsAgentWhenNotKept(t *testing.T) {
+func TestChildToolsDropsAgentForTypedSubagent(t *testing.T) {
 	sm := session.New(t.TempDir(), t.TempDir())
 	got := childTools(testParentTools(), false, sm, taskpkg.NewStore())
-	// explore/plan 子 agent 不得再派发 subagent
+	// explore/plan/work 子 agent 不得再派发 subagent
 	for _, candidate := range got {
 		if candidate.Name() == "agent" {
-			t.Fatal("agent tool survived with keepAgent=false")
+			t.Fatal("agent tool survived for a typed subagent")
 		}
 	}
 }
 
-func TestChildToolsRejectsNestedAgentInFork(t *testing.T) {
+func TestChildToolsReusesParentAgentForFork(t *testing.T) {
 	sm := session.New(t.TempDir(), t.TempDir())
-	got := childTools(testParentTools(), true, sm, taskpkg.NewStore())
-	var nested llm.Tool
-	for _, candidate := range got {
+	parent := testParentTools()
+	var parentAgent llm.Tool
+	for _, candidate := range parent {
 		if candidate.Name() == "agent" {
-			nested = candidate
+			parentAgent = candidate
 		}
 	}
-	if nested == nil {
-		t.Fatal("agent tool missing in fork child")
+	got := childTools(parent, true, sm, taskpkg.NewStore())
+	// 1.fork 必须拿到父的原始实例,而不是包装类型
+	for _, candidate := range got {
+		if candidate.Name() == "agent" {
+			if candidate != parentAgent {
+				t.Fatalf("fork agent tool = %T, want the parent instance", candidate)
+			}
+			return
+		}
 	}
-	result, err := nested.Execute(nil, map[string]any{"description": "d", "prompt": "p"})
-	if err != nil {
-		t.Fatal(err)
+	t.Fatal("agent tool missing in fork child")
+}
+
+func TestChildToolsRebindsWriteAndEdit(t *testing.T) {
+	sm := session.New(t.TempDir(), t.TempDir())
+	parent := testParentTools()
+	var parentWrite, parentEdit llm.Tool
+	for _, candidate := range parent {
+		switch candidate.Name() {
+		case "write":
+			parentWrite = candidate
+		case "edit":
+			parentEdit = candidate
+		}
 	}
-	// 1.嵌套调用返回错误结果而不是 panic 或静默成功
-	if !result.IsError {
-		t.Fatalf("nested agent call = %#v, want error result", result)
-	}
-	if !containsFold(result.Content[0].(llm.TextContent).Text, "nested subagents") {
-		t.Fatalf("nested error text = %q", result.Content[0].(llm.TextContent).Text)
+	got := childTools(parent, true, sm, taskpkg.NewStore())
+	for _, candidate := range got {
+		switch candidate.Name() {
+		case "write":
+			// 2.写类工具必须换实例,避免子 agent 的改动进入父会话的 undo 快照
+			if candidate == parentWrite {
+				t.Fatal("write tool was not rebound to the child session")
+			}
+		case "edit":
+			if candidate == parentEdit {
+				t.Fatal("edit tool was not rebound to the child session")
+			}
+		}
 	}
 }
 

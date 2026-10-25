@@ -41,7 +41,7 @@ func TestRealToolsPromptSnippets(t *testing.T) {
 		"- ls: List directory contents",
 		"- grep: Search file contents for patterns (respects .gitignore)",
 		"- find: Find files by glob pattern (respects .gitignore)",
-		"- bash: Execute bash commands (ls, grep, find, etc.)",
+		"- bash: Execute bash commands",
 		"- write: Create or overwrite files",
 		"- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 	}
@@ -64,6 +64,25 @@ func TestRealToolsPromptGuidelines(t *testing.T) {
 	rules := sections["rules"]
 	want := []string{
 		"Use read to examine files instead of cat or sed.",
+		"Prefer the find tool for file pattern matching, and the ls tool for listing a directory; use bash `find` or `ls` only when a dedicated tool cannot accomplish the task",
+		"Prefer the grep tool for searching file contents; use bash `grep` or `rg` only when a dedicated tool cannot accomplish the task",
+		"Prefer the edit tool for editing files; use bash `sed` or `awk` only when a dedicated tool cannot accomplish the task",
+		"Prefer the write tool for creating files; use bash redirection or heredocs only when a dedicated tool cannot accomplish the task",
+		"Output text directly to communicate; do not use bash `echo` or `printf` for messages to the user",
+		"When several independent commands can run in parallel, issue multiple bash tool calls in a single message instead of chaining them",
+		"When commands depend on each other, chain them with `&&` in one bash call",
+		"Use `;` only when you need to run commands sequentially but do not care whether earlier ones fail",
+		"Do not use newlines to separate commands; newlines are fine inside quoted strings",
+		"Before creating files or directories, use `ls` to verify the parent directory exists and is the correct location",
+		"Always quote file paths that contain spaces with double quotes",
+		"Maintain the current working directory by using absolute paths; only use `cd` when the user explicitly asks for it",
+		"Prefer creating a new commit over amending an existing one",
+		"Before destructive git operations such as `git reset --hard`, `git push --force`, or `git checkout --`, consider whether a safer alternative reaches the same goal; only use them when they are truly the best approach",
+		"Never skip hooks with `--no-verify` or bypass signing unless the user has explicitly asked for it; if a hook fails, investigate and fix the underlying issue",
+		"Do not sleep between commands that can run immediately; just run them",
+		"For long-running commands use `run_in_background` instead of sleeping; you are notified when the task completes, so do not poll",
+		"Do not retry failing commands in a sleep loop; diagnose the root cause instead",
+		"If you must poll an external process, use a check command rather than sleeping first, and keep any sleep short",
 		"Use write only for new files or complete rewrites.",
 		"Use edit for precise changes (edits[].oldText must match exactly)",
 		"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
@@ -87,7 +106,7 @@ func TestRealToolsPromptGuidelines(t *testing.T) {
 		}
 	}
 	// ls / grep / find / bash / powershell 不贡献 guideline，环境变量提示不得出现
-	for _, absent := range []string{"ls to", "grep to", "find to", "bash to", "PowerShell to", "environment variables"} {
+	for _, absent := range []string{"PowerShell to", "environment variables"} {
 		if strings.Contains(rules, absent) {
 			t.Errorf("rules contains %q, want tool without guidelines to contribute nothing", absent)
 		}

@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +108,45 @@ func TestManagerNormalizesClaudeGeneralPurposeAliasToWork(t *testing.T) {
 		t.Fatalf("normalized type = %q, want work", launched.SubagentType)
 	}
 	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+}
+
+func TestManagerRecoversPanickingRuntime(t *testing.T) {
+	var runtime *taskpkg.AgentRuntime
+	cleaned := make(chan struct{})
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		runtime = &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+		runtime.WorktreeCleanup = func() bool {
+			close(cleaned)
+			return true
+		}
+		runtime.Run = func(context.Context, string) (*llm.AssistantMessage, error) {
+			panic("runtime blew up")
+		}
+		return runtime, nil
+	})
+	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "inspect", Prompt: "look around"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusFailed)
+	task, ok := manager.Store().Task(launched.AgentID)
+	if !ok || !strings.Contains(task.(*taskpkg.AgentState).Error, "panic: runtime blew up") {
+		t.Fatalf("task error = %#v", task)
+	}
+	select {
+	case <-runtime.Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done was not closed after a panicking run")
+	}
+	select {
+	case <-cleaned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worktree cleanup was skipped after a panicking run")
+	}
+	notifications := manager.Store().DrainNotifications()
+	if len(notifications) != 1 || notifications[0].Status != taskpkg.StatusFailed || !strings.Contains(notifications[0].Summary, "panic: runtime blew up") {
+		t.Fatalf("notifications = %#v", notifications)
+	}
 }
 
 func waitForTaskStatus(t *testing.T, store *taskpkg.Store, id string, want taskpkg.Status) {

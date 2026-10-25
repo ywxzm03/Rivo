@@ -57,6 +57,8 @@ type Coordinator struct {
 	// task-notifications; they are never committed to the session.
 	transientMessages func() []llm.Message
 	transientAck      func()
+	// taskEvictor 在每个请求前清理过期终态子任务,由装配方注入
+	taskEvictor func() int
 	// mu 只保护基线分节；runMu 串行化编排
 	mu         sync.Mutex
 	runMu      sync.Mutex
@@ -126,6 +128,23 @@ func (c *Coordinator) SetTransientAck(ack func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.transientAck = ack
+}
+
+// SetTaskEvictor 安装根任务 store 的过期清扫;每个请求边界调用一次。
+// 调用时只短暂持 c.mu 读取函数指针,实际清扫在锁外执行
+func (c *Coordinator) SetTaskEvictor(evict func() int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.taskEvictor = evict
+}
+
+func (c *Coordinator) evictExpiredTasks() {
+	c.mu.Lock()
+	evict := c.taskEvictor
+	c.mu.Unlock()
+	if evict != nil {
+		evict()
+	}
 }
 
 func (c *Coordinator) takeTransientMessages() []llm.Message {
@@ -199,6 +218,8 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 // PrepareRequest 返回会话投影快照，摘要生成失败时保留原上下文，存储失败必须停止运行
 func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
 	c.setModel(current.Config.Model)
+	// 请求边界顺带回收宽限期已过的终态子任务;通知队列不受影响
+	c.evictExpiredTasks()
 	compacted, err := c.CompactIfNeeded(ctx)
 	if err != nil {
 		var commitErr *session.CommitError
