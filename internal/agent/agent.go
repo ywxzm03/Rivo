@@ -17,8 +17,13 @@ type Agent struct {
 	AgentContext llm.Context
 	WorkingDir   string
 	MaxTurns     int
-	StreamFn     llm.StreamFn
-	OnEvent      llm.AgentEventSink
+	// ForkChild 标记该 agent 是 fork 子 agent,工具层据此拒绝递归派发
+	ForkChild bool
+	// AgentID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
+	// 归属到发起它的子 agent
+	AgentID  string
+	StreamFn llm.StreamFn
+	OnEvent  llm.AgentEventSink
 	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
 	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
 	CommitMessages func([]llm.Message) ([]string, error)
@@ -895,7 +900,7 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 }
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
-	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.AgentContext, Config: a.AgentConfig})
+	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.AgentContext, Config: a.AgentConfig, ForkChild: a.ForkChild, AgentID: a.AgentID})
 	ctx = llm.WithWorkingDir(ctx, a.WorkingDir)
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {

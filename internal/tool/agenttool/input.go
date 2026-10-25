@@ -39,6 +39,9 @@ func parseInput(args map[string]any) (taskpkg.AgentInput, error) {
 	}
 	if thinking != "" {
 		level := llm.ThinkingLevel(thinking)
+		if !llm.ValidThinkingLevel(level) {
+			return input, fmt.Errorf("agent: thinking must be one of %s", llm.ThinkingLevelList())
+		}
 		input.Thinking = &level
 	}
 	model, err := optionalString(args, "model")

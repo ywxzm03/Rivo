@@ -54,20 +54,45 @@ var (
 	_ Content = ToolCall{}
 )
 
-// CloneContent 深拷贝一组 content,隔离 ToolCall 的 Arguments map
+// CloneContent 深拷贝一组 content,隔离 ToolCall 的 Arguments
 func CloneContent(content []Content) []Content {
 	result := make([]Content, len(content))
 	for i, item := range content {
 		if call, ok := item.(ToolCall); ok {
 			cloned := call
-			cloned.Arguments = make(map[string]any, len(call.Arguments))
-			for key, value := range call.Arguments {
-				cloned.Arguments[key] = value
-			}
+			cloned.Arguments = cloneArguments(call.Arguments)
 			result[i] = cloned
 			continue
 		}
 		result[i] = item
 	}
 	return result
+}
+
+// cloneArguments 递归复制 tool 参数里的复合值。
+// 参数来自 JSON 解码,只可能出现 map[string]any / []any 两类容器
+func cloneArguments(arguments map[string]any) map[string]any {
+	if arguments == nil {
+		return nil
+	}
+	result := make(map[string]any, len(arguments))
+	for key, value := range arguments {
+		result[key] = cloneArgumentValue(value)
+	}
+	return result
+}
+
+func cloneArgumentValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneArguments(value)
+	case []any:
+		cloned := make([]any, len(value))
+		for i, item := range value {
+			cloned[i] = cloneArgumentValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }

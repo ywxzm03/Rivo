@@ -37,12 +37,13 @@ func childTools(parent []llm.Tool, fork bool, childSession *session.SessionManag
 }
 
 // readOnlyTools 保留只读工具。bash 保持完整能力,只读性由工具池裁剪与 prompt 约束保证,
-// 与 Claude Code 的 explore/plan 一致
+// 与 Claude Code 的 explore/plan 一致。TaskStop 必须保留:子 agent 能用 bash 起后台任务,
+// 就必须能停止它,否则会留下无法回收的孤儿进程
 func readOnlyTools(parent []llm.Tool) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(parent))
 	for _, tool := range parent {
 		switch tool.Name() {
-		case "write", "edit", "powershell", "agent", "TaskStop":
+		case "write", "edit", "powershell", "agent":
 			continue
 		default:
 			tools = append(tools, tool)

@@ -63,13 +63,16 @@ func (r *backgroundBashRunner) RunBackground(ctx context.Context, args map[strin
 		return llm.ToolResult{}, err
 	}
 	process := &backgroundProcess{cmd: cmd, file: output, capture: backgroundOutput, cancel: cancel}
+	// 记录发起者,子 agent 结束时据此回收它留下的孤儿进程
+	parentAgentID, _ := llm.CurrentToolContext(ctx)
 	id, token, err := r.store.Register(task.RegisterSpec{
 		Type:        task.TypeBash,
 		Description: command,
 		OutputFile:  path,
 		BashState: &task.BashState{
-			Command: command,
-			Process: process,
+			Command:       command,
+			Process:       process,
+			ParentAgentID: parentAgentID.AgentID,
 		},
 	})
 	if err != nil {
@@ -114,8 +117,10 @@ func waitBackgroundBash(ctx context.Context, store *task.Store, id string, token
 	_ = process.Cleanup()
 	truncated, bytes := process.capture.Stats()
 	store.SetBashOutputStats(id, token, truncated, bytes)
+	// 输出路径在任务被驱逐时随记录一起消失,通知里要自带一份
+	path := outputFile(store, id)
 	notification := func(status task.Status, summary string) task.Notification {
-		return task.Notification{TaskID: id, Status: status, OutputFile: outputFile(store, id), Summary: summary, OutputTruncated: truncated, OutputBytes: bytes}
+		return task.Notification{TaskID: id, Status: status, OutputFile: path, Summary: summary, OutputTruncated: truncated, OutputBytes: bytes}
 	}
 	if ctx.Err() != nil {
 		store.FailBash(id, token, &task.BashResult{Code: -1, Interrupted: true}, ctx.Err())
@@ -134,27 +139,31 @@ func waitBackgroundBash(ctx context.Context, store *task.Store, id string, token
 }
 
 type limitedBackgroundOutput struct {
-	mu   sync.Mutex
-	file *os.File
-	max  int
-	used int
+	mu        sync.Mutex
+	file      *os.File
+	max       int
+	used      int
+	truncated bool
 }
 
 func (w *limitedBackgroundOutput) Stats() (bool, int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.used >= w.max, w.used
+	return w.truncated, w.used
 }
 
 func (w *limitedBackgroundOutput) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.used >= w.max {
+		// 还有字节要写但已到上限,说明确实丢过输出
+		w.truncated = true
 		return len(data), nil
 	}
 	keep := len(data)
 	if remaining := w.max - w.used; keep > remaining {
 		keep = remaining
+		w.truncated = true
 	}
 	if _, err := w.file.Write(data[:keep]); err != nil {
 		return 0, err

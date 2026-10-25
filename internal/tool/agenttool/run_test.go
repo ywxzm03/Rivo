@@ -9,19 +9,21 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/session"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
 func testRunner(t *testing.T) *Runner {
 	t.Helper()
-	return &Runner{
-		ParentCwd:   t.TempDir(),
-		SessionDir:  t.TempDir(),
-		AgentDir:    t.TempDir(),
-		ParentModel: llm.Model{Provider: "test", ID: "parent-model"},
-		Thinking:    llm.ThinkingLevelMedium,
-		TaskStore:   taskpkg.NewStore(),
+	runner := &Runner{
+		ParentCwd:  t.TempDir(),
+		SessionDir: t.TempDir(),
+		AgentDir:   t.TempDir(),
+		Thinking:   llm.ThinkingLevelMedium,
+		TaskStore:  taskpkg.NewStore(),
 	}
+	runner.SetModel(llm.Model{Provider: "test", ID: "parent-model"}, nil)
+	return runner
 }
 
 func TestRunRejectsMissingSessionDir(t *testing.T) {
@@ -275,7 +277,6 @@ func TestRunSkipsWorktreeCleanupForResumedWorktree(t *testing.T) {
 	initRepo(t, runner.ParentCwd)
 	first, err := runner.Run(context.Background(), taskpkg.AgentSpec{
 		ID: "agent-wt", AgentType: "work", Description: "isolated", Prompt: "go", Worktree: true,
-		InitialMessages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go"}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -286,6 +287,11 @@ func TestRunSkipsWorktreeCleanupForResumedWorktree(t *testing.T) {
 	defer func() {
 		_ = exec.Command("git", "-C", runner.ParentCwd, "worktree", "remove", "--force", first.WorktreePath).Run()
 	}()
+	// continuation 要求 transcript 已落盘,直接建一个带首轮消息的会话文件
+	sm := session.NewAt(runner.ParentCwd, first.OutputFile)
+	if _, err := sm.AppendMessages([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go"}}}}); err != nil {
+		t.Fatal(err)
+	}
 	// 1.恢复沿用同一个 worktree:即使元数据标明它由子 agent 创建,也不能装回收钩子
 	resumed, err := runner.Run(context.Background(), taskpkg.AgentSpec{
 		ID: "agent-wt", AgentType: "work", Description: "isolated", Prompt: "continue",
@@ -304,5 +310,36 @@ func TestRunSkipsWorktreeCleanupForResumedWorktree(t *testing.T) {
 	}
 	if resumed.WorktreeCleanup != nil {
 		t.Fatal("resumed worktree must be kept until cleaned manually")
+	}
+}
+
+// continuation 会重写同一份元数据,写入必须允许覆盖
+func TestWriteMetadataOverwritesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-1.meta.json")
+	if err := writeMetadata(path, metadata{AgentType: "work", Description: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMetadata(path, metadata{AgentType: "work", Description: "second"}); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta metadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Description != "second" {
+		t.Fatalf("metadata = %#v, want the rewritten value", meta)
+	}
+	// 临时文件不能残留
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("leftover files in the metadata directory: %d", len(entries))
 	}
 }

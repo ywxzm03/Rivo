@@ -353,8 +353,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.startSubagentRefresh()
 		}
 	case subagentRefreshMsg:
-		m.subagentRefreshRunning = false
 		if m.handlers.SubagentSnapshot == nil || !hasRunningSubagent(m.state.Subagents.Tasks) {
+			m.subagentRefreshRunning = false
 			return m, nil
 		}
 		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链

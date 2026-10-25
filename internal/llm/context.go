@@ -12,6 +12,12 @@ type workingDirKey struct{}
 type ToolContext struct {
 	Context Context
 	Config  AgentConfig
+	// ForkChild 表示当前 agent 本身是 fork 子 agent。fork 保留 Agent 工具
+	// 是为了工具定义与父缓存一致,递归派发由调用方据此拒绝
+	ForkChild bool
+	// AgentID 是子 agent 的任务 ID,主 agent 为空。后台 bash 任务据此记录
+	// 归属,子 agent 结束时可以回收它留下的孤儿进程
+	AgentID string
 }
 
 func WithToolContext(ctx context.Context, toolContext ToolContext) context.Context {

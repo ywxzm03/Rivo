@@ -16,36 +16,23 @@ import (
 
 func (r *Runtime) subagentSnapshot() tui.SubagentSnapshot {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	activeApp := r.app
+	r.mu.Unlock()
 	if activeApp == nil || activeApp.SubagentStore() == nil {
 		return tui.SubagentSnapshot{}
 	}
-	store := activeApp.SubagentStore()
-	viewingTaskID := store.ViewingTaskID()
-	r.subagentRevision++
-	return tui.SubagentSnapshot{
-		ViewingTaskID: viewingTaskID,
-		Tasks:         r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID),
-		Revision:      r.subagentRevision,
-	}
+	return r.subagentSnapshotLocked()
 }
 
 func (r *Runtime) SubagentSnapshot() tea.Cmd {
 	return func() tea.Msg {
 		r.mu.Lock()
 		activeApp := r.app
+		r.mu.Unlock()
 		if activeApp == nil || activeApp.SubagentStore() == nil {
-			r.mu.Unlock()
 			return tui.SubagentSnapshotMsg{Err: app.ErrSteeringUnavailable}
 		}
-		store := activeApp.SubagentStore()
-		viewingTaskID := store.ViewingTaskID()
-		snapshot := tui.SubagentSnapshot{Tasks: r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID), ViewingTaskID: viewingTaskID}
-		r.subagentRevision++
-		snapshot.Revision = r.subagentRevision
-		r.mu.Unlock()
-		return tui.SubagentSnapshotMsg{Snapshot: snapshot}
+		return tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshotLocked()}
 	}
 }
 
@@ -239,7 +226,7 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 				view.Result = textBlocks(task.Result.Content)
 			}
 			if task.Progress != nil {
-				view.TotalTokens = max(view.TotalTokens, task.Progress.TokenCount)
+				view.TotalTokens = max(view.TotalTokens, task.Progress.TokenCount+task.Progress.LatestInputTokens)
 				view.ToolUses = max(view.ToolUses, task.Progress.ToolUseCount)
 				if task.Progress.LastActivity != nil {
 					view.LastActivity = task.Progress.LastActivity.ActivityDescription
@@ -321,9 +308,12 @@ func projectSubagentMessages(taskID string, start int, messages []llm.Message) [
 					thinking += content.Thinking
 					group.Thinking = append(group.Thinking, tui.ThinkingBlockView{Index: contentIndex, Text: content.Thinking})
 				case llm.ToolCall:
-					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolSuccess}
+					// 还没有结果的调用必须显示为 pending,否则尾部投影会把
+					// 正在执行的工具误标成成功
+					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolPending}
 					if result, ok := results[content.ID]; ok {
 						call.Result = formatTaskToolResult(result)
+						call.Status = tui.ToolSuccess
 						if result.IsError {
 							call.Status = tui.ToolError
 						}

@@ -81,6 +81,9 @@ func parseDefinition(content, fallbackName string) (*Definition, error) {
 	if fields.MaxTurns < 0 {
 		return nil, errors.New("maxTurns must be non-negative")
 	}
+	if !llm.ValidThinkingLevel(fields.Thinking) {
+		return nil, fmt.Errorf("invalid thinking level %q", fields.Thinking)
+	}
 	return &Definition{Name: fields.Name, Description: fields.Description, Prompt: strings.TrimSpace(body), Model: fields.Model, Thinking: fields.Thinking, Tools: append([]string(nil), fields.Tools...), MaxTurns: fields.MaxTurns, OmitAgentsMd: fields.OmitAgentsMd}, nil
 }
 

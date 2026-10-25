@@ -49,7 +49,8 @@ func (t *Tool) Execute(_ context.Context, args map[string]any) (llm.ToolResult, 
 		return llm.ToolResult{}, errMissingStore
 	}
 	taskID, ok := args["task_id"].(string)
-	if !ok || strings.TrimSpace(taskID) == "" {
+	taskID = strings.TrimSpace(taskID)
+	if !ok || taskID == "" {
 		return llm.ToolResult{}, errMissingTaskID
 	}
 	result, err := taskpkg.StopTask(t.store, taskpkg.StopInput{TaskID: taskID})

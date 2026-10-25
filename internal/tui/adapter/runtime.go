@@ -52,9 +52,11 @@ type Runtime struct {
 	compactionNotice    *tui.Message
 	compactionNoticeSeq uint64
 	pendingSkillInput   *skillInput
-	subagentRevision    uint64
 	// subagentTranscripts 缓存每个被查看任务已投影的 transcript 前缀,
-	// 完整 transcript 始终常驻磁盘
+	// 完整 transcript 始终常驻磁盘。它由独立的锁保护,
+	// 这样 transcript 磁盘读不会阻塞事件投影
+	subagentMu          sync.Mutex
+	subagentRevision    uint64
 	subagentTranscripts map[string]*transcriptCache
 }
 
@@ -202,6 +204,8 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 
 		r.mu.Unlock()
 		snapshot.Sessions = listSessionOptions(snapshot.Cwd)
+		// 操作结束的快照同样要带子任务面板,否则 reset 路径会把任务列表清空
+		snapshot.Subagents = r.subagentSnapshotLocked()
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
@@ -602,16 +606,29 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 	}
 	steering := r.app.SteeringMessages()
 	steeringInputs := r.app.SteeringUserMessages()
-	var tasks []tui.SubagentTaskView
-	viewingTaskID := ""
-	if store := r.app.SubagentStore(); store != nil {
-		viewingTaskID = store.ViewingTaskID()
-		tasks = r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
-	}
-	r.subagentRevision++
 	return tui.Snapshot{Cwd: r.cwd, Branch: r.branch, ModelKey: model.Provider + "/" + model.ID, DefaultModelKey: r.cfg.ProviderID + "/" + r.cfg.ModelID, CurrentModel: current,
-		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision(),
-		Subagents: tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}}
+		Thinking: string(thinking), Models: models, Tree: projectTree(r.app.Tree()), Messages: messages, SessionName: r.app.SessionName(), Skills: skills, Steering: steering, SteeringInputs: steeringInputs, SteeringRevision: r.app.SteeringRevision()}
+}
+
+// subagentSnapshotLocked 投影子任务面板。app 指针在主锁下取,transcript
+// 投影则在独立的 subagentMu 下进行:磁盘读不能落在事件投影的主锁上
+func (r *Runtime) subagentSnapshotLocked() tui.SubagentSnapshot {
+	r.mu.Lock()
+	activeApp := r.app
+	r.mu.Unlock()
+	if activeApp == nil {
+		return tui.SubagentSnapshot{}
+	}
+	store := activeApp.SubagentStore()
+	if store == nil {
+		return tui.SubagentSnapshot{}
+	}
+	r.subagentMu.Lock()
+	defer r.subagentMu.Unlock()
+	viewingTaskID := store.ViewingTaskID()
+	tasks := r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
+	r.subagentRevision++
+	return tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}
 }
 
 func listSessionOptions(cwd string) []tui.SessionOption {
@@ -636,6 +653,7 @@ func (r *Runtime) snapshot() tui.Snapshot {
 	snapshot := r.snapshotLocked(true)
 	r.mu.Unlock()
 	snapshot.Sessions = listSessionOptions(snapshot.Cwd)
+	snapshot.Subagents = r.subagentSnapshotLocked()
 	return snapshot
 }
 

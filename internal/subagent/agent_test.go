@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -162,5 +163,102 @@ func waitForTaskStatus(t *testing.T, store *taskpkg.Store, id string, want taskp
 			t.Fatalf("task %s did not reach %s: %#v", id, want, task)
 		case <-time.After(time.Millisecond):
 		}
+	}
+}
+
+// fork 子 agent 保留 Agent 工具只为工具定义一致,递归派发必须在调用边界拒绝
+func TestStartRejectsForkChild(t *testing.T) {
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		t.Fatal("factory must not run for a rejected fork child")
+		return nil, nil
+	})
+	_, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "d", Prompt: "p", ForkChild: true})
+	if err == nil || !strings.Contains(err.Error(), "fork is not available") {
+		t.Fatalf("fork child was not rejected: %v", err)
+	}
+}
+
+// 子 agent 收尾时必须回收它启动的后台 bash 任务
+func TestRunAgentKillsOrphanedBashTasks(t *testing.T) {
+	store := taskpkg.NewStore()
+	orphanID, orphanToken, err := store.Register(taskpkg.RegisterSpec{
+		Type: taskpkg.TypeBash, Description: "orphan", BashState: &taskpkg.BashState{ParentAgentID: "agent-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, nil)
+	runtime := &taskpkg.AgentRuntime{
+		Agent:  agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil),
+		Done:   make(chan struct{}),
+		Run:    func(context.Context, string) (*llm.AssistantMessage, error) { return nil, errors.New("boom") },
+		Cancel: func() {},
+	}
+	manager.runAgent(context.Background(), "agent-1", 1, runtime, taskpkg.AgentInput{Description: "d", Prompt: "p"})
+	task, ok := store.Task(orphanID)
+	if !ok {
+		t.Fatal("orphan bash task disappeared")
+	}
+	if task.Base().Status != taskpkg.StatusKilled {
+		t.Fatalf("orphan status = %v, want killed", task.Base().Status)
+	}
+	_ = orphanToken
+}
+
+// 用量必须跨轮累加:只取最后一条 assistant 会严重低估多轮子任务
+func TestAgentResultSumsAcrossTurns(t *testing.T) {
+	messages := []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go"}}},
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{ID: "c1", Name: "read"},
+			llm.ToolCall{ID: "c2", Name: "ls"},
+		}, Usage: llm.Usage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120}},
+		llm.ToolResultMessage{ToolCallID: "c1"},
+		llm.ToolResultMessage{ToolCallID: "c2"},
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.ToolCall{ID: "c3", Name: "grep"},
+			llm.TextContent{Text: "first"},
+		}, Usage: llm.Usage{InputTokens: 300, OutputTokens: 30, TotalTokens: 330}},
+		llm.AssistantMessage{Content: []llm.Content{
+			llm.TextContent{Text: "second"},
+		}, Usage: llm.Usage{InputTokens: 500, OutputTokens: 40, TotalTokens: 540}},
+	}
+	reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, Usage: llm.Usage{InputTokens: 500, OutputTokens: 40}}
+	result := agentResult("agent-1", messages, 0, reply, time.Second)
+	if result.TotalToolUseCount != 3 {
+		t.Fatalf("tool uses = %d, want 3", result.TotalToolUseCount)
+	}
+	// 只累加各轮 output 20+30+40;reply 已在 messages 中,不重复计
+	if result.TotalTokens != 90 {
+		t.Fatalf("total tokens = %d, want 90", result.TotalTokens)
+	}
+	if len(result.Content) != 1 || result.Content[0].Text != "done" {
+		t.Fatalf("content = %+v", result.Content)
+	}
+}
+
+// 通知正文要拼接全部文本块,不能只取第一块
+func TestJoinTextConcatenatesAllBlocks(t *testing.T) {
+	blocks := []taskpkg.TextBlock{{Text: "first"}, {Text: "  "}, {Text: "second"}}
+	if got := joinText(blocks); got != "first\nsecond" {
+		t.Fatalf("joinText = %q, want %q", got, "first\nsecond")
+	}
+}
+
+// fork 继承的父消息不能计入子任务用量
+func TestAgentResultSkipsInheritedMessages(t *testing.T) {
+	parent := []llm.Message{
+		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "p1", Name: "read"}}, Usage: llm.Usage{OutputTokens: 500}},
+	}
+	child := append(append([]llm.Message{}, parent...),
+		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "c1", Name: "grep"}}, Usage: llm.Usage{OutputTokens: 7}},
+	)
+	reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, Usage: llm.Usage{OutputTokens: 3}}
+	result := agentResult("agent-1", child, len(parent), reply, time.Second)
+	if result.TotalToolUseCount != 1 {
+		t.Fatalf("tool uses = %d, want 1 child call", result.TotalToolUseCount)
+	}
+	if result.TotalTokens != 7 {
+		t.Fatalf("total tokens = %d, want 7 child output tokens", result.TotalTokens)
 	}
 }

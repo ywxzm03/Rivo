@@ -71,6 +71,10 @@ func (t *Tool) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
+	// fork 子 agent 保留 Agent 工具只为工具定义一致,递归派发在调用边界拒绝
+	if toolContext, ok := llm.CurrentToolContext(ctx); ok {
+		input.ForkChild = toolContext.ForkChild
+	}
 	launched, err := t.launcher.Start(ctx, input)
 	if err != nil {
 		return llm.ToolResult{}, err

@@ -39,6 +39,11 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 	if strings.TrimSpace(input.Description) == "" || strings.TrimSpace(input.Prompt) == "" {
 		return taskpkg.AgentLaunched{}, errors.New("agent: description and prompt are required")
 	}
+	// fork 子 agent 保留 Agent 工具是为了让工具定义与父缓存一致,
+	// 递归派发必须在这里拒绝,不能只靠 prompt 软约束
+	if input.ForkChild {
+		return taskpkg.AgentLaunched{}, errors.New("agent: fork is not available inside a forked worker; complete the task directly")
+	}
 	if m.factory == nil {
 		return taskpkg.AgentLaunched{}, errors.New("agent: runtime factory is unavailable")
 	}
@@ -206,6 +211,9 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 				runtime.Cancel()
 			}
 			m.store.RemoveRuntime(taskID, token)
+			// 先回收孤儿 bash 再关闭 Done:Continue 只等 Done,
+			// 提前关闭会让新 lifecycle 与旧进程并发,清理还会误杀新任务
+			m.store.KillBashTasksForAgent(taskID)
 			close(runtime.Done)
 		}()
 		// 收尾路径自身的 panic 只记录,不能带崩进程
@@ -240,20 +248,20 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 				m.store.FailAgent(taskID, token, fmt.Errorf("agent: stop after cancellation failed: %w", err))
 			}
 		}
-		partialResult := agentResult(taskID, input, partial, time.Since(started))
+		partialResult := agentResult(taskID, runtime.Agent.AgentContext.Messages, runtime.MessageStart, partial, time.Since(started))
 		status := taskpkg.StatusKilled
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusFailed {
 			status = taskpkg.StatusFailed
 		}
-		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: status, Summary: input.Description, Result: firstText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
+		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: status, Summary: input.Description, Result: joinText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
 		m.cleanupWorktree(taskID, token, runtime)
 		m.store.EnqueueNotification(taskID, token, notification)
 	} else if runErr != nil {
 		m.failAgent(taskID, token, runtime, input, runErr, started)
 	} else {
-		result := agentResult(taskID, input, reply, time.Since(started))
+		result := agentResult(taskID, runtime.Agent.AgentContext.Messages, runtime.MessageStart, reply, time.Since(started))
 		transitioned := m.store.CompleteAgent(taskID, token, &result)
-		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: input.Description, Result: firstText(result.Content), TotalTokens: result.TotalTokens, DurationMs: result.TotalDurationMs, ToolUses: result.TotalToolUseCount})
+		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: input.Description, Result: joinText(result.Content), TotalTokens: result.TotalTokens, DurationMs: result.TotalDurationMs, ToolUses: result.TotalToolUseCount})
 		m.cleanupWorktree(taskID, token, runtime)
 		if transitioned {
 			m.store.EnqueueNotification(taskID, token, notification)
@@ -354,36 +362,64 @@ func (m *Manager) updateProgress(taskID string, token uint64, event llm.AgentEve
 			}
 		case llm.MessageEndEvent:
 			if message, ok := event.Message.(llm.AssistantMessage); ok {
+				// input token 是单轮累计值,只保留最新;output 是增量,求和
+				if message.Usage.InputTokens > 0 {
+					progress.LatestInputTokens = message.Usage.InputTokens
+				}
 				progress.TokenCount += message.Usage.OutputTokens
 			}
 		}
 	})
 }
 
-func agentResult(taskID string, input taskpkg.AgentInput, reply *llm.AssistantMessage, duration time.Duration) taskpkg.AgentResult {
-	result := taskpkg.AgentResult{AgentID: taskID, AgentType: "fork", TotalDurationMs: duration.Milliseconds()}
-	if input.SubagentType != nil {
-		result.AgentType = *input.SubagentType
+// agentResult 汇总整个 transcript 的用量。
+// tool call 数与 token 都要跨轮累加,只取最后一条 assistant 会严重低估多轮子任务
+func agentResult(taskID string, messages []llm.Message, start int, reply *llm.AssistantMessage, duration time.Duration) taskpkg.AgentResult {
+	result := taskpkg.AgentResult{AgentID: taskID, TotalDurationMs: duration.Milliseconds()}
+	// fork 继承的父消息不算子任务的用量
+	if start > 0 && start <= len(messages) {
+		messages = messages[start:]
+	}
+	for _, message := range messages {
+		assistant, ok := message.(llm.AssistantMessage)
+		if !ok {
+			continue
+		}
+		result.TotalToolUseCount += countToolCalls(assistant.Content)
+		// output token 是每轮增量,跨轮直接求和
+		result.TotalTokens += assistant.Usage.OutputTokens
 	}
 	if reply == nil {
 		return result
 	}
+	// reply 已由 commitMessages 追加进 AgentContext.Messages,
+	// 上面的循环已经计过它的 output,这里不再补计
 	result.Usage = reply.Usage
-	result.TotalTokens = reply.Usage.TotalTokens
 	for _, content := range reply.Content {
 		if text, ok := content.(llm.TextContent); ok {
 			result.Content = append(result.Content, taskpkg.TextBlock{Text: text.Text})
-		}
-		if _, ok := content.(llm.ToolCall); ok {
-			result.TotalToolUseCount++
 		}
 	}
 	return result
 }
 
-func firstText(blocks []taskpkg.TextBlock) string {
-	if len(blocks) == 0 {
-		return ""
+func countToolCalls(content []llm.Content) int {
+	count := 0
+	for _, item := range content {
+		if _, ok := item.(llm.ToolCall); ok {
+			count++
+		}
 	}
-	return blocks[0].Text
+	return count
+}
+
+// joinText 拼接全部文本块,与 Claude 的 extractTextContent 保持一致
+func joinText(blocks []taskpkg.TextBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }

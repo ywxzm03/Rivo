@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
@@ -23,11 +24,29 @@ type Runner struct {
 	ParentCwd   string
 	SessionDir  string
 	AgentDir    string
-	ParentModel llm.Model
 	Thinking    llm.ThinkingLevel
-	StreamFn    llm.StreamFn
 	ParentTools []llm.Tool
 	TaskStore   *taskpkg.Store
+
+	// mu 保护模型与 stream:主 agent 切换模型时会写,子任务启动时会读
+	mu          sync.RWMutex
+	parentModel llm.Model
+	streamFn    llm.StreamFn
+}
+
+// SetModel 更新子 agent 的默认模型与 stream,供主 agent 切换模型时调用
+func (r *Runner) SetModel(model llm.Model, streamFn llm.StreamFn) {
+	r.mu.Lock()
+	r.parentModel = model
+	r.streamFn = streamFn
+	r.mu.Unlock()
+}
+
+// modelAndStream 返回当前默认模型与 stream 的一致快照
+func (r *Runner) modelAndStream() (llm.Model, llm.StreamFn) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.parentModel, r.streamFn
 }
 
 // Run 按 spec 装配并返回一个已就绪的子 agent runtime
@@ -75,7 +94,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	// 3.解析 model / thinking:内置与定义默认值可被显式参数覆盖
 	fork := strings.EqualFold(spec.AgentType, "fork")
-	model := r.ParentModel
+	model, streamFn := r.modelAndStream()
 	if !fork && spec.Model.ID != "" {
 		model = spec.Model
 	}
@@ -101,7 +120,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	if !fork && (strings.EqualFold(spec.AgentType, "explore") || strings.EqualFold(spec.AgentType, "plan")) {
 		tools = readOnlyTools(tools)
 	}
-	messages, replacementState, pendingToPersist, err := r.buildMessages(spec, sm, cwd, tools, definition, fork, worktreePath)
+	messages, pendingToPersist, err := r.buildMessages(spec, sm, cwd, tools, definition, fork, worktreePath)
 	if err != nil {
 		return nil, err
 	}
@@ -130,8 +149,10 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	// 5.子事件由 Manager 的 task 级 handler 消费。把它们送到父 sink 会把
 	// sidechain transcript 更新混进主 TUI 流。
-	child := agent.NewAgent(cfg, llm.Context{Tools: tools, Messages: messages}, r.StreamFn, nil)
+	child := agent.NewAgent(cfg, llm.Context{Tools: tools, Messages: messages}, streamFn, nil)
 	child.WorkingDir = cwd
+	child.ForkChild = fork
+	child.AgentID = spec.ID
 	if fork {
 		child.MaxTurns = forkMaxTurns
 	}
@@ -140,7 +161,8 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	child.CommitMessages = sm.AppendMessages
 	runtime := &taskpkg.AgentRuntime{
-		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, ContentReplacementState: replacementState, Done: make(chan struct{}),
+		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, Done: make(chan struct{}),
+		MessageStart: len(messages),
 	}
 	// 只有本生命周期新建的 worktree 才装回收钩子:恢复沿用的 worktree 里可能已有
 	// 用户工作,与 Claude Code 一致,一律保留到用户手动清理
@@ -161,13 +183,34 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	return runtime, nil
 }
 
-// writeMetadata 原子写入任务元数据,供 eviction 后恢复
+// writeMetadata 原子写入任务元数据,供 eviction 后恢复。
+// 先写临时文件再 rename,避免中断留下半截 JSON 让任务变成不可恢复
 func writeMetadata(path string, meta metadata) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".agent-meta-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Windows 的 os.Rename 不允许覆盖已存在文件;continuation 会重写同一份元数据
+	if err := os.Rename(tmpPath, path); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return err
+		}
+		return os.Rename(tmpPath, path)
+	}
+	return nil
 }
 
 // openSession 打开或创建子 agent 的 transcript
@@ -181,17 +224,19 @@ func (r *Runner) openSession(spec taskpkg.AgentSpec, transcriptPath, cwd string)
 	return session.Open(transcriptPath, cwd)
 }
 
-// loadDefinition 读取非内置、非 fork 类型对应的 agent 定义
-func (r *Runner) loadDefinition(spec taskpkg.AgentSpec, cwd string, fork bool) (*Definition, error) {
+// loadDefinition 读取非内置、非 fork 类型对应的 agent 定义。
+// 项目定义始终从父项目根解析:worktree 基于 origin/HEAD,未跟踪的
+// .rivo/agent/agents 文件不会出现在里面
+func (r *Runner) loadDefinition(spec taskpkg.AgentSpec, _ string, fork bool) (*Definition, error) {
 	if fork || isBuiltinAgent(spec.AgentType) {
 		return nil, nil
 	}
-	return LoadDefinition(cwd, r.AgentDir, spec.AgentType)
+	return LoadDefinition(r.ParentCwd, r.AgentDir, spec.AgentType)
 }
 
-// buildMessages 决定子 agent 的初始消息与 content replacement 状态
-func (r *Runner) buildMessages(spec taskpkg.AgentSpec, sm *session.SessionManager, cwd string, tools []llm.Tool, definition *Definition, fork bool, worktreePath string) ([]llm.Message, map[string][]llm.Content, []llm.Message, error) {
-	messages := cloneMessages(spec.InitialMessages)
+// buildMessages 决定子 agent 的初始消息,并返回需要随首轮一起落盘的 pending 消息
+func (r *Runner) buildMessages(spec taskpkg.AgentSpec, sm *session.SessionManager, cwd string, tools []llm.Tool, definition *Definition, fork bool, worktreePath string) ([]llm.Message, []llm.Message, error) {
+	var messages []llm.Message
 	forkInitial := fork && !spec.Continuation && spec.ParentContext != nil
 	if sm.FileHistory() == nil {
 		sm.AttachFileHistory(r.AgentDir)
@@ -208,15 +253,15 @@ func (r *Runner) buildMessages(spec taskpkg.AgentSpec, sm *session.SessionManage
 				pending[i] = message
 			}
 		}
-		return messages, view.ContentReplacements, pending, nil
+		return messages, pending, nil
 	case forkInitial:
 		// 2.fork 继承父 transcript,补齐缺失的 tool result 后追加指令
-		return buildForkMessages(spec.ParentContext.Messages, spec.Prompt, worktreePath, r.ParentCwd), nil, nil, nil
+		return buildForkMessages(spec.ParentContext.Messages, spec.Prompt, worktreePath, r.ParentCwd), nil, nil
 	default:
 		// 3.新建子 agent:按 agent 类型决定是否加载项目上下文与 skills
 		sections := r.systemSections(cwd, tools, spec.AgentType, definition)
 		messages = append(messages, llm.SystemMessage{Sections: sections})
-		return messages, nil, nil, nil
+		return messages, nil, nil
 	}
 }
 

@@ -40,6 +40,8 @@ type App struct {
 	cwd       string
 	tools     []llm.Tool
 	subagents *subagent.Manager
+	// subagentRunner 持有子 agent 的默认 model 与 stream,applyModel 时同步
+	subagentRunner *agenttool.Runner
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
 }
@@ -224,24 +226,24 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		ParentCwd:   cwd,
 		SessionDir:  filepath.Dir(sm.Path()),
 		AgentDir:    agentDir,
-		ParentModel: model,
 		Thinking:    cfg.ThinkingLevel,
-		StreamFn:    streamFn,
 		ParentTools: tools,
 		TaskStore:   manager.Store(),
 	}
+	runner.SetModel(model, streamFn)
 	manager.SetFactory(runner.Run)
 	manager.SetResumeResolver(agenttool.ResumeResolver(filepath.Dir(sm.Path())))
 	return &App{
-		agent:       ag,
-		session:     sm,
-		coordinator: coord,
-		cfg:         cfg,
-		onEvent:     onEvent,
-		loader:      loader,
-		cwd:         cwd,
-		tools:       tools,
-		subagents:   manager,
+		agent:          ag,
+		session:        sm,
+		coordinator:    coord,
+		cfg:            cfg,
+		onEvent:        onEvent,
+		loader:         loader,
+		cwd:            cwd,
+		tools:          tools,
+		subagents:      manager,
+		subagentRunner: runner,
 	}, nil
 }
 
@@ -400,7 +402,7 @@ func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
 }
 
 func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
-	if !validThinkingLevel(level) {
+	if !llm.ValidThinkingLevel(level) {
 		return fmt.Errorf("unknown thinking level %q", level)
 	}
 	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
@@ -450,6 +452,11 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 	a.agent.AgentConfig.Model = model
 	a.coordinator.setModel(model)
 	a.agent.StreamFn = streamFn
+	// 子 agent 的默认 model 与 stream 跟随主 agent,否则切换模型后新起的
+	// 子任务会用旧 provider 的 stream 发送新模型 ID
+	if a.subagentRunner != nil {
+		a.subagentRunner.SetModel(model, streamFn)
+	}
 	for _, candidate := range a.agent.AgentContext.Tools {
 		if read, ok := candidate.(*tool.Read); ok {
 			read.SupportsImages = model.SupportsImages
@@ -466,16 +473,6 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 		a.coordinator.Compactor = nil
 	}
 	return nil
-}
-
-func validThinkingLevel(level llm.ThinkingLevel) bool {
-	switch level {
-	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
-		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
-		return true
-	default:
-		return false
-	}
 }
 
 // Reload 重读 AGENTS.md 与 skills 并重建基线分节，变更在下次请求前 diff 后追加

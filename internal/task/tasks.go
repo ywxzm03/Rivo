@@ -4,7 +4,7 @@ import "fmt"
 
 // KillBash 终止后台 bash 任务:先杀进程,失败则回滚状态
 func KillBash(taskID string, store *Store) error {
-	task, process, unregister, token, err := store.beginBashKill(taskID)
+	task, process, token, err := store.beginBashKill(taskID)
 	if err != nil {
 		return err
 	}
@@ -17,15 +17,12 @@ func KillBash(taskID string, store *Store) error {
 			return err
 		}
 	}
-	if unregister != nil {
-		unregister()
-	}
 	return nil
 }
 
 // KillAgent 取消 agent 任务的 lifecycle 并执行清理回调
 func KillAgent(taskID string, store *Store) error {
-	runtime, abort, unregister, _, err := store.beginAgentKill(taskID)
+	runtime, abort, _, err := store.beginAgentKill(taskID)
 	if err != nil {
 		return err
 	}
@@ -34,9 +31,6 @@ func KillAgent(taskID string, store *Store) error {
 	} else if runtime != nil && runtime.Cancel != nil {
 		// 启动窗口内 runtime 还没挂上,状态已转移为 killed,没有可取消的句柄
 		runtime.Cancel()
-	}
-	if unregister != nil {
-		unregister()
 	}
 	return nil
 }

@@ -39,9 +39,11 @@ type StateBase struct {
 	StartTime      time.Time
 	EndTime        *time.Time
 	OutputFile     string
-	OutputOffset   int64
 	Notified       bool
 	LifecycleToken uint64
+	// EvictAfter 是终态任务的驱逐截止时间。nil 表示通知投递后立即可驱逐;
+	// agent 任务用它实现面板宽限期
+	EvictAfter *time.Time
 }
 
 type State interface {
@@ -62,13 +64,12 @@ type BashProcess interface {
 
 type BashState struct {
 	StateBase
-	Command         string
-	Result          *BashResult
-	Process         BashProcess
+	Command string
+	Result  *BashResult
+	Process BashProcess
+	// ParentAgentID 是发起该后台任务的子 agent,主 agent 留空。
+	// 子 agent 结束时按它回收孤儿进程
 	ParentAgentID   string
-	Unregister      func()
-	CleanupTimeout  *time.Timer
-	LastOutputLines int
 	OutputTruncated bool
 	OutputBytes     int
 }
@@ -77,57 +78,56 @@ func (*BashState) taskState()         {}
 func (s *BashState) Base() *StateBase { return &s.StateBase }
 
 type AgentProgress struct {
-	ToolUseCount     int
-	TokenCount       int
-	LastActivity     *ToolActivity
-	RecentActivities []ToolActivity
-	Summary          string
+	ToolUseCount int
+	// TokenCount 是展示用的累计值:最新一次 input + 历次 output 之和。
+	// input token 在单轮内已包含全部历史,累加会重复计数
+	TokenCount        int
+	LatestInputTokens int
+	LastActivity      *ToolActivity
+	RecentActivities  []ToolActivity
+	Summary           string
 }
 
 type ToolActivity struct {
 	ToolName            string
 	ActivityDescription string
-	IsSearch            bool
-	IsRead              bool
 }
 
 type AgentState struct {
 	StateBase
-	AgentID           string
-	Prompt            string
-	AgentType         string
-	SelectedAgent     string
-	Model             *llm.Model
-	Thinking          llm.ThinkingLevel
-	WorktreePath      string
-	Worktree          bool
-	Error             string
-	Result            *AgentResult
-	Progress          *AgentProgress
-	Abort             context.CancelFunc
-	UnregisterCleanup func()
-	PendingMessages   []llm.UserMessage
-	Retain            bool
+	AgentID         string
+	Prompt          string
+	AgentType       string
+	Model           *llm.Model
+	Thinking        llm.ThinkingLevel
+	WorktreePath    string
+	Worktree        bool
+	Error           string
+	Result          *AgentResult
+	Progress        *AgentProgress
+	Abort           context.CancelFunc
+	PendingMessages []llm.UserMessage
+	Retain          bool
 	// MessageCount 是 sidechain transcript 已提交的消息数。transcript 常驻磁盘,
 	// 内存只保留这个长度,供 TUI 判断是否需要增量读取
-	MessageCount        int
-	ContentReplacements map[string][]llm.Content
-	EvictAfter          *time.Time
+	MessageCount int
 }
 
 func (*AgentState) taskState()         {}
 func (s *AgentState) Base() *StateBase { return &s.StateBase }
 
 type AgentRuntime struct {
-	Agent                   *agent.Agent
-	Cancel                  context.CancelFunc
-	Done                    chan struct{}
-	LifecycleToken          uint64
-	OutputFile              string
-	WorktreePath            string
-	WorktreeCleanup         func() bool
-	ContentReplacementState map[string][]llm.Content
-	Run                     func(context.Context, string) (*llm.AssistantMessage, error)
+	Agent           *agent.Agent
+	Cancel          context.CancelFunc
+	Done            chan struct{}
+	LifecycleToken  uint64
+	OutputFile      string
+	WorktreePath    string
+	WorktreeCleanup func() bool
+	Run             func(context.Context, string) (*llm.AssistantMessage, error)
+	// MessageStart 是本 lifecycle 起始的消息下标。fork 会继承父 transcript,
+	// 统计用量时必须从这里开始,否则会把父对话算进子任务
+	MessageStart int
 }
 
 type AgentInput struct {
@@ -137,6 +137,9 @@ type AgentInput struct {
 	Worktree     *bool              `json:"worktree,omitempty"`
 	Thinking     *llm.ThinkingLevel `json:"thinking,omitempty"`
 	Model        *llm.Model         `json:"model,omitempty"`
+	// ForkChild 标记调用方本身是 fork 子 agent。fork 保留 Agent 工具是为了让
+	// 工具定义与父缓存一致,因此递归派发必须在调用边界拒绝
+	ForkChild bool `json:"-"`
 }
 
 type TextBlock struct {
@@ -156,7 +159,6 @@ type AgentLaunched struct {
 
 type AgentResult struct {
 	AgentID           string      `json:"agentId"`
-	AgentType         string      `json:"agentType,omitempty"`
 	Content           []TextBlock `json:"content"`
 	TotalToolUseCount int         `json:"totalToolUseCount"`
 	TotalDurationMs   int64       `json:"totalDurationMs"`
@@ -221,7 +223,6 @@ type AgentSpec struct {
 	WorktreePath    string
 	Worktree        bool
 	PendingMessages []llm.UserMessage
-	InitialMessages []llm.Message
 	Model           llm.Model
 	Thinking        llm.ThinkingLevel
 	Continuation    bool
