@@ -34,8 +34,19 @@ func toolRowOutcome(call ToolCallView) string {
 			// 详情存在却解析不出增删行时交给 Result 原文，避免报成“0 行”
 			return ""
 		}
+	case "agent":
+		return toolRowAgentOutcome(call)
 	}
 	return ""
+}
+
+// toolRowAgentOutcome 说明子任务已在后台运行。
+// 任务 ID 只在任务面板里用,这里给用户可以据以行动的信息
+func toolRowAgentOutcome(call ToolCallView) string {
+	if !strings.Contains(call.Result, "Started subagent") {
+		return ""
+	}
+	return "Running in the background; you'll be notified when it finishes"
 }
 
 func countNoun(count int, singular, plural string) string {

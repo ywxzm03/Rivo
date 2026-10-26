@@ -110,6 +110,8 @@ func TestGroupSummaryRunning(t *testing.T) {
 		rowCall("1", "read", map[string]any{"path": "a.go"}, ToolSuccess),
 		rowCall("2", "grep", map[string]any{"pattern": "x"}, ToolPending),
 	}
+	// 已开始执行的 pending 调用算 running
+	calls[1].StartedAt = time.UnixMilli(1)
 	if got := summarizeToolRowGroup(calls); got != "Searching for 1 pattern, reading 1 file" {
 		t.Fatalf("running summary = %q", got)
 	}

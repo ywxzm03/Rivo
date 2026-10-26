@@ -89,6 +89,14 @@ func newWithID(cwd, dir, id string) *SessionManager {
 	}
 }
 
+// NewAt creates a session manager whose JSONL path is selected by the caller.
+// Subagent sidechains use this to keep one stable file per task.
+func NewAt(cwd, path string) *SessionManager {
+	m := New(cwd, filepath.Dir(path))
+	m.sessionFile = path
+	return m
+}
+
 // Open 加载指定会话文件，加载成功即视为已完成首次 flush；
 // 0 字节文件按新会话处理，文件末尾缺换行时补写一个，防止追加与残行粘连
 func Open(path, cwd string) (*SessionManager, error) {
@@ -131,6 +139,8 @@ func (m *SessionManager) LastEntryID() string {
 	}
 	return m.entries[len(m.entries)-1].base().ID
 }
+
+func (m *SessionManager) LeafEntryID() string { return m.leafID }
 
 func (m *SessionManager) AppendMessage(msg llm.Message) error {
 	return m.appendEntry(&MessageEntry{Message: priceMessage(msg)})

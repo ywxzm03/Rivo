@@ -14,7 +14,11 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-type Bash struct{ WorkingDir string }
+// Bash 执行 shell 命令。Background 非空时支持 run_in_background
+type Bash struct {
+	WorkingDir string
+	Background BackgroundRunner
+}
 
 func (b *Bash) Name() string { return "bash" }
 
@@ -25,7 +29,7 @@ func (b *Bash) PromptSnippet() string { return "Execute bash commands (ls, grep,
 func (b *Bash) PromptGuidelines() []string { return nil }
 
 func (b *Bash) Description() string {
-	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", defaultMaxLines, defaultMaxBytes/1024)
+	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds or run_in_background=true to start a BashTask and return its task ID.", defaultMaxLines, defaultMaxBytes/1024)
 }
 
 func (b *Bash) Parameters() map[string]any {
@@ -33,6 +37,17 @@ func (b *Bash) Parameters() map[string]any {
 }
 
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
+	command, _ := args["command"].(string)
+	// 主 agent 与子 agent 共用同一层灾难性命令拦截
+	if err := guardShellCommand(command); err != nil {
+		return llm.ToolResult{}, err
+	}
+	if background, ok := args["run_in_background"].(bool); ok && background {
+		if b.Background == nil {
+			return llm.ToolResult{}, fmt.Errorf("bash: background execution is unavailable")
+		}
+		return b.Background.RunBackground(ctx, args)
+	}
 	return executeShellCommand(ctx, args, "bash", b.WorkingDir, func(commandCtx context.Context, command string) (*exec.Cmd, error) {
 		bashPath, err := findBash()
 		if err != nil {

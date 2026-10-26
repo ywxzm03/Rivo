@@ -64,6 +64,11 @@ type Coordinator struct {
 	runMu      sync.Mutex
 	stateMu    sync.Mutex
 	compacting bool
+	// transientMessages 提供只在单次请求内出现的附件,例如子任务完成通知
+	transientMessages func() []llm.Message
+	// transientAck 在请求成功提交后确认这批附件已被消费
+	transientAck func()
+	taskEvictor  func() int
 }
 
 func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordinator {
@@ -200,8 +205,56 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 }
 
 // PrepareRequest 返回会话投影快照，摘要生成失败时保留原上下文，存储失败必须停止运行
+// SetTransientMessages 安装请求级消息提供器
+func (c *Coordinator) SetTransientMessages(provider func() []llm.Message) {
+	c.mu.Lock()
+	c.transientMessages = provider
+	c.mu.Unlock()
+}
+
+// SetTransientAck 安装请求成功后的确认回调
+func (c *Coordinator) SetTransientAck(ack func()) {
+	c.mu.Lock()
+	c.transientAck = ack
+	c.mu.Unlock()
+}
+
+// SetTaskEvictor 安装请求边界的终态任务回收器
+func (c *Coordinator) SetTaskEvictor(evictor func() int) {
+	c.mu.Lock()
+	c.taskEvictor = evictor
+	c.mu.Unlock()
+}
+
+func (c *Coordinator) takeTransientMessages() []llm.Message {
+	c.mu.Lock()
+	provider := c.transientMessages
+	c.mu.Unlock()
+	if provider == nil {
+		return nil
+	}
+	return provider()
+}
+
+func (c *Coordinator) takeTransientAck() func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.transientAck
+}
+
+func (c *Coordinator) evictExpiredTasks() {
+	c.mu.Lock()
+	evictor := c.taskEvictor
+	c.mu.Unlock()
+	if evictor != nil {
+		evictor()
+	}
+}
+
 func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.PreparedRequest) (agent.PreparedRequest, error) {
 	c.setModel(current.Config.Model)
+	// 请求边界顺带回收宽限期已过的终态子任务;通知队列不受影响
+	c.evictExpiredTasks()
 	compacted, err := c.CompactIfNeeded(ctx)
 	if err != nil {
 		var commitErr *session.CommitError
@@ -210,6 +263,8 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 		}
 	}
 	current.Context.Messages = c.m.BuildContext().Messages()
+	current.Context.Messages = append(current.Context.Messages, c.takeTransientMessages()...)
+	current.TransientAck = c.takeTransientAck()
 	current.Compacted = compacted
 	return current, nil
 }

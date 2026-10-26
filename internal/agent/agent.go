@@ -17,6 +17,15 @@ type Agent struct {
 	AgentContext llm.Context
 	StreamFn     llm.StreamFn
 	OnEvent      llm.AgentEventSink
+	// WorkingDir 是工具执行的工作目录,子 agent 用它指向 worktree
+	WorkingDir string
+	// MaxTurns 为 0 表示不限制;fork 与自定义定义用它封顶轮次
+	MaxTurns int
+	// ForkChild 标记该 agent 是 fork 子 agent,工具层据此拒绝递归派发
+	ForkChild bool
+	// AgentID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
+	// 归属到发起它的子 agent
+	AgentID string
 	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
 	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
 	CommitMessages func([]llm.Message) ([]string, error)
@@ -31,6 +40,8 @@ type Agent struct {
 	retryableMu    sync.Mutex
 	retryableQueue *pendingMessageQueue
 }
+
+var ErrMaxTurns = errors.New("agent: maximum turns reached")
 
 type pendingMessage struct {
 	input     string
@@ -335,6 +346,8 @@ type PreparedRequest struct {
 	Context   llm.Context
 	Config    llm.AgentConfig
 	Compacted bool
+	// TransientAck 在本次请求成功提交后确认 transient 附件已被消费
+	TransientAck func()
 }
 
 func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
@@ -497,7 +510,10 @@ func (a *Agent) AppendMessage(msg llm.Message) {
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
 func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMessageIndex int, initialPending *pendingMessage, initialQueue *pendingMessageQueue) (*llm.AssistantMessage, error) {
+	turns := 0
 	for {
+		turns++
+		var acknowledgeTransient func()
 		// 1.先原子认领一条 steering，后继 run 的首条消息由调用方指定队列
 		var pending pendingMessage
 		var pendingQueue *pendingMessageQueue
@@ -549,6 +565,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				return nil, err
 			}
 			a.AgentContext, a.AgentConfig = request.Context, request.Config
+			acknowledgeTransient = request.TransientAck
 			if request.Compacted {
 				firstMessageIndex = len(a.AgentContext.Messages)
 			}
@@ -644,6 +661,25 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		if err := a.commitMessages([]llm.Message{*final}); err != nil {
 			cancel()
 			return nil, err
+		}
+		if acknowledgeTransient != nil {
+			acknowledgeTransient()
+		}
+
+		// 达到轮次上限时先收尾本轮,再决定是否继续
+		if a.MaxTurns > 0 && turns >= a.MaxTurns {
+			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
+				cancel()
+				return nil, err
+			}
+			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+				cancel()
+				return nil, err
+			}
+			if len(assistantToolCalls(*final)) > 0 {
+				return final, ErrMaxTurns
+			}
+			return final, nil
 		}
 
 		toolCalls := assistantToolCalls(*final)
@@ -1025,6 +1061,9 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 }
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
+	// 工具需要执行中 agent 的上下文来派发子任务,但不该看到 Agent 本身
+	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.AgentContext, Config: a.AgentConfig, ForkChild: a.ForkChild, AgentID: a.AgentID})
+	ctx = llm.WithWorkingDir(ctx, a.WorkingDir)
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {

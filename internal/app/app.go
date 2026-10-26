@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -13,7 +17,20 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/subagent"
+	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tool"
+	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
+	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
+	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
+)
+
+const (
+	// evictInterval 是终态任务驱逐的轮询间隔,与面板宽限期同一量级
+	evictInterval = time.Second
+	// notificationRetryDelay 是通知唤醒被 operation 拒绝后的重试间隔。
+	// 用户 run 可能持续很久,重试必须足够稀疏,只在槽位释放后尽快补投
+	notificationRetryDelay = 250 * time.Millisecond
 )
 
 type App struct {
@@ -32,8 +49,23 @@ type App struct {
 	loader *prompt.Loader
 	cwd    string
 	tools  []llm.Tool
+	// subagents 是子任务管理器，subagentRunner 持有子 agent 的默认 model 与 stream
+	subagents      *subagent.Manager
+	subagentRunner *agenttool.Runner
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
+	// notifyQueue 把子任务终态通知转成一次后台 run;缓冲 1 让重复通知合并
+	notifyQueue chan struct{}
+	// evictStop 关闭时停止驱逐定时器;与 notifyQueue 分开,
+	// 避免关闭信号被通知循环当成一次待消费通知。
+	// 通道本身只读,关闭动作由 evictStopOnce 保证只执行一次
+	evictStop     chan struct{}
+	evictStopOnce sync.Once
+	// closed 在进程收尾时置位,让通知循环退出而不是继续起 run
+	closed atomic.Bool
+	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
+	backgroundMu  sync.Mutex
+	backgroundEnd func()
 }
 
 // ModelFallbackMessage 返回恢复时的模型回退警告，未发生回退时为空
@@ -188,20 +220,42 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		}
 	}
 
+	manager := subagent.NewManager(taskpkg.NewStore(), nil)
+	var notificationMu sync.Mutex
+	var notificationBatch int
 	tools := []llm.Tool{
 		&tool.Read{SupportsImages: model.SupportsImages, WorkingDir: cwd},
 		&tool.Ls{WorkingDir: cwd},
 		&tool.Grep{WorkingDir: cwd},
 		&tool.Find{WorkingDir: cwd},
-		&tool.Bash{WorkingDir: cwd},
+		&tool.Bash{WorkingDir: cwd, Background: tool.NewBackgroundBashRunner(manager.Store())},
 		&tool.Write{History: sm.FileHistory(), WorkingDir: cwd},
 		&tool.Edit{History: sm.FileHistory(), WorkingDir: cwd},
+		agenttool.New(manager),
+		sendmessagetool.New(manager),
+		taskstoptool.New(manager.Store()),
 	}
 	if runtime.GOOS == "windows" {
 		tools = append(tools, &tool.PowerShell{WorkingDir: cwd})
 	}
 
 	coord := NewCoordinator(sm, onEvent)
+	coord.SetTransientMessages(func() []llm.Message {
+		notifications := manager.Store().PeekNotifications()
+		notificationMu.Lock()
+		notificationBatch = len(notifications)
+		notificationMu.Unlock()
+		return subagentNotificationMessages(notifications)
+	})
+	coord.SetTransientAck(func() {
+		notificationMu.Lock()
+		count := notificationBatch
+		notificationBatch = 0
+		notificationMu.Unlock()
+		manager.Store().AckNotifications(count)
+	})
+	// 每个请求前回收宽限期已过的终态子任务
+	coord.SetTaskEvictor(manager.Store().EvictExpired)
 	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
@@ -227,19 +281,266 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		streamFn,
 		coord.Handle,
 	)
+	ag.WorkingDir = cwd
 	ag.PrepareRequest = coord.PrepareRequest
 	ag.CommitMessages = coord.CommitMessages
 	coord.Agent = ag
-	return &App{
-		agent:       ag,
-		session:     sm,
-		coordinator: coord,
-		cfg:         cfg,
-		onEvent:     onEvent,
-		loader:      loader,
-		cwd:         cwd,
-		tools:       tools,
-	}, nil
+	runner := &agenttool.Runner{
+		ParentCwd:   cwd,
+		SessionDir:  filepath.Dir(sm.Path()),
+		AgentDir:    agentDir,
+		Thinking:    cfg.ThinkingLevel,
+		ParentTools: tools,
+		TaskStore:   manager.Store(),
+	}
+	runner.SetModel(model, streamFn)
+	manager.SetFactory(runner.Run)
+	manager.SetResumeResolver(agenttool.ResumeResolver(filepath.Dir(sm.Path())))
+	app := &App{
+		agent:          ag,
+		session:        sm,
+		coordinator:    coord,
+		cfg:            cfg,
+		onEvent:        onEvent,
+		loader:         loader,
+		cwd:            cwd,
+		subagents:      manager,
+		subagentRunner: runner,
+		tools:          tools,
+		notifyQueue:    make(chan struct{}, 1),
+		evictStop:      make(chan struct{}),
+	}
+	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
+	manager.Store().SetNotifyHook(app.wakeForNotification)
+	go app.runNotificationLoop()
+	// 终态任务的驱逐不能只靠请求边界:用户不再发消息时面板会一直留着旧任务行
+	go app.runEvictionLoop()
+	return app, nil
+}
+
+// wakeForNotification 在子任务通知入队时启动一次消费 run。
+// 已有操作在跑时不介入:它收尾时会检查队列并续跑
+func (a *App) wakeForNotification() {
+	if a.closed.Load() {
+		return
+	}
+	select {
+	case a.notifyQueue <- struct{}{}:
+	default:
+		// 队列已有一次待处理的唤醒,重复通知会被同一轮 run 一并消费
+	}
+}
+
+// runNotificationLoop 消费唤醒信号。用 Continue 驱动空请求,
+// 通知作为 transient 附件挂在这一轮请求上,不写入主 session。
+// Start 被运行中的操作拒绝时不能丢弃信号:否则通知会一直留在队列里,
+// 只能等用户下次输入才投递
+func (a *App) runNotificationLoop() {
+	for range a.notifyQueue {
+		if a.closed.Load() {
+			return
+		}
+		if !a.hasPendingNotification() {
+			continue
+		}
+		op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, NotificationOnly: true})
+		if err != nil {
+			a.retryNotificationWake()
+			continue
+		}
+		// 收尾一定落在操作真正结束后,不依赖 AgentEndEvent 是否成功送达
+		op.Wait()
+		a.notifyBackgroundRunEnd()
+	}
+}
+
+// retryNotificationWake 在 Start 被拒后重新排队一次唤醒。
+// 延迟重试避免占满 CPU;同一时刻只保留一个待处理信号
+func (a *App) retryNotificationWake() {
+	if a.closed.Load() {
+		return
+	}
+	time.AfterFunc(notificationRetryDelay, func() {
+		if a.closed.Load() {
+			return
+		}
+		a.wakeForNotification()
+	})
+}
+
+// runEvictionLoop 每秒回收宽限期已过的终态任务。
+// 只靠请求边界驱逐不够:用户不再发消息时终态任务会永久留在 store 里,
+// TUI 任务行也就一直不消失
+func (a *App) runEvictionLoop() {
+	stop := a.evictStop
+	ticker := time.NewTicker(evictInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			store := a.SubagentStore()
+			if store == nil {
+				return
+			}
+			store.EvictExpired()
+		}
+	}
+}
+
+// notifyBackgroundRunEnd 通知显示层后台 run 已结束。
+// 事件投影可能因为提交失败而漏发 AgentEndEvent,这里兜一次底
+func (a *App) notifyBackgroundRunEnd() {
+	a.backgroundMu.Lock()
+	notify := a.backgroundEnd
+	a.backgroundMu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
+// SetBackgroundRunHook 安装后台 run 结束回调,由显示层接入
+func (a *App) SetBackgroundRunHook(hook func()) {
+	a.backgroundMu.Lock()
+	a.backgroundEnd = hook
+	a.backgroundMu.Unlock()
+}
+
+// subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息。
+// 用 XML 标签而不是 JSON:模型按标签定位字段比解析 JSON 更稳,
+// 空字段整段省略,避免模型把空串当成有效结果
+func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Message {
+	if len(notifications) == 0 {
+		return nil
+	}
+	result := make([]llm.Message, 0, len(notifications))
+	for _, notification := range notifications {
+		result = append(result, llm.UserMessage{Content: []llm.Content{llm.TextContent{
+			Text: renderNotification(notification),
+		}}})
+	}
+	return result
+}
+
+// renderNotification 渲染单条 <task-notification>。
+// summary 与 result 来自模型输出,必须转义后写入,否则会破坏标签结构
+func renderNotification(notification taskpkg.Notification) string {
+	var b strings.Builder
+	b.WriteString("<task-notification>\n")
+	writeNotificationTag(&b, "task-id", notification.TaskID)
+	writeNotificationTag(&b, "tool-use-id", notification.ToolUseID)
+	writeNotificationTag(&b, "output-file", notification.OutputFile)
+	writeNotificationTag(&b, "status", string(notification.Status))
+	writeNotificationTag(&b, "reason", string(notification.Reason))
+	writeNotificationTag(&b, "summary", notification.Summary)
+	writeNotificationTag(&b, "result", notification.Result)
+	// usage 与 worktree 是聚合段:任一子字段有值才输出整段
+	if notification.TotalTokens > 0 || notification.ToolUses > 0 || notification.DurationMs > 0 {
+		b.WriteString("<usage>")
+		if notification.TotalTokens > 0 {
+			fmt.Fprintf(&b, "<total_tokens>%d</total_tokens>", notification.TotalTokens)
+		}
+		if notification.ToolUses > 0 {
+			fmt.Fprintf(&b, "<tool_uses>%d</tool_uses>", notification.ToolUses)
+		}
+		if notification.DurationMs > 0 {
+			fmt.Fprintf(&b, "<duration_ms>%d</duration_ms>", notification.DurationMs)
+		}
+		b.WriteString("</usage>\n")
+	}
+	if notification.WorktreePath != "" {
+		b.WriteString("<worktree>")
+		writeNotificationTag(&b, "worktreePath", notification.WorktreePath)
+		b.WriteString("</worktree>\n")
+	}
+	b.WriteString("</task-notification>")
+	return b.String()
+}
+
+// writeNotificationTag 只写有值的字段,空值整段省略
+func writeNotificationTag(b *strings.Builder, tag, value string) {
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(b, "<%s>%s</%s>\n", tag, escapeNotificationText(value), tag)
+}
+
+// escapeNotificationText 转义会破坏标签结构的字符
+func escapeNotificationText(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return replacer.Replace(value)
+}
+
+// SubagentStore 暴露根任务存储，供 TUI 投影与操作
+func (a *App) SubagentStore() *taskpkg.Store {
+	if a.subagents == nil {
+		return nil
+	}
+	return a.subagents.Store()
+}
+
+func (a *App) EnterSubagentView(taskID string) bool {
+	store := a.SubagentStore()
+	return store != nil && store.EnterView(taskID)
+}
+
+func (a *App) ExitSubagentView() {
+	if store := a.SubagentStore(); store != nil {
+		store.ExitView()
+	}
+}
+
+// ShutdownSubagents 终止所有仍在运行的子任务与后台命令。
+// 进程退出时调用:子任务 lifecycle 与请求解绑,不主动终止会变成孤儿进程
+func (a *App) ShutdownSubagents() int {
+	// 先停通知循环,否则收尾期间到达的终态通知会再起一次 run
+	a.closed.Store(true)
+	select {
+	case a.notifyQueue <- struct{}{}:
+	default:
+	}
+	// 驱逐循环独立关闭,避免退出后仍有定时器持有 store
+	a.evictStopOnce.Do(func() { close(a.evictStop) })
+	store := a.SubagentStore()
+	if store == nil {
+		return 0
+	}
+	return store.KillAllRunningTasks()
+}
+
+func (a *App) EvictSubagent(taskID string) bool {
+	store := a.SubagentStore()
+	return store != nil && store.Evict(taskID)
+}
+
+func (a *App) StopSubagent(taskID string) error {
+	store := a.SubagentStore()
+	if store == nil {
+		return fmt.Errorf("app: subagent manager is unavailable")
+	}
+	_, err := taskstoptool.New(store).Execute(context.Background(), map[string]any{"task_id": taskID})
+	return err
+}
+
+// ContinueSubagent 用同一个稳定任务 ID 恢复终态子任务
+func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (taskpkg.AgentLaunched, error) {
+	if a.subagents == nil {
+		return taskpkg.AgentLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
+	}
+	return a.subagents.Continue(ctx, taskID, prompt)
+}
+
+// QueueSubagentMessage 把输入排进运行中子任务的队列。
+// followUp 为真时进 follow-up 队列(当前轮结束后注入),否则进 steering 队列
+func (a *App) QueueSubagentMessage(taskID string, message llm.UserMessage, followUp bool) error {
+	if a.subagents == nil {
+		return fmt.Errorf("app: subagent manager is unavailable")
+	}
+	if followUp {
+		return a.subagents.Store().EnqueueFollowUpMessage(taskID, message)
+	}
+	return a.subagents.Store().EnqueuePendingMessage(taskID, message)
 }
 
 // Run 经编排层驱动一次运行

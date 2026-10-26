@@ -20,15 +20,15 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	if a == nil {
 		t.Fatal("New() app = nil, want non-nil")
 	}
-	wantTools := 7
+	wantTools := 10
 	if runtime.GOOS == "windows" {
-		wantTools = 8
+		wantTools = 11
 	}
 	if len(a.agent.AgentContext.Tools) != wantTools || a.agent.AgentContext.Tools[4].Name() != "bash" || a.agent.AgentContext.Tools[6].Name() != "edit" {
 		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(a.agent.AgentContext.Tools), wantTools)
 	}
-	if runtime.GOOS == "windows" && a.agent.AgentContext.Tools[7].Name() != "powershell" {
-		t.Errorf("last registered tool = %q, want powershell", a.agent.AgentContext.Tools[7].Name())
+	if runtime.GOOS == "windows" && a.agent.AgentContext.Tools[8].Name() != "powershell" {
+		t.Errorf("last registered tool = %q, want powershell", a.agent.AgentContext.Tools[8].Name())
 	}
 }
 

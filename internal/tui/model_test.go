@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +69,7 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess}}}
+	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess, ArgsComplete: true}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
 	first := len(m.lastToolHits)
@@ -115,17 +114,18 @@ func press(m *Model, key tea.KeyType) tea.Cmd {
 // assertFrame 检查组件原始高度，避免最终截断掩盖布局溢出
 func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
-	dock := m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems()))
+	dock := 1 + m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems())) + m.subagentRows()
 	if m.selector != nil {
-		dock = len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
-		if dock != m.selector.height(m.height-2) {
-			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), dock)
+		selectorRows := len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
+		dock = 1 + selectorRows + m.subagentRows()
+		if selectorRows != m.selector.height(m.height-2) {
+			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), selectorRows)
 		}
 	} else {
 		// 输入态在视口与输入框之间固定留一行空白
 		dock++
 	}
-	if got := m.viewport.Height + dock + 1; got != m.height {
+	if got := m.viewport.Height + dock; got != m.height {
 		t.Fatalf("component height = %d, terminal = %d", got, m.height)
 	}
 	lines := strings.Split(m.View(), "\n")
@@ -137,8 +137,9 @@ func assertFrame(t *testing.T, m *Model) {
 			t.Fatalf("line %d width = %d, want <= %d", i, width, m.width)
 		}
 	}
-	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), "/project/Rivo") {
-		t.Fatal("cwd footer moved or disappeared")
+	statusIndex := len(lines) - 1 - m.subagentRows()
+	if statusIndex < 0 || !strings.Contains(ansi.Strip(lines[statusIndex]), "/project/Rivo") {
+		t.Fatal("cwd status bar moved or disappeared")
 	}
 }
 
@@ -351,7 +352,7 @@ func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 	}
 	m.busy, m.status = true, "Working"
 	typeText(m, "draft")
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if restored != 1 {
 		t.Fatalf("restore calls = %d, want one call", restored)
 	}
@@ -384,7 +385,7 @@ func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
 	m.busy, m.status = true, "Working"
 	typeText(m, "same message")
 	press(m, tea.KeyEnter)
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if len(queued) != 0 {
 		t.Fatalf("backend queue = %+v, want empty after dequeue", queued)
 	}
@@ -396,59 +397,12 @@ func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
 	}
 }
 
-func TestAltUpCSIFragmentsRestoreQueue(t *testing.T) {
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'[', 'A'}, Alt: true},
-		{Type: tea.KeyRunes, Runes: []rune{'O', 'A'}, Alt: true},
-	} {
-		m := testModel(80, 24)
-		m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-		m.busy = true
-		m.Update(key)
-		if got := m.editor.Value(); got != "queued" {
-			t.Fatalf("key %q restored editor = %q, want queued", key.String(), got)
-		}
-	}
-}
-
-func TestPlainUpWithVisibleSteeringFallsBackToDequeue(t *testing.T) {
-	if !isDarwin(runtime.GOOS) {
-		t.Skip("plain Up fallback is macOS-specific")
-	}
-	m := testModel(80, 24)
-	m.busy = true
-	m.state.Steering = []string{"queued"}
-	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if got := m.editor.Value(); got != "queued" {
-		t.Fatalf("editor = %q, want queued message", got)
-	}
-	if len(m.state.Steering) != 0 {
-		t.Fatalf("steering = %+v, want empty", m.state.Steering)
-	}
-}
-
-func TestPlainUpSteeringFallbackIsMacOSOnly(t *testing.T) {
-	for _, test := range []struct {
-		goos string
-		want bool
-	}{
-		{goos: "darwin", want: true},
-		{goos: "linux", want: false},
-		{goos: "windows", want: false},
-	} {
-		if got := isDarwin(test.goos); got != test.want {
-			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
-		}
-	}
-}
-
 func TestOperationDonePreservesSteeringWithdrawalAgainstStaleSnapshot(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
 	m.state.Steering = []string{"queued"}
 	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "queued" {
 		t.Fatalf("editor = %q, want queued message", got)
 	}
@@ -475,22 +429,17 @@ func TestPendingSteeringViewMatchesPiShape(t *testing.T) {
 	assertFrame(t, m)
 }
 
-func TestSteeringDequeueKeyLabelByOS(t *testing.T) {
-	for _, test := range []struct {
-		goos string
-		want string
-	}{
-		{goos: "darwin", want: "option+up"},
-		{goos: "windows", want: "alt+up"},
-		{goos: "linux", want: "alt+up"},
-	} {
-		if got := steeringDequeueKeyLabelForOS(test.goos); got != test.want {
-			t.Fatalf("steeringDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
-		}
+// 队列撤回用横向键,与任务列表的 Up/Down 选择互不冲突
+func TestDequeueKeyLabels(t *testing.T) {
+	if got := steeringDequeueKeyLabel(); got != "shift+left" {
+		t.Fatalf("steering label = %q", got)
+	}
+	if got := followUpDequeueKeyLabel(); got != "shift+right" {
+		t.Fatalf("follow-up label = %q", got)
 	}
 }
 
-func TestAltDownRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
+func TestShiftRightRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
 	m := testModel(80, 24)
 	restored := 0
 	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
@@ -500,7 +449,7 @@ func TestAltDownRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
 	m.busy, m.status = true, "Working"
 	m.state.Steering = []string{"keep steering"}
 	typeText(m, "draft")
-	m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
 	if restored != 1 {
 		t.Fatalf("restore calls = %d, want one call", restored)
 	}
@@ -512,33 +461,16 @@ func TestAltDownRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
 	}
 }
 
-func TestFollowUpDequeueKeyLabelByOS(t *testing.T) {
-	for _, test := range []struct {
-		goos string
-		want string
-	}{
-		{goos: "darwin", want: "option+down"},
-		{goos: "windows", want: "alt+down"},
-		{goos: "linux", want: "alt+down"},
-	} {
-		if got := followUpDequeueKeyLabelForOS(test.goos); got != test.want {
-			t.Fatalf("followUpDequeueKeyLabelForOS(%q) = %q, want %q", test.goos, got, test.want)
-		}
-	}
-}
-
 func TestFollowUpDequeueKeyVariants(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		key  tea.KeyMsg
 		want bool
 	}{
-		{name: "semantic", key: tea.KeyMsg{Type: tea.KeyDown, Alt: true}, want: true},
-		{name: "csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3B"), Alt: true}, want: true},
-		{name: "meta-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;9B"), Alt: true}, want: true},
-		{name: "application", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("OB"), Alt: true}, want: true},
-		{name: "alt-up", key: tea.KeyMsg{Type: tea.KeyUp, Alt: true}, want: false},
-		{name: "ctrl-alt", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;7B"), Alt: true}, want: false},
+		{name: "shift-right", key: tea.KeyMsg{Type: tea.KeyShiftRight}, want: true},
+		{name: "shift-left", key: tea.KeyMsg{Type: tea.KeyShiftLeft}, want: false},
+		{name: "plain-right", key: tea.KeyMsg{Type: tea.KeyRight}, want: false},
+		{name: "alt-right", key: tea.KeyMsg{Type: tea.KeyRight, Alt: true}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := isFollowUpDequeueKey(test.key); got != test.want {
@@ -548,49 +480,14 @@ func TestFollowUpDequeueKeyVariants(t *testing.T) {
 	}
 }
 
-func TestPlainDownWithVisibleFollowUpFallsBackToDequeue(t *testing.T) {
-	if !isDarwin(runtime.GOOS) {
-		t.Skip("plain Down fallback is macOS-specific")
-	}
+func TestPlainDownWithoutFollowUpNavigatesHistory(t *testing.T) {
 	m := testModel(80, 24)
-	m.busy = true
-	m.state.FollowUp = []string{"queued follow-up"}
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
-	}
-	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if got := m.editor.Value(); got != "queued follow-up" {
-		t.Fatalf("editor = %q, want queued follow-up", got)
-	}
-}
-
-func TestPlainDownFollowUpFallbackIsMacOSOnly(t *testing.T) {
-	for _, test := range []struct {
-		goos string
-		want bool
-	}{
-		{goos: "darwin", want: true},
-		{goos: "linux", want: false},
-		{goos: "windows", want: false},
-	} {
-		if got := isDarwin(test.goos); got != test.want {
-			t.Fatalf("isDarwin(%q) = %v, want %v", test.goos, got, test.want)
-		}
-	}
-}
-
-func TestPlainDownWithoutFollowUpKeepsHistoryNavigation(t *testing.T) {
-	m := testModel(80, 24)
-	m.busy = true
-	m.history = []string{"older"}
-	m.historyPos = 0
-	m.draft = "draft"
-	m.editor.SetValue("older")
 	restored := 0
 	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
 		restored++
-		return nil
+		return []llm.UserMessage{textUserMessage("queued")}
 	}
+	typeText(m, "draft")
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if got := m.editor.Value(); got != "draft" {
 		t.Fatalf("editor = %q, want draft after history navigation", got)
@@ -672,7 +569,7 @@ func TestEmptySteeringRestoreKeepsSnapshotWithoutReplayingIt(t *testing.T) {
 	m.state.Steering = []string{"already consumed"}
 	m.state.SteeringInputs = []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "already consumed"}}}}
 	m.handlers.RestoreSteeringMessages = func() []llm.UserMessage { return nil }
-	m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "" {
 		t.Fatalf("editor = %q, want no stale replay", got)
 	}

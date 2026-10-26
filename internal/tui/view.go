@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
@@ -63,7 +62,10 @@ func (m *Model) layout() {
 		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
-	m.viewport.Height = max(0, m.height-1-dock)
+	// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
+	// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
+	// 补白就落在任务列表下方,看起来像是底部多了几行空行
+	m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -88,7 +90,18 @@ func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int)
 }
 
 // View 只拼接显示缓存，不调用后台运行器或 Markdown 解析器
-func (m *Model) View() string {
+// View 渲染一帧。panic 时先转储堆栈再原样抛出
+func (m *Model) View() (view string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			dumpPanic("view", recovered)
+			panic(recovered)
+		}
+	}()
+	return m.view()
+}
+
+func (m *Model) view() string {
 	if m.width == 0 {
 		return ""
 	}
@@ -100,13 +113,10 @@ func (m *Model) View() string {
 		lines = append(lines, make([]string, m.height-len(lines))...)
 	}
 	if len(lines) > m.height {
-		// 输入坞高度已预先测量，只有异常子组件才会溢出，此时保住固定底栏边界
-		if m.height <= 1 {
-			lines = lines[len(lines)-1:]
-		} else {
-			footerStart := max(0, len(lines)-1)
-			lines = append(lines[:min(m.height-1, footerStart)], lines[footerStart:]...)
-		}
+		// 输入坞高度已预先测量，只有异常子组件才会溢出。
+		// 从底部整体保留 m.height 行:输入框、footer、任务行都在底部,
+		// 被裁掉的只会是 transcript 顶部,用户仍有完整输入入口
+		lines = lines[len(lines)-m.height:]
 	}
 	m.paintJumpPill(lines)
 	for i := range lines {
@@ -174,14 +184,24 @@ func (m *Model) jumpToBottom() {
 func (m *Model) frameLines() []string {
 	var lines []string
 	if m.viewport.Height > 0 {
-		lines = append(lines, splitFrameLines(m.viewport.View())...)
+		// viewport 内容不足时不补行,会让整帧比终端矮,
+		// 补白就落到任务列表下方。这里按声明高度补齐
+		body := splitFrameLines(m.viewport.View())
+		for len(body) < m.viewport.Height {
+			body = append(body, "")
+		}
+		lines = append(lines, body...)
 	}
 	if m.selector != nil {
 		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
+		// 子任务视图显示该任务自己的队列;主视图显示主 agent 的
 		lines = append(lines, m.pendingLines()...)
-		// 消息区与输入框之间留一行空白，长消息不会贴上边框
-		lines = append(lines, "")
+		// 消息区与输入框之间留一行空白，长消息不会贴上边框。
+		// 视口已被压到 0 行时省略它,否则总行数会溢出并挤掉输入框
+		if m.viewport.Height > 0 {
+			lines = append(lines, "")
+		}
 		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
 		if completions := m.completionView(); completions != "" {
 			lines = append(lines, splitFrameLines(completions)...)
@@ -194,6 +214,11 @@ func (m *Model) frameLines() []string {
 			borderColor = accentColor
 		} else if m.status != "" {
 			label = m.status
+		}
+		// 子任务视图的输入框边框用蓝色,并在标签位置显示任务详情
+		if m.viewingTaskID != "" {
+			label = m.subagentDetailHeader()
+			borderColor = blueColor
 		}
 		border := rule(m.width, label, borderColor, false)
 		if m.copyNotice {
@@ -209,86 +234,66 @@ func (m *Model) frameLines() []string {
 		lines = append(lines, rule(m.width, "", borderColor, false))
 	}
 	lines = append(lines, splitFrameLines(m.footer())...)
+	lines = append(lines, m.taskRows()...)
 	return lines
 }
 
 // pendingRows 返回队列区域占用的行数
+// pendingRows 与 pendingLines 共用同一套布局计算,避免两处公式漂移
+// 导致多出或缺少一行
 func (m *Model) pendingRows() int {
-	if m.selector != nil || (len(m.state.Steering) == 0 && len(m.state.FollowUp) == 0) {
+	if m.selector != nil {
 		return 0
 	}
-	rows := len(m.state.Steering) + len(m.state.FollowUp) + 1
-	if len(m.state.Steering) > 0 {
-		rows++
-	}
-	if len(m.state.FollowUp) > 0 {
-		rows++
-	}
-	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems())))
-	return min(rows, available)
+	return len(m.pendingLines())
 }
 
 // pendingLines 显示两类待消费消息和各自的回填提示
 func (m *Model) pendingLines() []string {
-	if len(m.state.Steering) == 0 && len(m.state.FollowUp) == 0 {
+	steering, followUp := m.pendingQueueTexts()
+	if len(steering) == 0 && len(followUp) == 0 {
 		return nil
 	}
 	lines := []string{""}
-	for _, message := range m.state.Steering {
+	for _, message := range steering {
 		if index := strings.IndexByte(message, '\n'); index >= 0 {
 			message = message[:index]
 		}
 		lines = append(lines, ansi.Truncate(colored(dimColor, "Steering: "+message), m.width, "…"))
 	}
-	for _, message := range m.state.FollowUp {
+	for _, message := range followUp {
 		if index := strings.IndexByte(message, '\n'); index >= 0 {
 			message = message[:index]
 		}
 		lines = append(lines, ansi.Truncate(colored(dimColor, "Follow-up: "+message), m.width, "…"))
 	}
-	if len(m.state.Steering) > 0 {
+	if len(steering) > 0 {
 		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+steeringDequeueKeyLabel()+" to edit steering"), m.width, "…"))
 	}
-	if len(m.state.FollowUp) > 0 {
+	if len(followUp) > 0 {
 		lines = append(lines, ansi.Truncate(colored(dimColor, "↳ "+followUpDequeueKeyLabel()+" to edit follow-up"), m.width, "…"))
 	}
-	rows := m.pendingRows()
-	if len(lines) > rows {
-		if rows <= 0 {
-			return nil
-		}
-		if rows == 1 {
-			return lines[len(lines)-1:]
-		}
-		// 保留空行与提示，同时尽量多显示最早的消息
-		visible := append([]string(nil), lines[:rows-1]...)
-		visible = append(visible, lines[len(lines)-1])
-		return visible
+	// 队列区可用的行数:除输入坞、候选列表与任务列表外都归队列
+	available := max(0, m.height-1-(m.editor.Height()+2)-m.completionRows(len(m.completionItems()))-m.subagentRows())
+	// 优先保留消息与提示行,空行只在有富余时出现。
+	// 高度不足时整体不显示,避免只剩一个孤立空行
+	body := lines[1:]
+	if available <= 0 || len(body) == 0 {
+		return nil
 	}
-	return lines
-}
-
-func steeringDequeueKeyLabel() string {
-	return steeringDequeueKeyLabelForOS(runtime.GOOS)
-}
-
-func steeringDequeueKeyLabelForOS(goos string) string {
-	if goos == "darwin" {
-		return "option+up"
+	if available >= len(body)+1 {
+		return append([]string{""}, body...)
 	}
-	return "alt+up"
-}
-
-func followUpDequeueKeyLabel() string {
-	return followUpDequeueKeyLabelForOS(runtime.GOOS)
-}
-
-func followUpDequeueKeyLabelForOS(goos string) string {
-	if goos == "darwin" {
-		return "option+down"
+	if available == 1 {
+		return body[:1]
 	}
-	return "alt+down"
+	return append([]string{""}, body[:available-1]...)
 }
+
+// 队列撤回用横向键,避开与任务列表的 Up/Down 选择冲突
+func steeringDequeueKeyLabel() string { return "shift+left" }
+
+func followUpDequeueKeyLabel() string { return "shift+right" }
 
 func splitFrameLines(view string) []string {
 	view = strings.TrimSuffix(view, "\n")

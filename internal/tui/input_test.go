@@ -173,68 +173,47 @@ func TestInputReaderParsesBytewiseMouseAndPaste(t *testing.T) {
 	}
 }
 
-func TestInputReaderRoutesAltUpToDequeue(t *testing.T) {
-	for _, sequence := range []string{"\x1b[1;3A", "\x1b\x1b[A"} {
-		t.Run(fmt.Sprintf("%q", sequence), func(t *testing.T) {
-			model := testModel(80, 24)
-			model.busy = true
-			restored := 0
-			queued := 0
-			model.handlers.RestoreSteering = func() []string {
-				restored++
-				return []string{"queued"}
+// Shift+Left 撤回 steering:读取器把终端序列交给 Bubble Tea 后应触发撤回
+func TestInputReaderRoutesShiftLeftToDequeue(t *testing.T) {
+	model := testModel(80, 24)
+	model.busy = true
+	restored := 0
+	queued := 0
+	model.handlers.RestoreSteering = func() []string {
+		restored++
+		return []string{"queued"}
+	}
+	model.handlers.EnqueueSteering = func(string) error {
+		queued++
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	reader := NewInputReader(strings.NewReader("draft\x1b[1;2D\r"))
+	defer reader.Close()
+	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
+				return tea.QuitMsg{}
 			}
-			model.handlers.EnqueueSteering = func(string) error {
-				queued++
-				return nil
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			reader := NewInputReader(strings.NewReader("draft" + sequence + "\r"))
-			defer reader.Close()
-			program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
-				tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
-					if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyEnter {
-						return tea.QuitMsg{}
-					}
-					return msg
-				}))
-			if _, err := program.Run(); err != nil {
-				t.Fatal(err)
-			}
-			if restored != 1 {
-				t.Fatalf("restore calls = %d, want one", restored)
-			}
-			if queued != 0 {
-				t.Fatalf("queue submissions = %d, want none", queued)
-			}
-			if got, want := model.editor.Value(), "queued\n\ndraft"; got != want {
-				t.Fatalf("editor = %q, want %q", got, want)
-			}
-		})
+			return msg
+		}))
+	if _, err := program.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 {
+		t.Fatalf("restore calls = %d, want one", restored)
+	}
+	if queued != 0 {
+		t.Fatalf("queue submissions = %d, want none", queued)
+	}
+	if got, want := model.editor.Value(), "queued\n\ndraft"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
 	}
 }
 
-func TestNormalizeAltArrows(t *testing.T) {
-	for _, test := range []struct {
-		in, out string
-	}{
-		{"\x1b[1;9B", "\x1b[1;3B"},
-		{"\x1b[1;9b", "\x1b[1;3B"},
-		{"\x1b[1;9A", "\x1b[1;3A"},
-		{"\x1b[1;3b", "\x1b[1;3B"},
-		{"\x1b[1;5B", "\x1b[1;5B"},
-		{"plain", "plain"},
-		// bracketed paste 载荷必须逐字节保留
-		{"\x1b[200~\x1b[1;9B\x1b[201~", "\x1b[200~\x1b[1;9B\x1b[201~"},
-	} {
-		if got := string(normalizeAltArrows([]byte(test.in))); got != test.out {
-			t.Fatalf("normalizeAltArrows(%q) = %q, want %q", test.in, got, test.out)
-		}
-	}
-}
-
-func TestInputReaderRoutesMetaAltDownToFollowUp(t *testing.T) {
+// Shift+Right 撤回 follow-up
+func TestInputReaderRoutesShiftRightToFollowUp(t *testing.T) {
 	model := testModel(80, 24)
 	restored := 0
 	model.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
@@ -243,8 +222,7 @@ func TestInputReaderRoutesMetaAltDownToFollowUp(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	// Meta 变体不会由 Bubble Tea 直接识别，必须在读取器内规范化
-	reader := NewInputReader(strings.NewReader("draft\x1b[1;9B\r"))
+	reader := NewInputReader(strings.NewReader("draft\x1b[1;2C\r"))
 	defer reader.Close()
 	program := tea.NewProgram(model, tea.WithContext(ctx), tea.WithInput(reader), tea.WithOutput(io.Discard),
 		tea.WithoutRenderer(), tea.WithoutSignalHandler(), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
@@ -264,22 +242,26 @@ func TestInputReaderRoutesMetaAltDownToFollowUp(t *testing.T) {
 	}
 }
 
-func TestSteeringDequeueKeyVariants(t *testing.T) {
+// 撤回键只认 Shift+左右,方向键本身留给任务选择
+func TestDequeueKeysDoNotUseArrows(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		key  tea.KeyMsg
-		want bool
+		name          string
+		key           tea.KeyMsg
+		steer, follow bool
 	}{
-		{name: "semantic", key: tea.KeyMsg{Type: tea.KeyUp, Alt: true}, want: true},
-		{name: "csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3A"), Alt: true}, want: true},
-		{name: "lowercase-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;3a"), Alt: true}, want: true},
-		{name: "meta-csi", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;9A"), Alt: true}, want: true},
-		{name: "application", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("OA"), Alt: true}, want: true},
-		{name: "ctrl-alt", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[1;7A"), Alt: true}, want: false},
+		{name: "shift-left", key: tea.KeyMsg{Type: tea.KeyShiftLeft}, steer: true},
+		{name: "shift-right", key: tea.KeyMsg{Type: tea.KeyShiftRight}, follow: true},
+		{name: "plain-up", key: tea.KeyMsg{Type: tea.KeyUp}},
+		{name: "plain-down", key: tea.KeyMsg{Type: tea.KeyDown}},
+		{name: "alt-up", key: tea.KeyMsg{Type: tea.KeyUp, Alt: true}},
+		{name: "alt-down", key: tea.KeyMsg{Type: tea.KeyDown, Alt: true}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := isSteeringDequeueKey(test.key); got != test.want {
-				t.Fatalf("isSteeringDequeueKey(%q) = %v, want %v", test.key.String(), got, test.want)
+			if got := isSteeringDequeueKey(test.key); got != test.steer {
+				t.Fatalf("isSteeringDequeueKey = %v, want %v", got, test.steer)
+			}
+			if got := isFollowUpDequeueKey(test.key); got != test.follow {
+				t.Fatalf("isFollowUpDequeueKey = %v, want %v", got, test.follow)
 			}
 		})
 	}

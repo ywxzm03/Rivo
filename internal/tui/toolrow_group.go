@@ -156,9 +156,11 @@ func renderToolRowCalls(group *ToolGroupView, width int, state toolRenderState, 
 	return lines, hits
 }
 
-// visibleCall 表示一条调用已经可以上屏：名字未到的调用先不画
+// visibleCall 判断调用行是否该出现。
+// 参数还在流式写入时先不渲染:此时只有一个工具名,没有可读内容,
+// 会闪出一行"有工具无参数"的空壳
 func visibleCall(call ToolCallView) bool {
-	return call.Name != ""
+	return call.Name != "" && call.ArgsComplete
 }
 
 // renderToolRowExploration 画一组只读调用：收起时一行摘要，展开时是各自的调用行

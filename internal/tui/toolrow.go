@@ -29,6 +29,8 @@ const (
 	// rowCommandLines / rowCommandChars 是收起命令的截断阈值
 	rowCommandLines = 2
 	rowCommandChars = 160
+	// rowArgumentChars 是收起状态下通用参数行的截断宽度
+	rowArgumentChars = 120
 	// rowExpandHint 提示点击可展开
 	rowExpandHint = "(click to expand)"
 )
@@ -43,6 +45,8 @@ var toolRowLabels = map[string]string{
 	"powershell": "PowerShell",
 	"edit":       "Update",
 	"write":      "Write",
+	"agent":      "Agent",
+	"TaskStop":   "TaskStop",
 }
 
 func toolRowLabel(name string) string {
@@ -186,8 +190,20 @@ func toolRowArgument(name string, args map[string]any, expanded bool) string {
 		return path
 	case "read", "edit", "write":
 		return path
+	case "agent":
+		// 子任务调用的关键信息是描述与类型;prompt 正文默认折叠
+		description := oneLineText(argString(args, "description"), 0)
+		kind := oneLineText(argString(args, "subagent_type"), 0)
+		if kind == "" {
+			kind = "fork"
+		}
+		line := kind
+		if description != "" {
+			line = kind + ": " + description
+		}
+		return oneLineText(line, rowArgumentChars)
 	default:
-		return formatArguments(args)
+		return oneLineText(formatArguments(args), rowArgumentChars)
 	}
 }
 

@@ -31,7 +31,7 @@ func TestShortenToolPathRequiresHomeBoundary(t *testing.T) {
 func testToolGroup(count int) *ToolGroupView {
 	group := &ToolGroupView{ID: "group"}
 	for i := 0; i < count; i++ {
-		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess})
+		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess, ArgsComplete: true})
 	}
 	return group
 }
@@ -112,6 +112,8 @@ func TestModelCtrlOTogglesToolOutputAndThinking(t *testing.T) {
 func TestActiveToolGroupRefreshesWithWorkingSpinner(t *testing.T) {
 	group := testToolGroup(1)
 	group.Calls[0].Status = ToolPending
+	// 已开始执行的 pending 调用才会呼吸
+	group.Calls[0].StartedAt = time.UnixMilli(1)
 	m := New(Snapshot{Messages: []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}}, Handlers{})
 	m.width = 80
 	m.busy = true
@@ -135,4 +137,99 @@ func renderGroupState(group *ToolGroupView, width int, state toolRenderState, no
 // renderGroupCollapsed 以全部收起或全部展开渲染，其余展开状态默认关闭
 func renderGroupCollapsed(group *ToolGroupView, width int, expanded bool, now time.Time) string {
 	return renderGroupState(group, width, toolRenderState{allExpanded: expanded}, now)
+}
+
+// agent 调用行显示大写 Agent,并复用通用截断规则(默认收起可展开)
+func TestAgentToolRowLabelAndTruncation(t *testing.T) {
+	if got := toolRowLabel("agent"); got != "Agent" {
+		t.Fatalf("agent label = %q, want Agent", got)
+	}
+	longPrompt := strings.Repeat("请仔细检查这个文件的每一处细节。", 40)
+	args := map[string]any{
+		"description":   "Explore the module",
+		"prompt":        longPrompt,
+		"subagent_type": "explore",
+	}
+	collapsed := toolRowArgument("agent", args, false)
+	if !strings.Contains(collapsed, "explore") || !strings.Contains(collapsed, "Explore the module") {
+		t.Fatalf("collapsed agent row = %q, want type and description", collapsed)
+	}
+	// 收起时不能把 prompt 正文整段铺出来
+	if strings.Contains(collapsed, "请仔细检查") {
+		t.Fatalf("collapsed agent row leaked the prompt: %q", collapsed)
+	}
+	if ansi.StringWidth(collapsed) > rowArgumentChars {
+		t.Fatalf("collapsed agent row width = %d, want <= %d", ansi.StringWidth(collapsed), rowArgumentChars)
+	}
+}
+
+// 通用参数行同样受截断约束
+func TestUnknownToolArgumentsAreTruncated(t *testing.T) {
+	args := map[string]any{"blob": strings.Repeat("x", 500)}
+	if got := toolRowArgument("unknown-tool", args, false); ansi.StringWidth(got) > rowArgumentChars {
+		t.Fatalf("generic argument row width = %d, want <= %d", ansi.StringWidth(got), rowArgumentChars)
+	}
+}
+
+// 没有工具组的消息不能沿用上一条的点击命中区
+func TestPlainMessageDoesNotInheritToolHits(t *testing.T) {
+	messages := []Message{
+		{ID: "a", Role: "assistant", ToolGroup: &ToolGroupView{
+			ID:       "g",
+			Thinking: []ThinkingBlockView{{Index: 0, Round: 0, Text: "thought"}},
+		}},
+		{ID: "b", Role: "assistant", Text: "plain text reply"},
+	}
+	m := New(Snapshot{Cwd: "/repo", Messages: messages}, Handlers{})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.refreshTranscript()
+
+	// 只有第一条消息贡献命中区
+	if len(m.lastToolHits) != 1 {
+		t.Fatalf("hits = %d, want 1 (only the tool group)", len(m.lastToolHits))
+	}
+	if m.lastToolHits[0].Key != "g/r0" {
+		t.Fatalf("hit key = %q, want g/r0", m.lastToolHits[0].Key)
+	}
+}
+
+// 展开靠后的 thinking 后仍能折叠回来
+func TestThinkingTogglesAcrossMessages(t *testing.T) {
+	var messages []Message
+	for i := 0; i < 3; i++ {
+		messages = append(messages, Message{
+			ID:   string(rune('a' + i)),
+			Role: "assistant",
+			ToolGroup: &ToolGroupView{
+				ID:       string(rune('g' + i)),
+				Thinking: []ThinkingBlockView{{Index: 0, Round: 0, Text: "deep thought"}},
+			},
+		})
+	}
+	m := New(Snapshot{Cwd: "/repo", Messages: messages}, Handlers{})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.refreshTranscript()
+
+	key := "i/r0"
+	m.expandedThoughts[key] = true
+	m.refreshTranscript()
+	var target toolHit
+	found := false
+	for _, hit := range m.lastToolHits {
+		if hit.Key == key {
+			target, found = hit, true
+		}
+	}
+	if !found {
+		t.Fatalf("thinking key %q missing from hits", key)
+	}
+	if target.End == target.Start {
+		t.Fatal("expanded thinking should span more than one line")
+	}
+	if !m.toggleToolHit(target.Start) {
+		t.Fatal("toggle did not hit")
+	}
+	if m.expandedThoughts[key] {
+		t.Fatal("thinking did not collapse after expanding")
+	}
 }

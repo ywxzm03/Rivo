@@ -33,6 +33,8 @@ type OperationRequest struct {
 	Value       string
 	Message     *llm.UserMessage
 	RestoreMode filehistory.RestoreMode
+	// NotificationOnly 表示这轮 run 只为投递子任务通知,不追加用户输入
+	NotificationOnly bool
 }
 
 type OperationResult struct {
@@ -237,9 +239,13 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			result.Err = errors.New("app: current model does not support image input")
 			return result
 		}
-		if request.Message != nil {
+		switch {
+		case request.NotificationOnly:
+			// 通知已作为 transient 附件挂到请求上,空 Continue 只跑这一轮
+			result.Reply, result.Err = a.coordinator.Continue(ctx)
+		case request.Message != nil:
 			result.Reply, result.Err = a.coordinator.RunMessage(ctx, *request.Message)
-		} else {
+		default:
 			result.Reply, result.Err = a.coordinator.Run(ctx, request.Value)
 		}
 		result = a.continueQueuedSteering(ctx, result)
@@ -295,15 +301,17 @@ func equalOperationRequest(left, right OperationRequest) bool {
 	return reflect.DeepEqual(left, right)
 }
 
-// continueQueuedSteering 在释放操作所有权前完成收尾：steering 优先，follow-up 后继；
-// 每完成一次后继 run 都重新检查两类队列，避免收尾窗口内新入队的消息被遗留
+// continueQueuedSteering 在释放操作所有权前完成收尾：steering 优先，follow-up 后继，
+// 最后才是子任务通知；每完成一次后继 run 都重新检查三类来源，
+// 避免收尾窗口内新入队的消息或新到达的通知被遗留
 func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult) OperationResult {
 	for result.Err == nil && ctx.Err() == nil {
 		a.operationMu.Lock()
 		open := a.active != nil && !a.active.closing
 		steering := open && a.agent.HasSteering()
 		followUp := open && !steering && a.agent.HasFollowUp()
-		if !steering && !followUp {
+		notified := open && !steering && !followUp && a.hasPendingNotification()
+		if !steering && !followUp && !notified {
 			// 最终队列检查与关闭收尾窗口必须同处一个临界区，
 			// 否则检查通过后的新入队会留在队列里无人消费
 			if a.active != nil {
@@ -315,10 +323,14 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 		a.operationMu.Unlock()
 		var reply *llm.AssistantMessage
 		var err error
-		if steering {
+		switch {
+		case steering:
 			reply, err = a.coordinator.ContinueQueued(ctx)
-		} else {
+		case followUp:
 			reply, err = a.coordinator.ContinueFollowUp(ctx)
+		default:
+			// 通知是 transient 请求附件,空 Continue 只带着它跑一轮
+			reply, err = a.coordinator.Continue(ctx)
 		}
 		if reply != nil {
 			result.Reply = reply
@@ -331,6 +343,12 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 	}
 	a.operationMu.Unlock()
 	return result
+}
+
+// hasPendingNotification 报告根 store 是否还有待投递的子任务终态通知
+func (a *App) hasPendingNotification() bool {
+	store := a.SubagentStore()
+	return store != nil && len(store.PeekNotifications()) > 0
 }
 
 // acknowledgePendingQueued 只确认最近一次 commit 失败恢复的那条队列项；

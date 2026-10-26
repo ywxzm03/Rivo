@@ -133,6 +133,7 @@ type Snapshot struct {
 	FollowUp         []string
 	FollowUpInputs   []llm.UserMessage
 	FollowUpRevision uint64
+	Subagents        SubagentSnapshot
 }
 
 type queuedKind uint8
@@ -183,6 +184,8 @@ type Handlers struct {
 	ReadClipboard           func() (string, error)
 	ReadClipboardData       func() (ClipboardData, error)
 	WriteClipboard          func(string) error
+	SubagentRequest         func(SubagentRequest) tea.Cmd
+	SubagentSnapshot        func() tea.Cmd
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -226,6 +229,7 @@ type QueueStateMsg struct {
 	FollowUp         []string
 	FollowUpInputs   []llm.UserMessage
 	FollowUpRevision uint64
+	Subagents        SubagentSnapshot
 }
 type MessageTail struct {
 	AfterID  string
@@ -276,10 +280,18 @@ type cachedMessage struct {
 
 // Model 独占全部显示状态
 type Model struct {
-	messageIndex             map[string]int
-	operationID              uint64
-	state                    Snapshot
-	handlers                 Handlers
+	messageIndex map[string]int
+	operationID  uint64
+	state        Snapshot
+	handlers     Handlers
+	// 子任务视图状态:viewingTaskID 非空时 transcript 显示该任务
+	mainMessages             []Message
+	viewingTaskID            string
+	selectedTaskID           string
+	mainSelected             bool
+	taskSelector             bool
+	subagentRefreshRunning   bool
+	spinnerRunning           bool
 	width, height            int
 	editor                   textarea.Model
 	viewport                 viewport.Model
@@ -299,9 +311,11 @@ type Model struct {
 	canceling                bool
 	compacting               bool
 	compactionQueuedMessages []compactionQueuedMessage
-	status                   string
-	showThinking             bool
-	showAllTools             bool
+	// backgroundRun 标记当前忙碌态来自通知驱动的后台 run,不是用户操作
+	backgroundRun bool
+	status        string
+	showThinking  bool
+	showAllTools  bool
 	// hideTools 是 Ctrl+Q 的遮罩：整段工具组与思考块只剩一行提示
 	hideTools    bool
 	lastCtrlC    time.Time
@@ -382,14 +396,39 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, m.dispatch("run", prompt))
 }
 
+// startSpinner 只在没有活动 tick 链时启动旋转器
+func (m *Model) startSpinner() tea.Cmd {
+	if m.spinnerRunning {
+		return nil
+	}
+	m.spinnerRunning = true
+	return m.spinner.Tick
+}
+
 // Update 处理事件，不读取或修改后台运行器的状态
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+// Update 处理事件。panic 时先转储堆栈再原样抛出,
+// 让 Bubble Tea 按原逻辑终止,同时留下可定位的证据
+func (m *Model) Update(msg tea.Msg) (_ tea.Model, _ tea.Cmd) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			dumpPanic("update", recovered)
+			panic(recovered)
+		}
+	}()
+	return m.update(msg)
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = max(1, msg.Width), max(1, msg.Height)
 		m.layout()
 		m.refreshTranscript()
 	case tea.KeyMsg:
+		// 裸 Escape 是子任务视图的退出键,不能被鼠标报告过滤器挂起
+		if msg.Type == tea.KeyRunes && !msg.Paste && string(msg.Runes) == "\x1b" {
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		}
 		if filtered, handled := m.filterMouseKey(msg); handled {
 			if filtered == "" {
 				return m, nil
@@ -407,12 +446,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m, m.handleMouse(msg)
 	case MessageMsg:
+		if m.viewingTaskID != "" {
+			// 主 Agent 的流式消息属于 main transcript;child 视图只缓存
+			m.upsertMainMessage(Message(msg))
+			return m, nil
+		}
 		m.upsertMessage(Message(msg))
 		if !m.flushPending {
 			m.flushPending = true
 			return m, tea.Tick(time.Second/60, func(time.Time) tea.Msg { return flushMsg{} })
 		}
 	case MessageCommittedMsg:
+		if m.viewingTaskID != "" {
+			m.replaceMainMessage(msg.PreviousID, msg.Message)
+			return m, nil
+		}
 		if index, ok := m.messageIndex[msg.PreviousID]; ok {
 			delete(m.messageIndex, msg.PreviousID)
 			m.messageIndex[msg.Message.ID] = index
@@ -535,6 +583,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steeringRevision = msg.Revision
 		m.setSteeringState(msg.Messages, msg.Inputs)
 		m.layout()
+	case BackgroundRunMsg:
+		// 通知驱动的 run 由后端自行发起,TUI 没有对应的 Request,
+		// 只借用忙碌态让状态栏与输入框边框跟随
+		if msg.Running {
+			m.busy, m.status = true, "Working"
+			m.backgroundRun = true
+			m.layout()
+			return m, m.startSpinner()
+		}
+		if m.backgroundRun {
+			m.busy, m.status = false, ""
+			m.backgroundRun = false
+			m.layout()
+			m.refreshTranscript()
+		}
+		return m, nil
 	case OperationDoneMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
 			return m, nil
@@ -576,12 +640,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastMessageHits = nil
 		}
 		if msg.Tail != nil {
-			m.replaceTail(*msg.Tail)
+			if m.viewingTaskID != "" {
+				m.replaceMainTail(*msg.Tail)
+			} else {
+				m.replaceTail(*msg.Tail)
+			}
 		}
 		for _, change := range msg.Changes {
-			m.upsertMessage(change)
+			if m.viewingTaskID != "" {
+				m.upsertMainMessage(change)
+			} else {
+				m.upsertMessage(change)
+			}
 		}
-		if msg.RestoreEditor {
+		if msg.RestoreEditor && m.viewingTaskID == "" {
 			m.resetPastes()
 			editorValue := msg.EditorValue
 			if msg.EditorMessage != nil {
@@ -598,13 +670,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		m.refreshTranscript()
+		return m, m.startSubagentRefresh()
+	case SubagentSnapshotMsg:
+		if len(msg.RestoreMessages) > 0 {
+			m.restoreSubagentMessages(msg.RestoreMessages)
+		}
+		// 控制请求可能已经改变任务状态后才返回错误(例如停止一个已完成任务)。
+		// 有 revision 的错误响应仍然带着最新快照,不能让旧的 running 行永久滞留。
+		snapshotApplied := msg.Snapshot.Revision >= m.state.Subagents.Revision && (msg.Err == nil || msg.Snapshot.Revision > 0)
+		if snapshotApplied {
+			m.applySubagentSnapshot(msg.Snapshot)
+		}
+		if msg.Err != nil {
+			if msg.RestoreMessage != nil && m.viewingTaskID != "" {
+				m.restoreEditorMessage(msg.RestoreMessage, "")
+			}
+			m.notice("Subagent view unavailable: " + msg.Err.Error())
+			m.layout()
+			if snapshotApplied {
+				return m, m.startSubagentRefresh()
+			}
+		} else if snapshotApplied {
+			return m, m.startSubagentRefresh()
+		}
+	case subagentRefreshMsg:
+		m.subagentRefreshRunning = false
+		if m.handlers.SubagentSnapshot == nil || !m.needsSubagentRefresh() {
+			return m, nil
+		}
+		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链
+		m.subagentRefreshRunning = true
+		return m, tea.Batch(m.handlers.SubagentSnapshot(), m.startSpinner(), subagentRefreshTick())
 	case spinner.TickMsg:
-		if m.busy {
+		if m.busy || hasRunningSubagent(m.state.Subagents.Tasks) {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
-			m.refreshTranscript()
+			if m.busy {
+				m.refreshTranscript()
+			}
 			return m, cmd
 		}
+		m.spinnerRunning = false
 	case clipboardReadMsg:
 		if msg.err != nil {
 			m.notice("Clipboard paste failed: " + msg.err.Error())
@@ -654,8 +760,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applySnapshot(s Snapshot) {
+	viewingTaskID := m.viewingTaskID
 	m.applyMetadata(s)
 	m.steeringRestored = false
+	// 子任务视图里 transcript 属于 child;主 transcript 先缓存起来,
+	// 退出视图时再恢复
+	m.mainMessages = cloneMessages(s.Messages)
+	if viewingTaskID != "" {
+		if task, ok := findSubagentTask(s.Subagents.Tasks, viewingTaskID); ok {
+			m.state.Messages = cloneMessages(task.Messages)
+			m.rebuildMessageIndex()
+			return
+		}
+		m.exitSubagentView()
+	}
 	m.messageIndex = make(map[string]int, len(s.Messages))
 	for i, message := range s.Messages {
 		m.messageIndex[message.ID] = i
@@ -727,7 +845,9 @@ func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) te
 		m.compacting = true
 	}
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
+	// run 期间子任务可能被拉起,刷新链必须同时启动,
+	// 否则任务行要等 operation 结束才出现,看起来像被忙碌态吞掉
+	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}), m.startSubagentRefresh())
 }
 
 func (m *Model) dispatchSteering(value string) tea.Cmd {
@@ -1325,6 +1445,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	followUpRevision := m.followUpRevision
 	m.state = s
 	m.state.Messages = messages
+	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
@@ -1412,4 +1533,9 @@ func (m *Model) replaceTail(tail MessageTail) {
 // isStatusRow 标记 /status 的显示层行，既不进入会话投影也不被尾部替换删除
 func isStatusRow(message Message) bool {
 	return message.Role == "status" || message.Role == "command"
+}
+
+// BackgroundRunMsg 由适配器在通知驱动的后台 run 开始或结束时投递
+type BackgroundRunMsg struct {
+	Running bool
 }

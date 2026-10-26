@@ -22,7 +22,7 @@ func plainLines(view string) []string {
 
 func rowCall(id, name string, args map[string]any, status ToolStatus) ToolCallView {
 	data, _ := json.Marshal(args)
-	return ToolCallView{ID: id, Name: name, Arguments: string(data), Status: status}
+	return ToolCallView{ID: id, Name: name, Arguments: string(data), Status: status, ArgsComplete: true}
 }
 
 func rowDetails(t *testing.T, value any) string {
@@ -368,6 +368,7 @@ func TestToolRowGroupRunningHint(t *testing.T) {
 	read := rowCall("1", "read", map[string]any{"path": "src/a"}, ToolSuccess)
 	read.Result = "a"
 	search := rowCall("2", "bash", map[string]any{"command": "rg x src"}, ToolPending)
+	search.StartedAt = time.UnixMilli(1)
 	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{read, search}}
 
 	lines := groupLines(group, toolRenderState{})
@@ -409,6 +410,7 @@ func TestToolRowStatusDot(t *testing.T) {
 	}
 
 	running := rowCall("1", "bash", map[string]any{"command": "x"}, ToolPending)
+	running.StartedAt = time.UnixMilli(1)
 	first := strings.Join(renderToolRow(running, 80, false, time.UnixMilli(0)), "\n")
 	second := strings.Join(renderToolRow(running, 80, false, time.UnixMilli(7*45)), "\n")
 	if first == second {
@@ -590,7 +592,7 @@ func TestToolRowThinkingTailRound(t *testing.T) {
 func TestToolRowHidesNamelessCall(t *testing.T) {
 	group := &ToolGroupView{ID: "g", Calls: []ToolCallView{
 		{ID: "c1", Name: "", Arguments: "", Status: ToolPending},
-		{ID: "c2", Name: "bash", Arguments: `{"command":"npm test"}`, Status: ToolPending, StartedAt: time.UnixMilli(1)},
+		{ID: "c2", Name: "bash", Arguments: `{"command":"npm test"}`, Status: ToolPending, StartedAt: time.UnixMilli(1), ArgsComplete: true},
 	}}
 	lines := groupLines(group, toolRenderState{})
 	if len(lines) != 2 || lines[0] != " ⦁ Bash(npm test)" || lines[1] != "   ⎿  Running…" {

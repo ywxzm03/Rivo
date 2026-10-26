@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -95,6 +94,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
+	// child view 的 Esc 停止当前 subagent,视图保持打开;选中 main 后 Enter 才退出
+	if msg.String() == "esc" && m.viewingTaskID != "" {
+		return m.stopViewedSubagent()
+	}
+	// 列表聚焦时 Esc 先退出列表
+	if msg.String() == "esc" && m.taskSelector {
+		m.setTaskFocus(false)
+		return nil
+	}
 	if msg.String() == "esc" && m.jumpPillVisible() && !(m.busy && len(m.state.Steering) > 0) {
 		m.jumpToBottom()
 		return nil
@@ -102,7 +110,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.selector != nil {
 		return m.selectorKey(msg)
 	}
+	// 队列撤回键优先于任务选择:Option+Up/Down 不能被列表当成普通按键吃掉
 	if isSteeringDequeueKey(msg) {
+		// 子任务视图撤回的是该任务自己的队列,不是主 agent 的
+		if m.viewingTaskID != "" {
+			return m.dequeueSubagentMessages(false)
+		}
 		if m.restoreQueuedSteering() == 0 {
 			m.status = "No queued messages to restore"
 		}
@@ -110,11 +123,60 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if isFollowUpDequeueKey(msg) {
+		if m.viewingTaskID != "" {
+			return m.dequeueSubagentMessages(true)
+		}
 		if m.restoreQueuedFollowUp() == 0 {
 			m.status = "No queued follow-up messages to restore"
 		}
 		m.layout()
 		return nil
+	}
+	// 任务列表聚焦时按键用于选择;输入字符会自动把焦点交回输入框
+	// 空输入或已聚焦任务列表时,方向键按任务顺序选择
+	if msg.String() == "x" && strings.TrimSpace(m.editor.Value()) == "" {
+		if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
+			kind := "evict"
+			if task.Status == "running" {
+				kind = "stop"
+			}
+			return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
+		}
+	}
+	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
+		switch msg.String() {
+		case "up":
+			wasFocused := m.taskSelector
+			if !wasFocused {
+				m.setTaskFocus(true)
+			}
+			// 主视图第一次 Up 只进入列表;child view 则以当前任务为锚点上移
+			if wasFocused || m.viewingTaskID != "" {
+				m.selectSubagent(-1)
+			}
+			return nil
+		case "down":
+			if !m.taskSelector {
+				m.setTaskFocus(true)
+			}
+			m.selectSubagent(1)
+			return nil
+		case "enter":
+			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
+				return nil
+			}
+			return m.enterSelectedSubagent()
+		case "tab":
+			// 列表聚焦时 Tab 仍然提交 follow-up,焦点保持不变
+			if m.taskSelector {
+				return m.submitFollowUp()
+			}
+		default:
+			// 打字即离开列表,字符继续落到输入框
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.setTaskFocus(false)
+			}
+		}
 	}
 	// 终端 bracketed paste 整段到达，只有粘贴走折叠路径
 	if msg.Paste {
@@ -226,7 +288,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "enter":
 		return m.submit()
 	case "tab":
-		if m.busy {
+		// 主 agent 运行中,或正在看一个运行中的子任务,都支持 Tab 排 follow-up
+		if m.busy || m.viewingTaskID != "" {
 			return m.submitFollowUp()
 		}
 	case "backspace":
@@ -235,27 +298,28 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	case "up":
-		// 部分 macOS 终端把 Option+Up 发成普通 Up，有可见 steering 时优先撤回
-		if isDarwin(runtime.GOOS) && m.busy {
-			restored := m.restoreQueuedSteering()
-			if restored > 0 {
-				m.layout()
+		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
+			// 输入框首行的 Up 把焦点上移到任务列表,不插入字符也不翻历史。
+			// 队列撤回改用 Shift+Left,不再占用 Up
+			if len(m.state.Subagents.Tasks) > 0 {
+				m.setTaskFocus(true)
+				if !m.mainSelected || m.selectedTaskID != "" {
+					m.selectSubagent(-1)
+				}
 				return nil
 			}
-		}
-		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
 			m.browseHistory(-1)
 			return nil
 		}
 	case "down":
 		line := m.editor.LineInfo()
 		if m.editor.Line() == m.editor.LineCount()-1 && line.RowOffset == line.Height-1 {
-			// 部分 macOS 终端把 Option+Down 发成普通 Down，有可见 follow-up 时优先撤回
-			if isDarwin(runtime.GOOS) && m.busy && len(m.state.FollowUp) > 0 {
-				if restored := m.restoreQueuedFollowUp(); restored > 0 {
-					m.layout()
-					return nil
-				}
+			// 输入框末行的 Down 把焦点下移到任务列表。
+			// 队列撤回改用 Shift+Right,不再占用 Down
+			if len(m.state.Subagents.Tasks) > 0 {
+				m.setTaskFocus(true)
+				m.selectSubagent(1)
+				return nil
 			}
 			m.browseHistory(1)
 			return nil
@@ -265,16 +329,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
 	if m.editor.Value() != before {
+		m.taskSelector = false
 		m.clearSelection()
 		m.completion, m.completionHidden = 0, false
 		m.layout()
 	}
 	return cmd
-}
-
-// isDarwin 决定 Alt+方向键在 macOS 上是否用于恢复队列，其余平台交给终端处理
-func isDarwin(goos string) bool {
-	return goos == "darwin"
 }
 
 func (m *Model) quit() tea.Cmd {
@@ -325,6 +385,30 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 	hasImages := messageHasImages(message)
 	if !hasMessage {
 		return nil
+	}
+	if m.viewingTaskID != "" {
+		if m.handlers.SubagentRequest == nil {
+			return nil
+		}
+		messageCopy := cloneUserMessage(message)
+		task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
+		if !ok {
+			m.notice("Subagent task is no longer available")
+			return nil
+		}
+		// 与主 agent 一致:Enter 进 steering,Alt+Enter 进 follow-up;
+		// 终态任务只能 continue
+		kind := "continue"
+		if task.Status == "running" {
+			kind = "queue"
+			if followUp {
+				kind = "followup"
+			}
+		}
+		m.editor.Reset()
+		m.resetPastes()
+		m.layout()
+		return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID, Message: &messageCopy})
 	}
 	if hasImages && !m.currentModel().SupportsImages {
 		m.notice("The current model does not support image input.")

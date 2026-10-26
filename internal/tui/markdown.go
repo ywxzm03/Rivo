@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -130,6 +131,8 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 }
 
 func (m *Model) renderMessage(message Message) string {
+	// 每条消息独立记录命中区,避免没有工具组的消息沿用上一条的
+	m.lastMessageHits = nil
 	width := max(1, m.width-2)
 	if message.Role == "command" {
 		return colored(accentColor, ansi.Wrap(message.Text, width, ""))
@@ -159,7 +162,7 @@ func (m *Model) renderMessage(message Message) string {
 			return strings.Join(parts, "\n\n")
 		}
 		if message.Divider != nil && message.Text != "" {
-			parts = append(parts, dividerLine(m.width, message.Divider))
+			parts = append(parts, m.dividerLine(m.width, message.ID, message.Divider))
 		}
 		return strings.Join(parts, "\n\n")
 	}
@@ -218,19 +221,58 @@ func (m *Model) renderMessage(message Message) string {
 		parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
 	}
 	if message.Divider != nil && message.Text != "" {
-		parts = append(parts, dividerLine(m.width, message.Divider))
+		parts = append(parts, m.dividerLine(m.width, message.ID, message.Divider))
 	}
 	return strings.Join(parts, "\n\n")
 }
 
-// dividerLine 输出回合结束行：耗时与结束时刻，纯文字不带分隔线
-func dividerLine(width int, divider *TurnDividerView) string {
-	label := "Worked for " + formatElapsed(divider.Elapsed)
-	if !divider.FinishedAt.IsZero() {
-		label += " • " + divider.FinishedAt.Format("15:04")
+// dividerLine 输出回合结束行:最新主回合有后台任务时显示等待提示,否则显示本轮耗时
+func (m *Model) dividerLine(width int, messageID string, divider *TurnDividerView) string {
+	label := ""
+	if m.viewingTaskID == "" && !m.busy && m.isLatestDivider(messageID) {
+		label = m.backgroundWaitingLabel()
+	}
+	if label == "" {
+		label = "Worked for " + formatElapsed(divider.Elapsed)
+		if !divider.FinishedAt.IsZero() {
+			label += " • " + divider.FinishedAt.Format("15:04")
+		}
 	}
 	// 比正文多缩进一列，与正文块拉开一点距离
 	return colored(mutedColor, ansi.Truncate(" "+indent(label), width, "…"))
+}
+
+func (m *Model) isLatestDivider(messageID string) bool {
+	for i := len(m.state.Messages) - 1; i >= 0; i-- {
+		if m.state.Messages[i].Divider != nil {
+			return m.state.Messages[i].ID == messageID
+		}
+	}
+	return false
+}
+
+// backgroundWaitingLabel 按 active background task 类型聚合等待文案
+func (m *Model) backgroundWaitingLabel() string {
+	count := 0
+	allAgents, allBash := true, true
+	for _, task := range m.state.Subagents.Tasks {
+		if task.Status != "running" {
+			continue
+		}
+		count++
+		allAgents = allAgents && task.Type == "agent"
+		allBash = allBash && task.Type == "bash"
+	}
+	if count == 0 {
+		return ""
+	}
+	kind := "tasks"
+	if allAgents {
+		kind = "agents"
+	} else if allBash {
+		kind = "bash"
+	}
+	return fmt.Sprintf("Waiting for %d background %s to finish", count, kind)
 }
 
 func indent(text string) string { return " " + strings.ReplaceAll(text, "\n", "\n ") }

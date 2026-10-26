@@ -22,8 +22,9 @@ func shellParameters() map[string]any {
 		"type":     "object",
 		"required": []string{"command"},
 		"properties": map[string]any{
-			"command": map[string]any{"type": "string", "description": "Shell command to execute"},
-			"timeout": map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+			"command":           map[string]any{"type": "string", "description": "Shell command to execute"},
+			"timeout":           map[string]any{"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+			"run_in_background": map[string]any{"type": "boolean", "description": "Run the command as a background BashTask and return its task ID"},
 		},
 	}
 }

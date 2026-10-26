@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -17,14 +19,25 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
-func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) int {
+func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
+	var runtime *adapter.Runtime
+	// panic 会跳过所有收尾逻辑并让进程直接消失;兜住它,并把子任务一起收掉
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintf(stderr, "Rivo: internal error: %v\n%s\n", recovered, debug.Stack())
+			exitCode = 1
+		}
+		if runtime != nil {
+			runtime.ShutdownSubagents()
+		}
+	}()
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: failed to get working directory: %v\n", err)
 		return 2
 	}
 	branch := gitBranch(cwd)
-	runtime := adapter.New(cfg, cwd, branch)
+	runtime = adapter.New(cfg, cwd, branch)
 	a, err := openSessionTarget(cfg, target, runtime.HandleEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
@@ -52,6 +65,8 @@ func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, s
 		RestoreFollowUpMessages: runtime.RestoreFollowUpMessages,
 		ClearFollowUp:           runtime.ClearFollowUp,
 		ReadClipboardData:       readClipboardData,
+		SubagentRequest:         runtime.SubagentRequest,
+		SubagentSnapshot:        runtime.SubagentSnapshot,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil
@@ -68,6 +83,11 @@ func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, s
 	runtime.Wait()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
+		// Bubble Tea 把 goroutine 内的 panic 转成 ErrProgramPanic,
+		// 原始堆栈只写在它自己的日志里;提示用户去哪里找
+		if errors.Is(err, tea.ErrProgramPanic) {
+			fmt.Fprintf(stderr, "Rivo: 程序内部发生 panic，堆栈见 Bubble Tea 日志（$TMPDIR 下的 bubbletea 日志）\n")
+		}
 		return 1
 	}
 	return 0

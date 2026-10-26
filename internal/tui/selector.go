@@ -374,7 +374,7 @@ func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode)
 	m.busy, m.status = true, "Working"
 	m.canceling, m.compacting = false, false
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
+	return tea.Batch(m.startSpinner(), m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
 }
 
 func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {

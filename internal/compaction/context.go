@@ -28,6 +28,10 @@ type ContextView struct {
 	ThinkingLevel    string
 	HasThinkingLevel bool
 	UsageStale       bool
+	// ContentReplacements is the active branch's latest replacement state.
+	// It lets sidechain resume retain the same projection semantics as the
+	// source transcript instead of flattening edits into unrelated messages.
+	ContentReplacements map[string][]llm.Content
 }
 
 func (v ContextView) Messages() []llm.Message {

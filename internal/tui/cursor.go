@@ -88,14 +88,23 @@ func (m *Model) CursorPosition() (row, column int) {
 }
 
 func (m *Model) updateCursorPosition() {
-	if m.width <= 0 || m.height <= 0 || m.selector != nil {
+	// 焦点在任务列表时输入框不可编辑,光标隐藏,否则会与选择高亮同时出现
+	if m.width <= 0 || m.height <= 0 || m.selector != nil || m.taskSelector {
 		m.cursorRow.Store(0)
 		m.cursorColumn.Store(0)
 		return
 	}
 	info := m.editor.LineInfo()
 	visibleRow := min(max(0, info.RowOffset), max(0, m.editor.Height()-1))
-	// 视口与输入框之间多一行空白，编辑器整体下移一行；候选列表在编辑器上方，再下移其行数
-	m.cursorRow.Store(int64(m.viewport.Height + 3 + m.completionRows(len(m.completionItems())) + visibleRow))
+	// 输入框上方的行依次是:视口、队列区、空行、候选列表、上边框。
+	// 空行只在视口非空时存在,漏算或多算都会让光标落错行:
+	// 落到边框行时 IME 预编辑会画在边框上,并让终端为显示光标而滚动
+	rows := m.viewport.Height + m.pendingRows()
+	if m.viewport.Height > 0 {
+		rows++
+	}
+	rows += m.completionRows(len(m.completionItems())) + 1 + visibleRow
+	// frameLines 的下标从 0 开始,终端光标坐标从 1 开始,因此要 +1
+	m.cursorRow.Store(int64(rows + 1))
 	m.cursorColumn.Store(int64(3 + info.CharOffset))
 }
