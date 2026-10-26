@@ -47,6 +47,10 @@ type Runtime struct {
 	turnStarted            time.Time
 	turnRetrying           bool
 	warningSeq             uint64
+	// operationActive 标记当前 run 由用户请求驱动,TUI 自己已置忙碌态
+	operationActive bool
+	// externalRunSeen 标记已经为后台 run 投递过开始消息,避免重复
+	externalRunSeen bool
 	// compactionNotice 只供手动压缩完成时投影到 TUI，不进入会话上下文
 	compactionNotice    *tui.Message
 	compactionNoticeSeq uint64
@@ -155,6 +159,8 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		}
 	}
 	r.mu.Lock()
+	// 用户请求驱动的 run 由 TUI 自己置忙碌态,事件侧不再补 BackgroundRunMsg
+	r.operationActive = true
 	if req.Kind == "run" {
 		r.messageIndexLocked("")
 		r.operationLastAssistant, r.operationHadToolGroup = r.lastAssistantIndex, r.hasToolGroup
@@ -172,6 +178,9 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Unlock()
 	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: app.OperationKind(req.Kind), Value: value, Message: req.Message, RestoreMode: filehistory.RestoreMode(req.RestoreMode)})
 	if err != nil {
+		r.mu.Lock()
+		r.operationActive = false
+		r.mu.Unlock()
 		return func() tea.Msg {
 			return tui.OperationDoneMsg{ID: req.ID, Err: err, EditorValue: userMessageEditorTextOrEmpty(req.Message), EditorMessage: req.Message, RestoreEditor: req.Message != nil}
 		}
@@ -179,6 +188,7 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	return func() tea.Msg {
 		result := op.Wait()
 		r.mu.Lock()
+		r.operationActive = false
 		var commitErr *session.CommitError
 		if errors.As(result.Err, &commitErr) {
 			if req.Kind == "run" && strings.HasPrefix(req.Value, "/skill:") {
@@ -198,6 +208,8 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 		if result.Next != nil {
 			r.app = result.Next
 			r.namespace = result.Next.SessionID()
+			// 新会话是另一个 App,后台 run 的结束兜底必须重新挂上
+			r.attachBackgroundHookLocked(result.Next)
 			r.messages = nil
 			r.pendingSkillInput = nil
 			if req.Kind == "new" {
@@ -344,6 +356,11 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 			r.turnStarted = time.Now()
 		}
 		r.turnRetrying = false
+		// 用户请求驱动的 run 已由 TUI 自己置忙碌态;这里只补后台 run
+		if !r.externalRunSeen && !r.operationActive {
+			r.externalRunSeen = true
+			notifications = append(notifications, tui.BackgroundRunMsg{Running: true})
+		}
 	case llm.TurnStartEvent:
 		if r.turnStarted.IsZero() {
 			r.turnStarted = time.Now()
@@ -414,6 +431,10 @@ func (r *Runtime) handleEvent(event llm.AgentEvent) error {
 	case llm.TurnEndEvent:
 		// 工具循环保持一个紧凑分组，直到出现可见文本或 agent_end
 	case llm.AgentEndEvent:
+		if !event.WillRetry && r.externalRunSeen {
+			r.externalRunSeen = false
+			notifications = append(notifications, tui.BackgroundRunMsg{Running: false})
+		}
 		if event.WillRetry {
 			r.sealToolGroupLocked()
 			r.turnRetrying = true
@@ -719,11 +740,31 @@ func (r *Runtime) SetProjectContext(cwd, branch string) {
 	r.mu.Unlock()
 }
 
+// attachBackgroundHookLocked 把后台 run 的结束兜底挂到给定 App。
+// 事件投影可能因提交失败漏发 AgentEndEvent,只靠事件清不掉忙碌态
+func (r *Runtime) attachBackgroundHookLocked(a *app.App) {
+	a.SetBackgroundRunHook(func() {
+		r.mu.Lock()
+		// 切换会话后旧 App 的收尾不能清掉新会话的忙碌态
+		if r.app != a {
+			r.mu.Unlock()
+			return
+		}
+		r.externalRunSeen = false
+		send := r.send
+		r.mu.Unlock()
+		if send != nil {
+			send(tui.BackgroundRunMsg{Running: false})
+		}
+	})
+}
+
 func (r *Runtime) Attach(a *app.App) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.app = a
 	r.namespace = a.SessionID()
+	r.attachBackgroundHookLocked(a)
 	r.replaceMessagesLocked(a.ContextView())
 	for _, warning := range a.Warnings() {
 		r.warningSeq++

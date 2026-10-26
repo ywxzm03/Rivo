@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -44,6 +45,13 @@ type App struct {
 	subagentRunner *agenttool.Runner
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
+	// notifyQueue 把子任务终态通知转成一次后台 run;缓冲 1 让重复通知合并
+	notifyQueue chan struct{}
+	// closed 在进程收尾时置位,让通知循环退出而不是继续起 run
+	closed atomic.Bool
+	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
+	backgroundMu  sync.Mutex
+	backgroundEnd func()
 }
 
 // ModelFallbackMessage 返回恢复时的模型回退警告，未发生回退时为空
@@ -274,7 +282,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 	runner.SetModel(model, streamFn)
 	manager.SetFactory(runner.Run)
 	manager.SetResumeResolver(agenttool.ResumeResolver(filepath.Dir(sm.Path())))
-	return &App{
+	app := &App{
 		agent:          ag,
 		session:        sm,
 		coordinator:    coord,
@@ -285,7 +293,64 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		subagents:      manager,
 		subagentRunner: runner,
 		tools:          tools,
-	}, nil
+		notifyQueue:    make(chan struct{}, 1),
+	}
+	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
+	manager.Store().SetNotifyHook(app.wakeForNotification)
+	go app.runNotificationLoop()
+	return app, nil
+}
+
+// wakeForNotification 在子任务通知入队时启动一次消费 run。
+// 已有操作在跑时不介入:它收尾时会检查队列并续跑
+func (a *App) wakeForNotification() {
+	if a.closed.Load() {
+		return
+	}
+	select {
+	case a.notifyQueue <- struct{}{}:
+	default:
+		// 队列已有一次待处理的唤醒,重复通知会被同一轮 run 一并消费
+	}
+}
+
+// runNotificationLoop 消费唤醒信号。用 Continue 驱动空请求,
+// 通知作为 transient 附件挂在这一轮请求上,不写入主 session
+func (a *App) runNotificationLoop() {
+	for range a.notifyQueue {
+		if a.closed.Load() {
+			return
+		}
+		if !a.hasPendingNotification() {
+			continue
+		}
+		op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, NotificationOnly: true})
+		if err != nil {
+			// 用户操作正在进行:它的收尾会重新检查通知队列,这里不重试
+			continue
+		}
+		// 收尾一定落在操作真正结束后,不依赖 AgentEndEvent 是否成功送达
+		op.Wait()
+		a.notifyBackgroundRunEnd()
+	}
+}
+
+// notifyBackgroundRunEnd 通知显示层后台 run 已结束。
+// 事件投影可能因为提交失败而漏发 AgentEndEvent,这里兜一次底
+func (a *App) notifyBackgroundRunEnd() {
+	a.backgroundMu.Lock()
+	notify := a.backgroundEnd
+	a.backgroundMu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
+// SetBackgroundRunHook 安装后台 run 结束回调,由显示层接入
+func (a *App) SetBackgroundRunHook(hook func()) {
+	a.backgroundMu.Lock()
+	a.backgroundEnd = hook
+	a.backgroundMu.Unlock()
 }
 
 // subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息
@@ -328,6 +393,12 @@ func (a *App) ExitSubagentView() {
 // ShutdownSubagents 终止所有仍在运行的子任务与后台命令。
 // 进程退出时调用:子任务 lifecycle 与请求解绑,不主动终止会变成孤儿进程
 func (a *App) ShutdownSubagents() int {
+	// 先停通知循环,否则收尾期间到达的终态通知会再起一次 run
+	a.closed.Store(true)
+	select {
+	case a.notifyQueue <- struct{}{}:
+	default:
+	}
 	store := a.SubagentStore()
 	if store == nil {
 		return 0

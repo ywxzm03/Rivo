@@ -20,17 +20,31 @@ func KillBash(taskID string, store *Store) error {
 	return nil
 }
 
-// KillAgent 取消 agent 任务的 lifecycle 并执行清理回调
+// KillAgent 按用户主动停止处理 agent 任务
 func KillAgent(taskID string, store *Store) error {
-	runtime, abort, _, err := store.beginAgentKill(taskID)
+	return KillAgentWithReason(taskID, store, StopReasonUserStop)
+}
+
+// KillAgentWithReason 取消 agent lifecycle 并保留停止原因
+func KillAgentWithReason(taskID string, store *Store, reason StopReason) error {
+	runtime, abort, _, err := store.beginAgentKill(taskID, reason)
 	if err != nil {
 		return err
 	}
 	if abort != nil {
 		abort()
 	} else if runtime != nil && runtime.Cancel != nil {
-		// 启动窗口内 runtime 还没挂上,状态已转移为 killed,没有可取消的句柄
 		runtime.Cancel()
+	} else {
+		task, ok := store.Task(taskID)
+		if ok {
+			store.EnqueueNotification(taskID, task.Base().LifecycleToken, Notification{
+				TaskID:  taskID,
+				Status:  StatusKilled,
+				Reason:  reason,
+				Summary: StoppedAgentSummary(task.Base().Description, reason),
+			})
+		}
 	}
 	return nil
 }

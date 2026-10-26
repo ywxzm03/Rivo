@@ -109,7 +109,11 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 			model.ID = definition.Model
 		}
 	}
-	// 4.装配工具集:按定义过滤,explore/plan 降级为只读
+	// 4.写类工具要绑定子 transcript 的 file history,必须先挂载再装配:
+	// 晚挂载会让工具拿到 typed-nil store,nil 接口判空失效后在写文件时崩溃
+	if sm.FileHistory() == nil {
+		sm.AttachFileHistory(r.AgentDir)
+	}
 	tools := childTools(r.ParentTools, fork, sm, r.TaskStore)
 	if definition != nil {
 		tools, err = filterAgentTools(tools, definition.Tools)
@@ -238,9 +242,6 @@ func (r *Runner) loadDefinition(spec taskpkg.AgentSpec, _ string, fork bool) (*D
 func (r *Runner) buildMessages(spec taskpkg.AgentSpec, sm *session.SessionManager, cwd string, tools []llm.Tool, definition *Definition, fork bool, worktreePath string) ([]llm.Message, []llm.Message, error) {
 	var messages []llm.Message
 	forkInitial := fork && !spec.Continuation && spec.ParentContext != nil
-	if sm.FileHistory() == nil {
-		sm.AttachFileHistory(r.AgentDir)
-	}
 	switch {
 	case spec.Continuation:
 		// 1.continuation 从磁盘 transcript 重建上下文

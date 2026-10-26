@@ -61,7 +61,7 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 	if strings.EqualFold(agentType, "fork") {
 		agentType = "fork"
 	}
-	stateID, _, err := m.store.Register(taskpkg.RegisterSpec{
+	stateID, token, err := m.store.Register(taskpkg.RegisterSpec{
 		Type:        taskpkg.TypeAgent,
 		Description: input.Description,
 		AgentType:   agentType,
@@ -81,16 +81,31 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 	}
 	runtime, err := m.factory(ctx, spec)
 	if err != nil {
-		m.store.DiscardReserved(stateID)
+		m.finishLaunchFailure(stateID, token, input)
 		return taskpkg.AgentLaunched{}, err
 	}
 	if err := m.launch(ctx, stateID, runtime, input, func() (uint64, error) {
 		return m.store.AttachAgentRuntime(stateID, runtime, input.Prompt)
 	}); err != nil {
-		m.store.DiscardReserved(stateID)
+		m.finishLaunchFailure(stateID, token, input)
 		return taskpkg.AgentLaunched{}, err
 	}
 	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: stateID, Description: input.Description, Prompt: input.Prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
+}
+
+// finishLaunchFailure 保留启动窗口内已被停止的任务,让父 agent 仍能收到终态通知
+func (m *Manager) finishLaunchFailure(taskID string, token uint64, input taskpkg.AgentInput) {
+	task, ok := m.store.Task(taskID)
+	if ok && task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled {
+		m.store.EnqueueNotification(taskID, token, m.notification(taskID, token, taskpkg.Notification{
+			TaskID:  taskID,
+			Status:  taskpkg.StatusKilled,
+			Reason:  task.Base().StopReason,
+			Summary: taskpkg.StoppedAgentSummary(input.Description, task.Base().StopReason),
+		}))
+		return
+	}
+	m.store.DiscardReserved(taskID)
 }
 
 // Continue 用同一个稳定 agent ID 恢复终态任务。旧 lifecycle 先取消并完全 drain,
@@ -237,14 +252,18 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 	reply, runErr := run(ctx, input.Prompt)
 	m.store.RecordAgentMessages(taskID, token, runtime.Agent.AgentContext.Messages)
 	wasKilled := false
+	stopReason := taskpkg.StopReasonAborted
 	if task, ok := m.store.Task(taskID); ok {
-		wasKilled = task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled
+		if task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled {
+			wasKilled = true
+			stopReason = task.Base().StopReason
+		}
 	}
 	if wasKilled || errors.Is(ctx.Err(), context.Canceled) || errors.Is(runErr, context.Canceled) {
 		partial := latestAssistant(runtime.Agent)
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusRunning {
 			// 1.取消后状态没落到 killed 说明任务卡在 running,用 failed 兜住避免悬挂
-			if err := taskpkg.KillAgent(taskID, m.store); err != nil {
+			if err := taskpkg.KillAgentWithReason(taskID, m.store, taskpkg.StopReasonAborted); err != nil {
 				m.store.FailAgent(taskID, token, fmt.Errorf("agent: stop after cancellation failed: %w", err))
 			}
 		}
@@ -253,7 +272,11 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusFailed {
 			status = taskpkg.StatusFailed
 		}
-		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: status, Summary: input.Description, Result: joinText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
+		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: status, Summary: fmt.Sprintf("Agent %q was aborted", input.Description), Result: joinText(partialResult.Content), TotalTokens: partialResult.TotalTokens, ToolUses: partialResult.TotalToolUseCount, DurationMs: time.Since(started).Milliseconds()})
+		if status == taskpkg.StatusKilled {
+			notification.Reason = stopReason
+			notification.Summary = taskpkg.StoppedAgentSummary(input.Description, stopReason)
+		}
 		m.cleanupWorktree(taskID, token, runtime)
 		m.store.EnqueueNotification(taskID, token, notification)
 	} else if runErr != nil {
@@ -278,7 +301,7 @@ func (m *Manager) failAgent(taskID string, token uint64, runtime *taskpkg.AgentR
 	if transitioned {
 		m.store.EnqueueNotification(taskID, token, notification)
 	} else if task, ok := m.store.Task(taskID); ok && task.Base().LifecycleToken == token && task.Base().Status == taskpkg.StatusKilled {
-		m.store.EnqueueNotification(taskID, token, m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusKilled, Summary: input.Description, DurationMs: time.Since(started).Milliseconds()}))
+		m.store.EnqueueNotification(taskID, token, m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusKilled, Reason: task.Base().StopReason, Summary: taskpkg.StoppedAgentSummary(input.Description, task.Base().StopReason), DurationMs: time.Since(started).Milliseconds()}))
 	}
 }
 

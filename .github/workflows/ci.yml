@@ -61,6 +61,11 @@ jobs:
 
       - name: Run tests with coverage
         run: go test -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Check subagent coverage threshold
+        run: |
+          go test -coverprofile=subagent-coverage.txt -covermode=atomic ./internal/app ./internal/subagent ./internal/task ./internal/tool/agenttool ./internal/tui ./internal/tui/adapter
+          coverage=$(go tool cover -func=subagent-coverage.txt | awk '$1 == "total:" {gsub("%", "", $NF); print $NF}')
+          awk -v coverage="$coverage" 'BEGIN { if (coverage < 80) { printf "subagent coverage %.1f%% is below 80%%\n", coverage; exit 1 } }'
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

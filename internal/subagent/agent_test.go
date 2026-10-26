@@ -150,6 +150,45 @@ func TestManagerRecoversPanickingRuntime(t *testing.T) {
 	}
 }
 
+// Claude 的 async_launched 任务彼此独立:两个后台 agent 必须同时启动,不能串行占用父 agent
+func TestClaudeContractAsyncAgentsRunConcurrently(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	manager := NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+		runtime.Run = func(_ context.Context, _ string) (*llm.AssistantMessage, error) {
+			started <- spec.ID
+			<-release
+			return &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: spec.ID + " done"}}}, nil
+		}
+		return runtime, nil
+	})
+
+	first, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "first", Prompt: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "second", Prompt: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(time.Second):
+			t.Fatalf("only %d background agents started: %v", len(seen), seen)
+		}
+	}
+	if !seen[first.AgentID] || !seen[second.AgentID] {
+		t.Fatalf("started agents = %v, want %q and %q", seen, first.AgentID, second.AgentID)
+	}
+	close(release)
+	waitForTaskStatus(t, manager.Store(), first.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), second.AgentID, taskpkg.StatusCompleted)
+}
+
 func waitForTaskStatus(t *testing.T, store *taskpkg.Store, id string, want taskpkg.Status) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)

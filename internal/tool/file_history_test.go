@@ -84,3 +84,16 @@ func TestFileHistoryTrackerIsSkippedWithoutUserID(t *testing.T) {
 		t.Fatalf("tracker = %+v, want no call", recorder)
 	}
 }
+
+// typed-nil tracker(子 agent 装配顺序错误时会拿到)不能让写文件崩溃
+func TestWriteSkipsTypedNilFileHistory(t *testing.T) {
+	var store *recordingFileHistory
+	path := filepath.Join(t.TempDir(), "file.txt")
+	ctx := llm.WithCurrentUserMessageID(context.Background(), "u4")
+	if _, err := (&Write{History: store}).Execute(ctx, map[string]any{"path": path, "content": "new"}); err != nil {
+		t.Fatalf("write with typed-nil history = %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "new" {
+		t.Fatalf("content = %q err = %v, want new", data, err)
+	}
+}

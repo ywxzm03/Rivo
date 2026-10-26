@@ -94,25 +94,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
 	}
-	// 子任务视图的 Esc 分两级:运行中的任务先被停止并留在视图,
-	// 紧接着再按一次退回 main;任务已停止时一次 Esc 就退回
+	// child view 的 Esc 停止当前 subagent,视图保持打开;选中 main 后 Enter 才退出
 	if msg.String() == "esc" && m.viewingTaskID != "" {
-		if m.lastEscapeAt != (time.Time{}) && m.clock().Sub(m.lastEscapeAt) <= timeDoublePress {
-			cmd := m.exitSubagentViewCmd()
-			m.lastEscapeAt = time.Time{}
-			return cmd
-		}
-		if m.taskSelector {
-			m.setTaskFocus(false)
-			m.lastEscapeAt = m.clock()
-			return nil
-		}
-		if task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID); ok && task.Status != "running" {
-			// 已停止的任务没有可停的东西,直接退回 main
-			m.lastEscapeAt = time.Time{}
-			return m.exitSubagentViewCmd()
-		}
-		m.lastEscapeAt = m.clock()
 		return m.stopViewedSubagent()
 	}
 	// 列表聚焦时 Esc 先退出列表
@@ -150,17 +133,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	// 任务列表聚焦时按键用于选择;输入字符会自动把焦点交回输入框
-	if len(m.state.Subagents.Tasks) > 0 && m.taskSelector {
+	// 空输入或已聚焦任务列表时,方向键按任务顺序选择
+	if msg.String() == "x" && strings.TrimSpace(m.editor.Value()) == "" {
+		if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
+			kind := "evict"
+			if task.Status == "running" {
+				kind = "stop"
+			}
+			return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
+		}
+	}
+	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
 		switch msg.String() {
 		case "up":
-			// 已在 main 行时再 Up 离开列表,回到输入框
-			if m.mainSelected {
-				m.setTaskFocus(false)
-				return nil
+			wasFocused := m.taskSelector
+			if !wasFocused {
+				m.setTaskFocus(true)
 			}
-			m.selectSubagent(-1)
+			// 主视图第一次 Up 只进入列表;child view 则以当前任务为锚点上移
+			if wasFocused || m.viewingTaskID != "" {
+				m.selectSubagent(-1)
+			}
 			return nil
 		case "down":
+			if !m.taskSelector {
+				m.setTaskFocus(true)
+			}
 			m.selectSubagent(1)
 			return nil
 		case "enter":
@@ -168,18 +166,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			return m.enterSelectedSubagent()
-		case "x":
-			if task, ok := m.selectedSubagent(); ok && m.handlers.SubagentRequest != nil {
-				kind := "evict"
-				if task.Status == "running" {
-					kind = "stop"
-				}
-				return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
-			}
-			return nil
 		case "tab":
 			// 列表聚焦时 Tab 仍然提交 follow-up,焦点保持不变
-			return m.submitFollowUp()
+			if m.taskSelector {
+				return m.submitFollowUp()
+			}
 		default:
 			// 打字即离开列表,字符继续落到输入框
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {

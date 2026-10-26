@@ -25,10 +25,20 @@ type Store struct {
 	nextID        uint64
 	nextToken     uint64
 	viewingTaskID string
+	// notify 是通知入队时的唤醒回调。主 agent 空闲时靠它启动消费通知的 run,
+	// 否则通知要等用户下次输入才投递
+	notify func()
 }
 
 func NewStore() *Store {
 	return &Store{tasks: make(map[string]State), runtimes: make(map[string]*AgentRuntime)}
+}
+
+// SetNotifyHook 安装通知入队回调。回调在锁外执行,避免宿主侧逻辑与 store 锁互等
+func (s *Store) SetNotifyHook(hook func()) {
+	s.mu.Lock()
+	s.notify = hook
+	s.mu.Unlock()
 }
 
 type RegisterSpec struct {
@@ -263,7 +273,7 @@ func (s *Store) KillAllRunningTasks() int {
 	s.mu.Unlock()
 	killed := 0
 	for _, id := range agentIDs {
-		if err := KillAgent(id, s); err == nil {
+		if err := KillAgentWithReason(id, s, StopReasonShutdown); err == nil {
 			killed++
 		}
 	}
@@ -330,13 +340,19 @@ func (s *Store) evictLocked(id string) {
 
 func (s *Store) EnqueueNotification(id string, token uint64, notification Notification) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	task, ok := s.tasks[id]
 	if !ok || task.Base().LifecycleToken != token || !task.Base().Status.Terminal() || task.Base().Notified {
+		s.mu.Unlock()
 		return false
 	}
 	task.Base().Notified = true
 	s.notifications = append(s.notifications, notification)
+	notify := s.notify
+	s.mu.Unlock()
+	// 在锁外唤醒宿主:回调会去启动 run,持锁调用会与 run 的请求准备互等
+	if notify != nil {
+		notify()
+	}
 	return true
 }
 
@@ -601,7 +617,7 @@ func (s *Store) completeBash(id string, token uint64, result *BashResult, err er
 	return true
 }
 
-func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, uint64, error) {
+func (s *Store) beginAgentKill(id string, reason StopReason) (*AgentRuntime, context.CancelFunc, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -611,16 +627,10 @@ func (s *Store) beginAgentKill(id string) (*AgentRuntime, context.CancelFunc, ui
 	now := time.Now()
 	token := task.Base().LifecycleToken
 	abort := task.Abort
-	// runtime 要等 AttachAgentRuntime 才挂上,启动窗口内它是 nil。
-	// 此时状态照常转移,runtime 缺失只意味着没有可取消的句柄;
-	// 后续 AttachAgentRuntime 会因任务已非 running 而失败。
+	// 启动窗口内没有 runtime 时仍要保留通知资格,KillAgent 会立即入队 stopped 通知
 	runtime := s.runtimes[id]
-	if runtime == nil {
-		// 没有 lifecycle 就再也没有回调能投递通知,直接标记已通知,
-		// 否则这个终态任务永远不满足驱逐条件
-		task.Base().Notified = true
-	}
 	task.Base().Status = StatusKilled
+	task.Base().StopReason = reason
 	task.Base().EndTime = &now
 	task.Abort = nil
 	task.PendingSteering = nil

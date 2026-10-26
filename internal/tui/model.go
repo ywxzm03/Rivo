@@ -311,13 +311,14 @@ type Model struct {
 	canceling                bool
 	compacting               bool
 	compactionQueuedMessages []compactionQueuedMessage
-	status                   string
-	showThinking             bool
-	showAllTools             bool
+	// backgroundRun 标记当前忙碌态来自通知驱动的后台 run,不是用户操作
+	backgroundRun bool
+	status        string
+	showThinking  bool
+	showAllTools  bool
 	// hideTools 是 Ctrl+Q 的遮罩：整段工具组与思考块只剩一行提示
 	hideTools    bool
 	lastCtrlC    time.Time
-	lastEscapeAt time.Time
 	flushPending bool
 	cache        map[string]cachedMessage
 	// expandedGroups / expandedCalls / expandedThoughts 记录单击展开的组、调用与思考块
@@ -582,6 +583,22 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steeringRevision = msg.Revision
 		m.setSteeringState(msg.Messages, msg.Inputs)
 		m.layout()
+	case BackgroundRunMsg:
+		// 通知驱动的 run 由后端自行发起,TUI 没有对应的 Request,
+		// 只借用忙碌态让状态栏与输入框边框跟随
+		if msg.Running {
+			m.busy, m.status = true, "Working"
+			m.backgroundRun = true
+			m.layout()
+			return m, m.startSpinner()
+		}
+		if m.backgroundRun {
+			m.busy, m.status = false, ""
+			m.backgroundRun = false
+			m.layout()
+			m.refreshTranscript()
+		}
+		return m, nil
 	case OperationDoneMsg:
 		if msg.ID != 0 && msg.ID != m.operationID {
 			return m, nil
@@ -653,9 +670,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		m.refreshTranscript()
+		return m, m.startSubagentRefresh()
 	case SubagentSnapshotMsg:
 		if len(msg.RestoreMessages) > 0 {
 			m.restoreSubagentMessages(msg.RestoreMessages)
+		}
+		// 控制请求可能已经改变任务状态后才返回错误(例如停止一个已完成任务)。
+		// 有 revision 的错误响应仍然带着最新快照,不能让旧的 running 行永久滞留。
+		snapshotApplied := msg.Snapshot.Revision >= m.state.Subagents.Revision && (msg.Err == nil || msg.Snapshot.Revision > 0)
+		if snapshotApplied {
+			m.applySubagentSnapshot(msg.Snapshot)
 		}
 		if msg.Err != nil {
 			if msg.RestoreMessage != nil && m.viewingTaskID != "" {
@@ -663,13 +687,15 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.notice("Subagent view unavailable: " + msg.Err.Error())
 			m.layout()
-		} else if msg.Snapshot.Revision >= m.state.Subagents.Revision {
-			m.applySubagentSnapshot(msg.Snapshot)
+			if snapshotApplied {
+				return m, m.startSubagentRefresh()
+			}
+		} else if snapshotApplied {
 			return m, m.startSubagentRefresh()
 		}
 	case subagentRefreshMsg:
 		m.subagentRefreshRunning = false
-		if m.handlers.SubagentSnapshot == nil || (!hasRunningSubagent(m.state.Subagents.Tasks) && m.viewingTaskID == "") {
+		if m.handlers.SubagentSnapshot == nil || !m.needsSubagentRefresh() {
 			return m, nil
 		}
 		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链
@@ -819,7 +845,9 @@ func (m *Model) dispatchMessage(kind, value string, message *llm.UserMessage) te
 		m.compacting = true
 	}
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}))
+	// run 期间子任务可能被拉起,刷新链必须同时启动,
+	// 否则任务行要等 operation 结束才出现,看起来像被忙碌态吞掉
+	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Message: message}), m.startSubagentRefresh())
 }
 
 func (m *Model) dispatchSteering(value string) tea.Cmd {
@@ -1505,4 +1533,9 @@ func (m *Model) replaceTail(tail MessageTail) {
 // isStatusRow 标记 /status 的显示层行，既不进入会话投影也不被尾部替换删除
 func isStatusRow(message Message) bool {
 	return message.Role == "status" || message.Role == "command"
+}
+
+// BackgroundRunMsg 由适配器在通知驱动的后台 run 开始或结束时投递
+type BackgroundRunMsg struct {
+	Running bool
 }

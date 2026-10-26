@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
@@ -29,6 +30,28 @@ func (s Status) Terminal() bool {
 	return s == StatusCompleted || s == StatusFailed || s == StatusKilled
 }
 
+type StopReason string
+
+const (
+	StopReasonUserStop StopReason = "user_stop"
+	StopReasonAborted  StopReason = "aborted"
+	StopReasonShutdown StopReason = "shutdown"
+)
+
+// StoppedAgentSummary 生成父 agent 可直接理解的停止摘要
+func StoppedAgentSummary(description string, reason StopReason) string {
+	switch reason {
+	case StopReasonUserStop:
+		return fmt.Sprintf("Agent %q was stopped by user", description)
+	case StopReasonAborted:
+		return fmt.Sprintf("Agent %q was aborted", description)
+	case StopReasonShutdown:
+		return fmt.Sprintf("Agent %q was stopped during shutdown", description)
+	default:
+		return fmt.Sprintf("Agent %q was stopped", description)
+	}
+}
+
 // StateBase 是 BashState 与 AgentState 共享的公共 lifecycle 状态
 type StateBase struct {
 	ID             string
@@ -41,6 +64,8 @@ type StateBase struct {
 	OutputFile     string
 	Notified       bool
 	LifecycleToken uint64
+	StopReason     StopReason
+
 	// EvictAfter 是终态任务的驱逐截止时间。nil 表示通知投递后立即可驱逐;
 	// agent 任务用它实现面板宽限期
 	EvictAfter *time.Time
@@ -170,18 +195,19 @@ type AgentResult struct {
 }
 
 type Notification struct {
-	TaskID          string `json:"task_id"`
-	ToolUseID       string `json:"tool_use_id,omitempty"`
-	Status          Status `json:"status"`
-	OutputFile      string `json:"output_file"`
-	Summary         string `json:"summary"`
-	Result          string `json:"result,omitempty"`
-	TotalTokens     int    `json:"total_tokens,omitempty"`
-	ToolUses        int    `json:"tool_uses,omitempty"`
-	DurationMs      int64  `json:"duration_ms,omitempty"`
-	WorktreePath    string `json:"worktree_path,omitempty"`
-	OutputTruncated bool   `json:"output_truncated,omitempty"`
-	OutputBytes     int    `json:"output_bytes,omitempty"`
+	TaskID          string     `json:"task_id"`
+	ToolUseID       string     `json:"tool_use_id,omitempty"`
+	Reason          StopReason `json:"reason,omitempty"`
+	Status          Status     `json:"status"`
+	OutputFile      string     `json:"output_file"`
+	Summary         string     `json:"summary"`
+	Result          string     `json:"result,omitempty"`
+	TotalTokens     int        `json:"total_tokens,omitempty"`
+	ToolUses        int        `json:"tool_uses,omitempty"`
+	DurationMs      int64      `json:"duration_ms,omitempty"`
+	WorktreePath    string     `json:"worktree_path,omitempty"`
+	OutputTruncated bool       `json:"output_truncated,omitempty"`
+	OutputBytes     int        `json:"output_bytes,omitempty"`
 }
 
 type StopInput struct {
