@@ -235,7 +235,7 @@ func TestClaudeContractStopSubagentReachesParentAgent(t *testing.T) {
 
 	select {
 	case text := <-seen:
-		if !strings.Contains(text, `"status":"killed"`) || !strings.Contains(text, `"reason":"user_stop"`) || !strings.Contains(text, "was stopped by user") {
+		if !strings.Contains(text, "<status>killed</status>") || !strings.Contains(text, "<reason>user_stop</reason>") || !strings.Contains(text, "was stopped by user") {
 			t.Fatalf("parent notification = %q, want killed user_stop payload", text)
 		}
 	case <-time.After(3 * time.Second):

@@ -339,13 +339,22 @@ func TestSubagentRefreshLoopIsSingleOwner(t *testing.T) {
 	if _, cmd := m.Update(subagentRefreshMsg{}); cmd == nil {
 		t.Fatal("refresh tick did not renew the chain after renewal")
 	}
-	// 4.最后一个任务结束后整条链必须停止
+	// 4.终态任务仍留在面板时链必须保持存活(已有链时不再开新链)
 	done := []SubagentTaskView{{ID: "agent-1", AgentType: "Explore", Status: "completed", Description: "inspect"}}
-	if _, cmd := m.Update(SubagentSnapshotMsg{Snapshot: SubagentSnapshot{Revision: 3, Tasks: done}}); cmd != nil {
-		t.Fatal("refresh chain survived the last running task")
+	m.Update(SubagentSnapshotMsg{Snapshot: SubagentSnapshot{Revision: 3, Tasks: done}})
+	if !m.needsSubagentRefresh() {
+		t.Fatal("terminal task should keep the refresh chain alive until eviction")
+	}
+	// 5.任务被驱逐后快照为空,链必须停止
+	m.Update(SubagentSnapshotMsg{Snapshot: SubagentSnapshot{Revision: 4}})
+	if m.needsSubagentRefresh() {
+		t.Fatal("refresh should stop once every task is evicted")
+	}
+	if _, cmd := m.Update(subagentRefreshMsg{}); cmd != nil {
+		t.Fatal("refresh chain survived eviction of the last task")
 	}
 	if m.subagentRefreshRunning {
-		t.Fatal("refresh loop flag was left set after completion")
+		t.Fatal("refresh loop flag was left set after eviction")
 	}
 }
 

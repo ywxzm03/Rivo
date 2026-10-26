@@ -2,13 +2,14 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
@@ -22,6 +23,14 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
 	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
 	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
+)
+
+const (
+	// evictInterval 是终态任务驱逐的轮询间隔,与面板宽限期同一量级
+	evictInterval = time.Second
+	// notificationRetryDelay 是通知唤醒被 operation 拒绝后的重试间隔。
+	// 用户 run 可能持续很久,重试必须足够稀疏,只在槽位释放后尽快补投
+	notificationRetryDelay = 250 * time.Millisecond
 )
 
 type App struct {
@@ -47,6 +56,11 @@ type App struct {
 	modelFallback string
 	// notifyQueue 把子任务终态通知转成一次后台 run;缓冲 1 让重复通知合并
 	notifyQueue chan struct{}
+	// evictStop 关闭时停止驱逐定时器;与 notifyQueue 分开,
+	// 避免关闭信号被通知循环当成一次待消费通知。
+	// 通道本身只读,关闭动作由 evictStopOnce 保证只执行一次
+	evictStop     chan struct{}
+	evictStopOnce sync.Once
 	// closed 在进程收尾时置位,让通知循环退出而不是继续起 run
 	closed atomic.Bool
 	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
@@ -294,10 +308,13 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		subagentRunner: runner,
 		tools:          tools,
 		notifyQueue:    make(chan struct{}, 1),
+		evictStop:      make(chan struct{}),
 	}
 	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
 	manager.Store().SetNotifyHook(app.wakeForNotification)
 	go app.runNotificationLoop()
+	// 终态任务的驱逐不能只靠请求边界:用户不再发消息时面板会一直留着旧任务行
+	go app.runEvictionLoop()
 	return app, nil
 }
 
@@ -315,7 +332,9 @@ func (a *App) wakeForNotification() {
 }
 
 // runNotificationLoop 消费唤醒信号。用 Continue 驱动空请求,
-// 通知作为 transient 附件挂在这一轮请求上,不写入主 session
+// 通知作为 transient 附件挂在这一轮请求上,不写入主 session。
+// Start 被运行中的操作拒绝时不能丢弃信号:否则通知会一直留在队列里,
+// 只能等用户下次输入才投递
 func (a *App) runNotificationLoop() {
 	for range a.notifyQueue {
 		if a.closed.Load() {
@@ -326,12 +345,47 @@ func (a *App) runNotificationLoop() {
 		}
 		op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, NotificationOnly: true})
 		if err != nil {
-			// 用户操作正在进行:它的收尾会重新检查通知队列,这里不重试
+			a.retryNotificationWake()
 			continue
 		}
 		// 收尾一定落在操作真正结束后,不依赖 AgentEndEvent 是否成功送达
 		op.Wait()
 		a.notifyBackgroundRunEnd()
+	}
+}
+
+// retryNotificationWake 在 Start 被拒后重新排队一次唤醒。
+// 延迟重试避免占满 CPU;同一时刻只保留一个待处理信号
+func (a *App) retryNotificationWake() {
+	if a.closed.Load() {
+		return
+	}
+	time.AfterFunc(notificationRetryDelay, func() {
+		if a.closed.Load() {
+			return
+		}
+		a.wakeForNotification()
+	})
+}
+
+// runEvictionLoop 每秒回收宽限期已过的终态任务。
+// 只靠请求边界驱逐不够:用户不再发消息时终态任务会永久留在 store 里,
+// TUI 任务行也就一直不消失
+func (a *App) runEvictionLoop() {
+	stop := a.evictStop
+	ticker := time.NewTicker(evictInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			store := a.SubagentStore()
+			if store == nil {
+				return
+			}
+			store.EvictExpired()
+		}
 	}
 }
 
@@ -353,22 +407,69 @@ func (a *App) SetBackgroundRunHook(hook func()) {
 	a.backgroundMu.Unlock()
 }
 
-// subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息
+// subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息。
+// 用 XML 标签而不是 JSON:模型按标签定位字段比解析 JSON 更稳,
+// 空字段整段省略,避免模型把空串当成有效结果
 func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Message {
 	if len(notifications) == 0 {
 		return nil
 	}
 	result := make([]llm.Message, 0, len(notifications))
 	for _, notification := range notifications {
-		payload, err := json.Marshal(notification)
-		if err != nil {
-			continue
-		}
 		result = append(result, llm.UserMessage{Content: []llm.Content{llm.TextContent{
-			Text: "<task-notification>\n" + string(payload) + "\n</task-notification>",
+			Text: renderNotification(notification),
 		}}})
 	}
 	return result
+}
+
+// renderNotification 渲染单条 <task-notification>。
+// summary 与 result 来自模型输出,必须转义后写入,否则会破坏标签结构
+func renderNotification(notification taskpkg.Notification) string {
+	var b strings.Builder
+	b.WriteString("<task-notification>\n")
+	writeNotificationTag(&b, "task-id", notification.TaskID)
+	writeNotificationTag(&b, "tool-use-id", notification.ToolUseID)
+	writeNotificationTag(&b, "output-file", notification.OutputFile)
+	writeNotificationTag(&b, "status", string(notification.Status))
+	writeNotificationTag(&b, "reason", string(notification.Reason))
+	writeNotificationTag(&b, "summary", notification.Summary)
+	writeNotificationTag(&b, "result", notification.Result)
+	// usage 与 worktree 是聚合段:任一子字段有值才输出整段
+	if notification.TotalTokens > 0 || notification.ToolUses > 0 || notification.DurationMs > 0 {
+		b.WriteString("<usage>")
+		if notification.TotalTokens > 0 {
+			fmt.Fprintf(&b, "<total_tokens>%d</total_tokens>", notification.TotalTokens)
+		}
+		if notification.ToolUses > 0 {
+			fmt.Fprintf(&b, "<tool_uses>%d</tool_uses>", notification.ToolUses)
+		}
+		if notification.DurationMs > 0 {
+			fmt.Fprintf(&b, "<duration_ms>%d</duration_ms>", notification.DurationMs)
+		}
+		b.WriteString("</usage>\n")
+	}
+	if notification.WorktreePath != "" {
+		b.WriteString("<worktree>")
+		writeNotificationTag(&b, "worktreePath", notification.WorktreePath)
+		b.WriteString("</worktree>\n")
+	}
+	b.WriteString("</task-notification>")
+	return b.String()
+}
+
+// writeNotificationTag 只写有值的字段,空值整段省略
+func writeNotificationTag(b *strings.Builder, tag, value string) {
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(b, "<%s>%s</%s>\n", tag, escapeNotificationText(value), tag)
+}
+
+// escapeNotificationText 转义会破坏标签结构的字符
+func escapeNotificationText(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return replacer.Replace(value)
 }
 
 // SubagentStore 暴露根任务存储，供 TUI 投影与操作
@@ -399,6 +500,8 @@ func (a *App) ShutdownSubagents() int {
 	case a.notifyQueue <- struct{}{}:
 	default:
 	}
+	// 驱逐循环独立关闭,避免退出后仍有定时器持有 store
+	a.evictStopOnce.Do(func() { close(a.evictStop) })
 	store := a.SubagentStore()
 	if store == nil {
 		return 0

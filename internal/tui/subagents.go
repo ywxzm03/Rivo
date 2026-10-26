@@ -67,10 +67,11 @@ type SubagentSnapshotMsg struct {
 type subagentRefreshMsg struct{}
 
 // needsSubagentRefresh 判断是否需要继续轮询子任务:
-// 有运行中任务、正在查看某个任务,或主 agent 正在 run
-// (run 期间子任务随时可能被拉起,不轮询就看不到任务行)
+// 有任务留在面板上、正在查看某个任务,或主 agent 正在 run。
+// 终态任务也要继续轮询:驱逐由 store 侧定时器完成,不轮询就永远停在
+// 最后一张快照上,任务行不会消失
 func (m *Model) needsSubagentRefresh() bool {
-	if hasRunningSubagent(m.state.Subagents.Tasks) || m.viewingTaskID != "" {
+	if len(m.state.Subagents.Tasks) > 0 || m.viewingTaskID != "" {
 		return true
 	}
 	return m.busy && m.operationIsRun

@@ -168,3 +168,26 @@ func TestBackgroundRunKeepsSubagentRowsVisible(t *testing.T) {
 		t.Fatalf("background run swallowed task rows:\n%s", view)
 	}
 }
+
+// 终态任务在 store 侧被驱逐后,刷新链必须继续轮询才能让任务行消失。
+// 若只在有 running 任务时轮询,面板会永久停在最后一张快照上
+func TestTerminalTaskKeepsRefreshingUntilEvicted(t *testing.T) {
+	var snapshots int
+	m := New(Snapshot{Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{
+		{ID: "a1", AgentType: "work", Status: "completed", Description: "done"},
+	}}}, Handlers{SubagentSnapshot: func() tea.Cmd {
+		snapshots++
+		return nil
+	}})
+	m.Update(teaWindow(120, 14))
+	// 快照里还有终态任务时必须继续轮询
+	m.Update(subagentRefreshMsg{})
+	if snapshots == 0 {
+		t.Fatal("refresh chain stopped while a terminal task was still listed")
+	}
+	// 任务被驱逐后快照为空,轮询才允许停止
+	m.Update(SubagentSnapshotMsg{Snapshot: SubagentSnapshot{Revision: m.state.Subagents.Revision + 1}})
+	if m.needsSubagentRefresh() {
+		t.Fatal("refresh should stop once the panel is empty")
+	}
+}
