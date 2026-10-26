@@ -10,11 +10,11 @@ import (
 // Coordinator 取消短路也应走 aborted 事件收场（与其他取消路径一致的 UI 语义）
 func TestRunLoopCompactionCancelSettlesWithAborted(t *testing.T) {
 	events := &[]llm.AgentEvent{}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, silentCancelStreamFn(), func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{}, Stream: silentCancelStreamFn(), Events: func(event llm.AgentEvent) error {
 		*events = append(*events, event)
 		return nil
-	})
-	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, context.Canceled }
+	}})
+	a.hooks.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, context.Canceled }
 	ctx := context.Background()
 	message, err := a.Run(ctx, "hello")
 	if err != nil {

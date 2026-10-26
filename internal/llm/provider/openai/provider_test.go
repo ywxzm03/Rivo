@@ -2,59 +2,55 @@ package openai
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/testutil"
 )
 
-func TestNewRegistersBuiltinModels(t *testing.T) {
-	p := New(Config{APIKey: "test-key"})
-
-	var found bool
-	for _, m := range p.Models() {
-		if m.ID != DefaultModel {
-			continue
-		}
-		found = true
-		if m.API != llm.APIOpenAIResponses {
-			t.Errorf("%s API = %q, want %q", m.ID, m.API, llm.APIOpenAIResponses)
-		}
-		if m.Provider != ProviderID {
-			t.Errorf("%s Provider = %q, want %q", m.ID, m.Provider, ProviderID)
-		}
-		if !m.SupportsImages {
-			t.Errorf("%s SupportsImages = false, want true", m.ID)
-		}
-	}
-	if !found {
-		t.Errorf("Models() lacks default model %q", DefaultModel)
-	}
+// 内置模型目录与默认模型的元数据由共享契约断言校验，这里只声明差异
+func TestBuiltinProviderContract(t *testing.T) {
+	testutil.AssertProviderContract(t, func() testutil.Provider {
+		return New(Config{APIKey: "test-key"})
+	}, testutil.ProviderContract{
+		ProviderID:     ProviderID,
+		DefaultModel:   DefaultModel,
+		Models:         []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"},
+		ContextWindow:  1_050_000,
+		MaxTokens:      128_000,
+		DefaultAPI:     llm.APIOpenAIResponses,
+		SupportsImages: true,
+	})
 }
 
-func TestNewAcceptsEmptyConfig(t *testing.T) {
-	if p := New(Config{}); p == nil {
-		t.Fatal("New() = nil, want non-nil")
-	}
-}
+// Stream 必须把两种协议都路由到对应实现，而不是只支持一种
+func TestStreamRoutesBothProtocols(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 两种协议都返回空流，只验证路由成功
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
 
-func TestBuiltinModelCatalog(t *testing.T) {
-	models := New(Config{}).Models()
-	want := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"}
-	if len(models) != len(want) {
-		t.Fatalf("model count = %d, want %d", len(models), len(want))
-	}
-	for i, model := range models {
-		if model.ID != want[i] || model.ContextWindow != 1_050_000 || model.MaxTokens != 128_000 {
-			t.Errorf("model[%d] = %+v, want %s with current limits", i, model, want[i])
-		}
+	p := New(Config{APIKey: "test-key", BaseURL: server.URL})
+	for _, api := range []llm.API{llm.APIOpenAIResponses, llm.APIOpenAICompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			events, err := p.Stream(ctx, llm.Model{ID: DefaultModel, API: api, Provider: ProviderID}, llm.Context{}, llm.Options{})
+			if err != nil {
+				t.Fatalf("Stream(%s) error = %v, want the request to be routed", api, err)
+			}
+			// 排空通道，避免客户端 goroutine 泄漏
+			for range events {
+			}
+		})
 	}
 }
 
 func TestStreamRejectsUnknownProtocol(t *testing.T) {
-	p := New(Config{})
-	_, err := p.Stream(context.Background(),
-		llm.Model{ID: DefaultModel, API: llm.API("unknown")}, llm.Context{}, llm.Options{})
-	if err == nil {
-		t.Error("Stream() error = nil, want a protocol mismatch error")
-	}
+	testutil.AssertRejectsUnknownProtocol(t, New(Config{}), DefaultModel)
 }

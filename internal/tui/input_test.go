@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestTerminalWrappersPreserveFileDescriptor(t *testing.T) {
@@ -216,9 +215,9 @@ func TestInputReaderRoutesShiftLeftToDequeue(t *testing.T) {
 func TestInputReaderRoutesShiftRightToFollowUp(t *testing.T) {
 	model := testModel(80, 24)
 	restored := 0
-	model.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+	model.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
 		restored++
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
+		return []ComposerPayload{textPayload("queued follow-up")}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
@@ -38,9 +39,9 @@ func TestExecuteStopsAgentTask(t *testing.T) {
 		Type:        taskpkg.TypeAgent,
 		Description: "long task",
 		AgentType:   "Work",
-		Runtime: &taskpkg.AgentRuntime{
-			Cancel: func() { close(cancelled) },
-			Done:   make(chan struct{}),
+		Runtime: &subagent.AgentRuntime{
+			Cancel:   func() { close(cancelled) },
+			DoneChan: make(chan struct{}),
 		},
 	})
 	if err != nil {

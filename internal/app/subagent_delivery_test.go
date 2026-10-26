@@ -13,8 +13,9 @@ import (
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
-// panelGraceWait 覆盖 panelGracePeriod 加上驱逐 tick 的抖动
-const panelGraceWait = 45 * time.Second
+// panelGraceWait 是注入宽限期与轮询间隔后的等待上限，
+// 毫秒级配置让驱逐路径不必真等 30 秒
+const panelGraceWait = 2 * time.Second
 
 // evictOnlyApp 返回一个不会自动消费通知的 App,供驱逐测试单独观察 store
 func evictOnlyApp(t *testing.T) *App {
@@ -31,6 +32,9 @@ func TestEvictionLoopEvictsWithoutUserInput(t *testing.T) {
 	a := evictOnlyApp(t)
 	defer a.ShutdownSubagents()
 	store := a.SubagentStore()
+	// 注入毫秒级宽限期与轮询间隔，覆盖同一段生产代码而不真等
+	store.GracePeriod = 10 * time.Millisecond
+	a.SetEvictionInterval(5 * time.Millisecond)
 	taskID, token, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "idle job", AgentType: "explore"})
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +52,7 @@ func TestEvictionLoopEvictsWithoutUserInput(t *testing.T) {
 		if _, ok := store.Task(taskID); !ok {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("terminal task survived %v without any user input", panelGraceWait)
 }
@@ -61,7 +65,7 @@ func TestNotificationInjectedDuringActiveRun(t *testing.T) {
 	var mu sync.Mutex
 	var sawNotification bool
 	rounds := 0
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		for _, message := range c.Messages {
 			user, ok := message.(llm.UserMessage)
 			if !ok {
@@ -90,7 +94,7 @@ func TestNotificationInjectedDuringActiveRun(t *testing.T) {
 		}
 		close(events)
 		return events, nil
-	}
+	})
 	store := a.SubagentStore()
 	taskID, token, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "mid run", AgentType: "explore"})
 	if err != nil {
@@ -118,7 +122,7 @@ func TestStartRejectedRetriesNotification(t *testing.T) {
 	defer a.ShutdownSubagents()
 	block := make(chan struct{})
 	var calls atomic.Int64
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		if calls.Add(1) == 1 {
 			<-block
 		}
@@ -126,7 +130,7 @@ func TestStartRejectedRetriesNotification(t *testing.T) {
 		events <- llm.AssistantMessageDoneEvent{Message: &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}}}
 		close(events)
 		return events, nil
-	}
+	})
 	store := a.SubagentStore()
 	// 1.占住 operation 槽位
 	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "busy"})

@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
@@ -41,7 +42,7 @@ With --print, the prompt comes from positional arguments or piped stdin.
 `
 
 func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
@@ -50,7 +51,7 @@ func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // repl 组装 Agent 并进入交互模式，continueRecent 为 true 时恢复最近会话
-func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
+func repl(cfg provider.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
 	target := sessionTarget{kind: targetNew}
 	if continueRecent {
 		target.kind = targetRecent
@@ -58,7 +59,7 @@ func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr i
 	return replTarget(cfg, target, stdin, stdout, stderr)
 }
 
-func replTarget(cfg app.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
+func replTarget(cfg provider.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if warning, ok := ev.(llm.WarningEvent); ok {
 			_, err := fmt.Fprintf(stderr, "[warning] %s\n", warning.Message)
@@ -136,7 +137,7 @@ func replTarget(cfg app.Config, target sessionTarget, stdin io.Reader, stdout, s
 }
 
 // resumeRecentApp 恢复最近会话，无会话时静默新建
-func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, error) {
+func resumeRecentApp(cfg provider.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get working directory: %w", err)
@@ -166,7 +167,7 @@ type sessionTarget struct {
 	id   string
 }
 
-func openSessionTarget(cfg app.Config, target sessionTarget, onEvent llm.AgentEventSink) (*app.App, error) {
+func openSessionTarget(cfg provider.Config, target sessionTarget, onEvent llm.AgentEventSink) (*app.App, error) {
 	switch target.kind {
 	case targetRecent:
 		return resumeRecentApp(cfg, onEvent)
@@ -388,7 +389,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// 2.加载运行配置并应用 CLI 覆盖
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
@@ -396,7 +397,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 	}
-	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, effortArg); err != nil {
+	if err := provider.ApplyOverrides(&cfg, providerArg, modelArg, effortArg); err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
@@ -501,7 +502,7 @@ type promptRunner interface {
 }
 
 // printMode 非交互执行一轮，运行错误或 error/aborted 收场时打到 stderr 并返回 1
-func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
+func printMode(cfg provider.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
 	var run promptRunner
 	if len(runner) > 0 {
 		run = runner[0]
@@ -546,7 +547,7 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 	return 0
 }
 
-func printModeTarget(cfg app.Config, prompt string, target sessionTarget, stdout, stderr io.Writer) int {
+func printModeTarget(cfg provider.Config, prompt string, target sessionTarget, stdout, stderr io.Writer) int {
 	a, err := openSessionTarget(cfg, target, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)

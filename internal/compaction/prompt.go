@@ -50,12 +50,6 @@ const summarizeUpdatePrompt = `The messages above are the conversation since the
 // turnPrefixPrompt split turn 轮次前缀的摘要提示词
 const turnPrefixPrompt = `The messages above are the beginning of the current conversation turn, which is too long to keep in context. Summarize what the user asked for at the start of this turn and what the assistant has done so far, including any intermediate results needed to continue the turn. Preserve exact file paths, function names, and error messages.`
 
-// compactionSummaryPrefix 摘要回插上下文时的包装文本，session 包复用同一常量保证回放一致
-const (
-	compactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
-	compactionSummarySuffix = "\n</summary>"
-)
-
 func BuildSummarizePrompt(conversation, instructions string) string {
 	return withFocus("<conversation>\n"+conversation+"\n</conversation>\n\n"+summarizeBasePrompt, instructions)
 }
@@ -78,8 +72,4 @@ func withFocus(prompt, instructions string) string {
 
 func MergeSummaries(history, turnPrefix string) string {
 	return history + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefix
-}
-
-func WrappedSummary(summary string) string {
-	return compactionSummaryPrefix + summary + compactionSummarySuffix
 }

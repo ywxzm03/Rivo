@@ -7,8 +7,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
-	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
@@ -64,7 +65,7 @@ func TestCompactionVisibilityUsesContextKindAndSessionNamespace(t *testing.T) {
 	if len(first) != 1 || first[0].Role != "user" || first[0].Text != text || first[0].ID == second[0].ID {
 		t.Fatal("ordinary text or session namespace was lost")
 	}
-	view.Entries[0].Kind = compaction.ContextCompaction
+	view.Entries[0].Kind = ctxview.ContextCompaction
 	if len(one.projectContext(view)) != 0 || len(two.projectContext(view)) != 0 {
 		t.Fatal("compaction entry appeared in the transcript")
 	}
@@ -85,7 +86,7 @@ func TestAgentEndSendsOnlyChangedBlocksWithLongHistory(t *testing.T) {
 
 func TestSnapshotIncludesAllConfiguredModels(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

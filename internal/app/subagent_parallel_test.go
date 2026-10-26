@@ -17,7 +17,7 @@ func TestMainAgentRunsWhileSubagentIsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.agent.StreamFn = notifyStream("first reply", "second reply")
+	a.agent.SetStream(notifyStream("first reply", "second reply"))
 
 	store := a.SubagentStore()
 	taskID, _, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "long job", AgentType: "explore"})
@@ -46,11 +46,11 @@ func TestKillDuringMainRunDeliversNotification(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	inner := notifyStream("done")
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		// 第一轮卡住,让 kill 发生在主 agent 运行期间
 		once.Do(func() { <-release })
 		return inner(ctx, model, c, opts)
-	}
+	})
 	store := a.SubagentStore()
 	taskID, _, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "victim", AgentType: "explore"})
 	if err != nil {

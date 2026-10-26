@@ -73,8 +73,8 @@ func TestAgentPricesAssistantUsageBeforeCommit(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}}, llm.Context{}, streamFn, nil)
-	a.CommitMessages = func([]llm.Message) ([]string, error) { return nil, nil }
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}}, Context: llm.Context{}, Stream: streamFn, Events: nil})
+	a.hooks.CommitMessages = func([]llm.Message) ([]string, error) { return nil, nil }
 	reply, err := a.Run(context.Background(), "hello")
 	if err != nil {
 		t.Fatal(err)
@@ -126,12 +126,7 @@ func TestAgentPassesSessionIDToModelRequest(t *testing.T) {
 		return ch, nil
 	}
 
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}, SessionID: "session-agent"},
-		llm.Context{},
-		streamFn,
-		nil,
-	)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}, SessionID: "session-agent"}, Context: llm.Context{}, Stream: streamFn, Events: nil})
 	if _, err := a.Run(context.Background(), "hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -165,9 +160,9 @@ func TestAgentClearsCurrentUserIDWhenCommitReturnsNoID(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{tool}}, streamFn, nil)
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{tool}}, Stream: streamFn, Events: nil})
 	commits := 0
-	agent.CommitMessages = func([]llm.Message) ([]string, error) {
+	agent.hooks.CommitMessages = func([]llm.Message) ([]string, error) {
 		commits++
 		if commits == 1 {
 			return []string{"u1"}, nil
@@ -199,12 +194,7 @@ func TestAgentRunToolLoop(t *testing.T) {
 	)
 
 	ping := &fakeTool{name: "ping"}
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{ping}},
-		streamFn,
-		nil,
-	)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{Tools: []llm.Tool{ping}}, Stream: streamFn, Events: nil})
 
 	reply, err := a.Run(context.Background(), "hi")
 	if err != nil {
@@ -221,11 +211,11 @@ func TestAgentRunToolLoop(t *testing.T) {
 		t.Errorf("reply.Content = %+v", reply.Content)
 	}
 
-	if got := len(a.AgentContext.Messages); got != 4 {
+	if got := len(a.Context().Messages); got != 4 {
 		t.Errorf("history has %d messages, want 4", got)
 	}
-	if _, ok := a.AgentContext.Messages[0].(llm.UserMessage); !ok {
-		t.Errorf("Messages[0] = %T, want UserMessage", a.AgentContext.Messages[0])
+	if _, ok := a.Context().Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("Messages[0] = %T, want UserMessage", a.Context().Messages[0])
 	}
 }
 
@@ -246,23 +236,23 @@ func TestAgentSteeringConsumesOneMessageAfterEachCompletedResponse(t *testing.T)
 		}
 		return nil
 	}
-	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, onEvent)
+	agent = New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: onEvent})
 	if _, err := agent.Run(context.Background(), "initial"); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 3 {
 		t.Fatalf("stream calls = %d, want 3", calls)
 	}
-	if len(agent.AgentContext.Messages) != 6 {
-		t.Fatalf("messages = %d, want initial/first/steering/second/steering/third", len(agent.AgentContext.Messages))
+	if len(agent.Context().Messages) != 6 {
+		t.Fatalf("messages = %d, want initial/first/steering/second/steering/third", len(agent.Context().Messages))
 	}
-	if got := messageText(agent.AgentContext.Messages[2]); got != "correct this" {
+	if got := messageText(agent.Context().Messages[2]); got != "correct this" {
 		t.Fatalf("steering message = %q, want correct this", got)
 	}
-	if got := messageText(agent.AgentContext.Messages[4]); got != "then explain" {
+	if got := messageText(agent.Context().Messages[4]); got != "then explain" {
 		t.Fatalf("second steering message = %q, want then explain", got)
 	}
-	if agent.HasSteering() {
+	if agent.Len(QueueSteering) > 0 {
 		t.Fatal("steering queue not drained")
 	}
 }
@@ -284,11 +274,11 @@ func TestAgentFollowUpConsumesOneMessagePerSuccessorRun(t *testing.T) {
 		}
 		return nil
 	}
-	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, onEvent)
+	agent = New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: onEvent})
 	if _, err := agent.Run(context.Background(), "initial"); err != nil {
 		t.Fatal(err)
 	}
-	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"first follow-up", "second follow-up"}) {
+	if got := agent.Messages(QueueFollowUp); !reflect.DeepEqual(got, []string{"first follow-up", "second follow-up"}) {
 		t.Fatalf("follow-up queue after initial run = %v", got)
 	}
 	first, err := agent.ContinueFollowUp(context.Background())
@@ -298,7 +288,7 @@ func TestAgentFollowUpConsumesOneMessagePerSuccessorRun(t *testing.T) {
 	if got := first.Content[0].(llm.TextContent).Text; got != "first follow-up reply" {
 		t.Fatalf("first successor reply = %q", got)
 	}
-	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"second follow-up"}) {
+	if got := agent.Messages(QueueFollowUp); !reflect.DeepEqual(got, []string{"second follow-up"}) {
 		t.Fatalf("follow-up queue after first successor = %v", got)
 	}
 	second, err := agent.ContinueFollowUp(context.Background())
@@ -308,7 +298,7 @@ func TestAgentFollowUpConsumesOneMessagePerSuccessorRun(t *testing.T) {
 	if got := second.Content[0].(llm.TextContent).Text; got != "second follow-up reply" {
 		t.Fatalf("second successor reply = %q", got)
 	}
-	if agent.HasFollowUp() {
+	if agent.Len(QueueFollowUp) > 0 {
 		t.Fatal("follow-up queue not drained")
 	}
 }
@@ -318,13 +308,13 @@ func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	sentinel := errors.New("storage unavailable")
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
 	var agent *Agent
-	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	agent = New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		if _, ok := event.(llm.TurnEndEvent); ok {
 			return agent.Steer("pending")
 		}
 		return nil
-	})
-	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+	}})
+	agent.hooks.CommitMessages = func(messages []llm.Message) ([]string, error) {
 		commits++
 		if commits == 3 {
 			return []string{"pending-entry"}, sentinel
@@ -338,10 +328,10 @@ func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want storage error", err)
 	}
-	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "pending" {
+	if got := agent.Messages(QueueSteering); len(got) != 1 || got[0] != "pending" {
 		t.Fatalf("steering queue = %v, want pending message restored", got)
 	}
-	if !agent.AcknowledgeSteering("pending") || agent.HasSteering() {
+	if !agent.Acknowledge(QueueSteering, func(p PendingPayload) bool { return p.Text == "pending" }) || agent.Len(QueueSteering) > 0 {
 		t.Fatal("retried pending steering was not acknowledged")
 	}
 }
@@ -349,8 +339,8 @@ func TestAgentSteeringRestoresAfterHostCommitFailure(t *testing.T) {
 func TestAgentRunMessagePersistsImageContent(t *testing.T) {
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
 	var committed []llm.Message
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: nil})
+	agent.hooks.CommitMessages = func(messages []llm.Message) ([]string, error) {
 		committed = append(committed, messages...)
 		return []string{"user"}, nil
 	}
@@ -379,14 +369,14 @@ func TestAgentSteeringEmitsMessageStartOnlyAfterCommitSuccess(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}},
 	)
 	var agent *Agent
-	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	agent = New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		if _, ok := event.(llm.TurnEndEvent); ok && commits == 2 {
 			return agent.Steer("retry")
 		}
 		return nil
-	})
-	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+	}})
+	agent.hooks.CommitMessages = func(messages []llm.Message) ([]string, error) {
 		commits++
 		if commits == 3 {
 			return []string{"pending-entry"}, sentinel
@@ -420,8 +410,8 @@ func TestAgentFollowUpRestoresAfterHostCommitFailure(t *testing.T) {
 	sentinel := errors.New("storage unavailable")
 	var commits int
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	agent.CommitMessages = func(messages []llm.Message) ([]string, error) {
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: nil})
+	agent.hooks.CommitMessages = func(messages []llm.Message) ([]string, error) {
 		commits++
 		// 第 1 次是 initial user，第 2 次是 initial assistant，第 3 次是 follow-up user
 		if commits == 3 {
@@ -438,7 +428,7 @@ func TestAgentFollowUpRestoresAfterHostCommitFailure(t *testing.T) {
 	if _, err := agent.ContinueFollowUp(context.Background()); !errors.Is(err, sentinel) {
 		t.Fatalf("ContinueFollowUp() error = %v, want storage error", err)
 	}
-	if got := agent.FollowUpMessages(); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
+	if got := agent.Messages(QueueFollowUp); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
 		t.Fatalf("follow-up queue = %v, want restored message", got)
 	}
 	// 同文本 steering 不得被 follow-up 的确认误删
@@ -446,13 +436,13 @@ func TestAgentFollowUpRestoresAfterHostCommitFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "pending follow-up"}}}
-	if !agent.AcknowledgePendingMessage(message) {
+	if !agent.AcknowledgePending(PayloadFromMessage(message)) {
 		t.Fatal("pending follow-up was not acknowledged")
 	}
-	if agent.HasFollowUp() {
+	if agent.Len(QueueFollowUp) > 0 {
 		t.Fatal("acknowledged follow-up remained queued")
 	}
-	if got := agent.SteeringMessages(); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
+	if got := agent.Messages(QueueSteering); !reflect.DeepEqual(got, []string{"pending follow-up"}) {
 		t.Fatalf("steering queue = %v, want untouched same-text steering", got)
 	}
 }
@@ -460,8 +450,8 @@ func TestAgentFollowUpRestoresAfterHostCommitFailure(t *testing.T) {
 func TestAgentSteeringRestoresWhenHostRejectsWithoutEntryID(t *testing.T) {
 	sentinel := errors.New("pending submission already exists")
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
-	agent.CommitMessages = func([]llm.Message) ([]string, error) {
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: nil})
+	agent.hooks.CommitMessages = func([]llm.Message) ([]string, error) {
 		return []string{""}, sentinel
 	}
 	if err := agent.Steer("retry me"); err != nil {
@@ -470,7 +460,7 @@ func TestAgentSteeringRestoresWhenHostRejectsWithoutEntryID(t *testing.T) {
 	if _, err := agent.Run(context.Background(), "initial"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want pending submission error", err)
 	}
-	if got := agent.SteeringMessages(); len(got) != 1 || got[0] != "retry me" {
+	if got := agent.Messages(QueueSteering); len(got) != 1 || got[0] != "retry me" {
 		t.Fatalf("steering queue = %v, want retry me", got)
 	}
 }
@@ -478,14 +468,14 @@ func TestAgentSteeringRestoresWhenHostRejectsWithoutEntryID(t *testing.T) {
 func TestAgentSteeringClaimPreventsDequeueDuplicate(t *testing.T) {
 	streamFn := doneStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}})
 	var agent *Agent
-	var restored []string
-	agent = NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	var restored []PendingPayload
+	agent = New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		start, ok := event.(llm.MessageStartEvent)
 		if ok && messageText(start.Message) == "queued" {
-			restored = agent.TakeSteering()
+			restored = agent.Take(QueueSteering)
 		}
 		return nil
-	})
+	}})
 	if err := agent.Steer("queued"); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +486,7 @@ func TestAgentSteeringClaimPreventsDequeueDuplicate(t *testing.T) {
 		t.Fatalf("dequeue during claim returned %+v, want empty", restored)
 	}
 	users := 0
-	for _, message := range agent.AgentContext.Messages {
+	for _, message := range agent.Context().Messages {
 		if messageText(message) == "queued" {
 			users++
 		}
@@ -551,10 +541,10 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 		}
 		return nil
 	}
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{
 		makeTool("first", firstRelease),
 		makeTool("second", secondRelease),
-	}}, streamFn, onEvent)
+	}}, Stream: streamFn, Events: onEvent})
 
 	type runResult struct {
 		err error
@@ -591,13 +581,13 @@ func TestAgentRunsParallelToolsAndKeepsCallOrder(t *testing.T) {
 	if got := calls; got != 2 {
 		t.Fatalf("StreamFn called %d times, want 2", got)
 	}
-	firstResult, ok := agent.AgentContext.Messages[2].(llm.ToolResultMessage)
+	firstResult, ok := agent.Context().Messages[2].(llm.ToolResultMessage)
 	if !ok {
-		t.Fatalf("Messages[2] = %T, want ToolResultMessage", agent.AgentContext.Messages[2])
+		t.Fatalf("Messages[2] = %T, want ToolResultMessage", agent.Context().Messages[2])
 	}
-	secondResult, ok := agent.AgentContext.Messages[3].(llm.ToolResultMessage)
+	secondResult, ok := agent.Context().Messages[3].(llm.ToolResultMessage)
 	if !ok {
-		t.Fatalf("Messages[3] = %T, want ToolResultMessage", agent.AgentContext.Messages[3])
+		t.Fatalf("Messages[3] = %T, want ToolResultMessage", agent.Context().Messages[3])
 	}
 	if firstResult.ToolName != "first" || secondResult.ToolName != "second" {
 		t.Fatalf("tool result order = %q, %q; want first, second", firstResult.ToolName, secondResult.ToolName)
@@ -653,11 +643,11 @@ func TestAgentSequentialToolMakesBatchSequential(t *testing.T) {
 		llm.AssistantMessage{Content: toolCalls("first", "sequential", "last"), StopReason: llm.StopReasonToolUse},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}},
 	)
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{
 		makeTool("first", llm.ToolExecutionParallel, firstRelease),
 		makeTool("sequential", llm.ToolExecutionSequential, sequentialRelease),
 		makeTool("last", llm.ToolExecutionParallel, nil),
-	}}, streamFn, nil)
+	}}, Stream: streamFn, Events: nil})
 
 	type runResult struct {
 		err error
@@ -726,7 +716,7 @@ func TestAgentToolErrorDoesNotPreventOtherParallelResults(t *testing.T) {
 		llm.AssistantMessage{Content: toolCalls("failing", "sibling"), StopReason: llm.StopReasonToolUse},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}},
 	)
-	agent := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{failing, sibling}}, streamFn, nil)
+	agent := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{failing, sibling}}, Stream: streamFn, Events: nil})
 
 	runDone := make(chan error, 1)
 	go func() {
@@ -748,13 +738,13 @@ func TestAgentToolErrorDoesNotPreventOtherParallelResults(t *testing.T) {
 		t.Fatal("Agent.Run did not finish")
 	}
 
-	failureResult, ok := agent.AgentContext.Messages[2].(llm.ToolResultMessage)
+	failureResult, ok := agent.Context().Messages[2].(llm.ToolResultMessage)
 	if !ok {
-		t.Fatalf("Messages[2] = %T, want ToolResultMessage", agent.AgentContext.Messages[2])
+		t.Fatalf("Messages[2] = %T, want ToolResultMessage", agent.Context().Messages[2])
 	}
-	siblingResult, ok := agent.AgentContext.Messages[3].(llm.ToolResultMessage)
+	siblingResult, ok := agent.Context().Messages[3].(llm.ToolResultMessage)
 	if !ok {
-		t.Fatalf("Messages[3] = %T, want ToolResultMessage", agent.AgentContext.Messages[3])
+		t.Fatalf("Messages[3] = %T, want ToolResultMessage", agent.Context().Messages[3])
 	}
 	if !failureResult.IsError || failureResult.ToolName != "failing" {
 		t.Fatalf("failure result = %+v, want failing isError result", failureResult)
@@ -782,17 +772,17 @@ func TestAgentRunUnknownTool(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}},
 	)
 
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: nil})
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := len(a.AgentContext.Messages); got != 4 {
+	if got := len(a.Context().Messages); got != 4 {
 		t.Fatalf("history has %d messages, want 4", got)
 	}
-	tr, ok := a.AgentContext.Messages[2].(llm.ToolResultMessage)
+	tr, ok := a.Context().Messages[2].(llm.ToolResultMessage)
 	if !ok {
-		t.Fatalf("Messages[2] = %T, want ToolResultMessage", a.AgentContext.Messages[2])
+		t.Fatalf("Messages[2] = %T, want ToolResultMessage", a.Context().Messages[2])
 	}
 	if !tr.IsError {
 		t.Error("unknown tool result isError = false, want true")
@@ -816,14 +806,14 @@ func TestAgentRunEmitsLifecycleEventsAndAssistantUpdates(t *testing.T) {
 		return ch, nil
 	}
 	var events []llm.AgentEvent
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{
 		ID:       "model-id",
 		Provider: "provider-id",
 		API:      llm.APIOpenAIResponses,
-	}}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	}}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		return nil
-	})
+	}})
 
 	message, err := a.Run(context.Background(), "hi")
 	if err != nil {
@@ -897,7 +887,7 @@ func TestAgentAccumulatesIndexedEventsWithoutPartialSnapshots(t *testing.T) {
 		return ch, nil
 	}
 	var updates []llm.AssistantMessage
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		update, ok := event.(llm.MessageUpdateEvent)
 		if !ok {
 			return nil
@@ -908,7 +898,7 @@ func TestAgentAccumulatesIndexedEventsWithoutPartialSnapshots(t *testing.T) {
 		}
 		updates = append(updates, message)
 		return nil
-	})
+	}})
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -940,10 +930,10 @@ func TestAgentRunStreamError(t *testing.T) {
 		return ch, nil
 	}
 	var events []llm.AgentEvent
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		return nil
-	})
+	}})
 	message, err := a.Run(context.Background(), "hi")
 	if !errors.Is(err, sentinel) {
 		t.Errorf("err = %v, want boom", err)
@@ -958,7 +948,7 @@ func TestAgentRunStreamError(t *testing.T) {
 	if !ok || errorText.Text != sentinel.Error() {
 		t.Errorf("error assistant content = %+v, want original error", message.Content)
 	}
-	if got := len(a.AgentContext.Messages); got != 2 {
+	if got := len(a.Context().Messages); got != 2 {
 		t.Fatalf("context messages = %d, want user and error assistant", got)
 	}
 	if len(events) < 2 || events[len(events)-2].Type() != llm.AgentEventMessageEnd || events[len(events)-1].Type() != llm.AgentEventAgentEnd {
@@ -985,13 +975,13 @@ func TestAgentEventSinkErrorStopsRunAndCancelsModelStream(t *testing.T) {
 		return ch, nil
 	}
 	var events []llm.AgentEvent
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		if event.Type() == llm.AgentEventMessageUpdate {
 			return sentinel
 		}
 		return nil
-	})
+	}})
 	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want sink error", err)
 	}
@@ -1033,13 +1023,13 @@ func TestAgentToolEventSinkErrorCancelsOtherParallelTools(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "must not run"}}},
 	)
 	var events []llm.AgentEvent
-	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{fast, slow}}, streamFn, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{fast, slow}}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		if end, ok := event.(llm.ToolExecutionEndEvent); ok && end.ToolName == "fast" {
 			return sentinel
 		}
 		return nil
-	})
+	}})
 	if _, err := a.Run(context.Background(), "hi"); !errors.Is(err, sentinel) {
 		t.Fatalf("Run() error = %v, want sink error", err)
 	}
@@ -1081,7 +1071,7 @@ func blockedStreamFn(started chan struct{}, release chan struct{}) llm.StreamFn 
 func TestAgentRunSerializesConcurrentRuns(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, blockedStreamFn(started, release), nil)
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: blockedStreamFn(started, release), Events: nil})
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -1109,11 +1099,11 @@ func TestAgentRunSerializesConcurrentRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 两次运行的消息在会话中按序成对，不互相混入
-	if len(a.AgentContext.Messages) != 4 {
-		t.Fatalf("messages = %d, want 4", len(a.AgentContext.Messages))
+	if len(a.Context().Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(a.Context().Messages))
 	}
 	for i, want := range []string{"first", "ok", "second", "ok"} {
-		message := a.AgentContext.Messages[i]
+		message := a.Context().Messages[i]
 		if i%2 == 1 {
 			assistant, ok := message.(llm.AssistantMessage)
 			if !ok || len(assistant.Content) != 1 {
@@ -1137,7 +1127,7 @@ func TestAgentRunSerializesConcurrentRuns(t *testing.T) {
 func TestAgentRunCanceledWhileQueued(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, blockedStreamFn(started, release), nil)
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: blockedStreamFn(started, release), Events: nil})
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -1158,15 +1148,15 @@ func TestAgentRunCanceledWhileQueued(t *testing.T) {
 	if err := <-secondDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("second Run() error = %v, want context.Canceled", err)
 	}
-	if len(a.AgentContext.Messages) != 1 {
-		t.Fatalf("messages = %d, want 1", len(a.AgentContext.Messages))
+	if len(a.Context().Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(a.Context().Messages))
 	}
-	user, ok := a.AgentContext.Messages[0].(llm.UserMessage)
+	user, ok := a.Context().Messages[0].(llm.UserMessage)
 	if !ok || len(user.Content) != 1 {
-		t.Fatalf("message 0 = %#v, want user message", a.AgentContext.Messages[0])
+		t.Fatalf("message 0 = %#v, want user message", a.Context().Messages[0])
 	}
 	if text, ok := user.Content[0].(llm.TextContent); !ok || text.Text != "first" {
-		t.Fatalf("message 0 = %#v, want text %q", a.AgentContext.Messages[0], "first")
+		t.Fatalf("message 0 = %#v, want text %q", a.Context().Messages[0], "first")
 	}
 	close(release)
 	if err := <-firstDone; err != nil {
@@ -1183,7 +1173,7 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, nil)
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: nil})
 
 	// 守卫空闲且 ctx 已取消时 select 两个分支同时就绪，Run 必须放弃执行而不是随机抢占守卫
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1194,8 +1184,8 @@ func TestAgentRunRejectsCanceledContext(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("StreamFn calls = %d, want 0", calls)
 	}
-	if len(a.AgentContext.Messages) != 0 {
-		t.Fatalf("messages = %d, want 0", len(a.AgentContext.Messages))
+	if len(a.Context().Messages) != 0 {
+		t.Fatalf("messages = %d, want 0", len(a.Context().Messages))
 	}
 }
 
@@ -1208,10 +1198,10 @@ func TestAgentFiltersErrorAssistantFromNextRequest(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{Messages: []llm.Message{
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{Messages: []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "old"}}},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "cancelled"}}, StopReason: llm.StopReasonError},
-	}}, streamFn, nil)
+	}}, Stream: streamFn, Events: nil})
 	if _, err := a.Run(context.Background(), "new"); err != nil {
 		t.Fatal(err)
 	}
@@ -1228,13 +1218,13 @@ func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 	var events []llm.AgentEvent
 	calls := 0
 	streamFn := doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "resumed"}}, StopReason: llm.StopReasonStop})
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, streamFn, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: streamFn, Events: func(event llm.AgentEvent) error {
 		events = append(events, event)
 		return nil
-	})
-	a.AgentContext.Messages = append(a.AgentContext.Messages,
+	}})
+	a.ReplaceMessages(append(a.ctx.Messages,
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "earlier"}}},
-	)
+	))
 
 	reply, err := a.Continue(context.Background())
 	if err != nil {
@@ -1244,11 +1234,11 @@ func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 		t.Fatalf("stream calls = %d, want 1", calls)
 	}
 	// 不追加用户消息：只有预置历史 + 本轮 assistant 回复
-	if got := len(a.AgentContext.Messages); got != 2 {
+	if got := len(a.Context().Messages); got != 2 {
 		t.Fatalf("messages = %d, want 2", got)
 	}
-	if _, ok := a.AgentContext.Messages[0].(llm.UserMessage); !ok {
-		t.Errorf("messages[0] = %T, want seeded user message", a.AgentContext.Messages[0])
+	if _, ok := a.Context().Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("messages[0] = %T, want seeded user message", a.Context().Messages[0])
 	}
 	wantTypes := []string{
 		llm.AgentEventAgentStart,
@@ -1275,13 +1265,13 @@ func TestAgentContinueContinuesWithoutUserMessage(t *testing.T) {
 func TestAgentPreparedSnapshotResetsRunBoundary(t *testing.T) {
 	calls := 0
 	var end llm.AgentEndEvent
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}), func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}), Events: func(event llm.AgentEvent) error {
 		if e, ok := event.(llm.AgentEndEvent); ok {
 			end = e
 		}
 		return nil
-	})
-	a.PrepareRequest = func(ctx context.Context, request PreparedRequest) (PreparedRequest, error) {
+	}})
+	a.hooks.PrepareRequest = func(ctx context.Context, request PreparedRequest) (PreparedRequest, error) {
 		request.Context.Messages = []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "summary"}}}}
 		request.Compacted = true
 		return request, nil
@@ -1302,12 +1292,12 @@ func TestAgentEndCarriesOverflowCause(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, stream, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: stream, Events: func(event llm.AgentEvent) error {
 		if e, ok := event.(llm.AgentEndEvent); ok {
 			end = e
 		}
 		return nil
-	})
+	}})
 	if _, err := a.Run(context.Background(), "hi"); !llm.IsContextOverflow(err) {
 		t.Fatalf("err = %v", err)
 	}
@@ -1319,8 +1309,8 @@ func TestAgentEndCarriesOverflowCause(t *testing.T) {
 func TestPreparedRecoverableLengthStopsBeforeTools(t *testing.T) {
 	calls := 0
 	ping := &fakeTool{name: "ping"}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, doneStreamFn(&calls, llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}), nil)
-	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, nil }
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, Context: llm.Context{Tools: []llm.Tool{ping}}, Stream: doneStreamFn(&calls, llm.AssistantMessage{Content: toolCalls("ping"), StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}), Events: nil})
+	a.hooks.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) { return r, nil }
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -1332,8 +1322,8 @@ func TestPreparedRecoverableLengthStopsBeforeTools(t *testing.T) {
 func TestAgentPreparationDeadlineSettlesWithAborted(t *testing.T) {
 	calls := 0
 	events, sink := collectEvents()
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}}, llm.Context{}, doneStreamFn(&calls, llm.AssistantMessage{}), sink)
-	a.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) {
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{Provider: "openai", ID: "gpt-6.1-sol"}}, Context: llm.Context{}, Stream: doneStreamFn(&calls, llm.AssistantMessage{}), Events: sink})
+	a.hooks.PrepareRequest = func(ctx context.Context, r PreparedRequest) (PreparedRequest, error) {
 		return r, context.DeadlineExceeded
 	}
 	message, err := a.Run(context.Background(), "hi")
@@ -1355,7 +1345,7 @@ func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
 	ping := &fakeTool{name: "ping"}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, llm.Context{Tools: []llm.Tool{ping}}, streamFn, nil)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{MaxTokens: 100}}, Context: llm.Context{Tools: []llm.Tool{ping}}, Stream: streamFn, Events: nil})
 
 	if _, err := a.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
@@ -1366,7 +1356,7 @@ func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("stream calls = %d, want 2", calls)
 	}
-	if got := len(a.AgentContext.Messages); got != 4 {
+	if got := len(a.Context().Messages); got != 4 {
 		t.Errorf("messages = %d, want 4", got)
 	}
 }
@@ -1374,12 +1364,7 @@ func TestAgentRecoverableLengthWithoutCoordinatorRunsTools(t *testing.T) {
 func TestAgentResumeAbortedAssistantDoesNotRunTools(t *testing.T) {
 	ping := &fakeTool{name: "ping"}
 	calls := 0
-	a := NewAgent(
-		llm.AgentConfig{Model: llm.Model{ID: "m1"}},
-		llm.Context{Tools: []llm.Tool{ping}},
-		doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "unexpected"}}}),
-		nil,
-	)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{Tools: []llm.Tool{ping}}, Stream: doneStreamFn(&calls, llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "unexpected"}}}), Events: nil})
 	committed := &llm.AssistantMessage{
 		Content:    toolCalls("ping"),
 		StopReason: llm.StopReasonAborted,
@@ -1396,12 +1381,12 @@ func TestAgentResumeAbortedAssistantDoesNotRunTools(t *testing.T) {
 
 func TestAgentResumeReportsCommittedLengthAssistant(t *testing.T) {
 	var end llm.AgentEndEvent
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1", MaxTokens: 100}}, llm.Context{}, nil, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1", MaxTokens: 100}}, Context: llm.Context{}, Stream: nil, Events: func(event llm.AgentEvent) error {
 		if current, ok := event.(llm.AgentEndEvent); ok {
 			end = current
 		}
 		return nil
-	})
+	}})
 	committed := &llm.AssistantMessage{
 		Content:    []llm.Content{llm.TextContent{Text: "truncated"}},
 		StopReason: llm.StopReasonLength,
@@ -1431,7 +1416,7 @@ func TestAgentSequentialCancellationCompletesToolResults(t *testing.T) {
 			return llm.ToolResult{}, ctx.Err()
 		},
 	}
-	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{tool}}, nil, nil)
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{tool}}, Stream: nil, Events: nil})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	calls := []llm.ToolCall{
@@ -1482,12 +1467,12 @@ func TestAgentSequentialEventFailureCompletesToolResults(t *testing.T) {
 		},
 	}
 	eventErr := errors.New("event sink failed")
-	a := NewAgent(llm.AgentConfig{}, llm.Context{Tools: []llm.Tool{first, second}}, nil, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{Tools: []llm.Tool{first, second}}, Stream: nil, Events: func(event llm.AgentEvent) error {
 		if end, ok := event.(llm.ToolExecutionEndEvent); ok && end.ToolCallID == "first" {
 			return eventErr
 		}
 		return nil
-	})
+	}})
 
 	calls := []llm.ToolCall{
 		{ID: "first", Name: "first"},
@@ -1506,7 +1491,16 @@ func TestAgentSequentialEventFailureCompletesToolResults(t *testing.T) {
 	if results[1].ToolCallID != "second" || !results[1].IsError {
 		t.Fatalf("second result = %+v, want aborted result", results[1])
 	}
-	if len(a.AgentContext.Messages) != len(calls) {
-		t.Fatalf("committed tool results = %d, want %d", len(a.AgentContext.Messages), len(calls))
+	if len(a.Context().Messages) != len(calls) {
+		t.Fatalf("committed tool results = %d, want %d", len(a.Context().Messages), len(calls))
 	}
+}
+
+// testPayloadsAsMessages 把队列载荷转成领域消息，供断言使用
+func testPayloadsAsMessages(payloads []PendingPayload) []llm.UserMessage {
+	messages := make([]llm.UserMessage, 0, len(payloads))
+	for _, payload := range payloads {
+		messages = append(messages, payload.userMessage())
+	}
+	return messages
 }

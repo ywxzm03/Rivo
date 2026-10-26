@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
@@ -24,11 +27,11 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		wantTools = 11
 	}
-	if len(a.agent.AgentContext.Tools) != wantTools || a.agent.AgentContext.Tools[4].Name() != "bash" || a.agent.AgentContext.Tools[6].Name() != "edit" {
-		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(a.agent.AgentContext.Tools), wantTools)
+	if len(a.agent.Context().Tools) != wantTools || a.agent.Context().Tools[4].Name() != "bash" || a.agent.Context().Tools[6].Name() != "edit" {
+		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(a.agent.Context().Tools), wantTools)
 	}
-	if runtime.GOOS == "windows" && a.agent.AgentContext.Tools[8].Name() != "powershell" {
-		t.Errorf("last registered tool = %q, want powershell", a.agent.AgentContext.Tools[8].Name())
+	if runtime.GOOS == "windows" && a.agent.Context().Tools[8].Name() != "powershell" {
+		t.Errorf("last registered tool = %q, want powershell", a.agent.Context().Tools[8].Name())
 	}
 }
 
@@ -37,7 +40,7 @@ func TestNewInjectsSessionIDIntoAgentConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := a.agent.AgentConfig.SessionID, a.SessionID(); got != want || got == "" {
+	if got, want := a.agent.Config().SessionID, a.SessionID(); got != want || got == "" {
 		t.Fatalf("agent SessionID = %q, app SessionID = %q", got, want)
 	}
 }
@@ -86,16 +89,10 @@ func TestNewRejectsUnknownProvider(t *testing.T) {
 func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 	customModel := llm.Model{ID: "custom-no-vision", Name: "Custom", Provider: "custom", API: llm.APIOpenAIResponses}
 	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
-	cfg.registry[customModel.Provider] = providerSpec{
-		id:     customModel.Provider,
-		apiKey: "test-key",
-		models: []llm.Model{customModel},
-		new: func(string, string) ([]llm.Model, llm.StreamFn) {
-			return []llm.Model{customModel}, func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-				return nil, nil
-			}
-		},
-	}
+	cfg = cfg.WithProviderForTest(customModel.Provider, []llm.Model{customModel},
+		func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+			return nil, nil
+		})
 	a, err := NewWithSessionDir(cfg, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +104,7 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 	if got := a.CurrentModel(); got.Provider != customModel.Provider || got.ID != customModel.ID {
 		t.Errorf("current model = %s/%s, want %s/%s", got.Provider, got.ID, customModel.Provider, customModel.ID)
 	}
-	read := a.agent.AgentContext.Tools[0].(*tool.Read)
+	read := a.agent.Context().Tools[0].(*tool.Read)
 	if read.SupportsImages {
 		t.Error("read tool supports images after switching to a non-vision model")
 	}
@@ -121,7 +118,7 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 	if err := a.SetModel(deepseek.ProviderID, deepseek.DefaultModel); err != nil {
 		t.Fatalf("SetModel(deepseek) error = %v", err)
 	}
-	if !a.AutoCompactionEnabled() || !a.agent.AgentContext.Tools[0].(*tool.Read).SupportsImages {
+	if !a.AutoCompactionEnabled() || !a.agent.Context().Tools[0].(*tool.Read).SupportsImages {
 		t.Error("switching back to deepseek did not restore compaction/image capabilities")
 	}
 	if err := a.SetModel(customModel.Provider, "missing"); err == nil {
@@ -133,6 +130,51 @@ func TestSetModelSwitchesProviderAndRuntimeCapabilities(t *testing.T) {
 }
 
 // configWithBuiltin 返回只含内置 provider 的 Config，供测试装配
-func configWithBuiltin(providerID, modelID string) Config {
-	return Config{ProviderID: providerID, ModelID: modelID, registry: builtinRegistry()}
+func configWithBuiltin(providerID, modelID string) provider.Config {
+	return provider.NewBuiltinForTest(providerID, modelID)
+}
+
+// 配置里的 thinking level 必须在新会话装配时生效
+func TestNewSessionAppliesConfiguredThinkingLevel(t *testing.T) {
+	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
+	cfg.ThinkingLevel = llm.ThinkingLevelHigh
+
+	a, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if a.agent.Config().ThinkingLevel != llm.ThinkingLevelHigh {
+		t.Errorf("agent ThinkingLevel = %q, want high", a.agent.Config().ThinkingLevel)
+	}
+}
+
+// 内置模型被 modelOverrides 改过窗口后，装配出的 compactor 必须同步
+func TestNewAppliesModelOverrideContextWindow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("RIVO_AGENT_DIR", filepath.Join(dir, "agent"))
+	t.Setenv("OPENAI_API_KEY", "env-key")
+	if err := os.MkdirAll(filepath.Join(dir, "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"providers":{"openai":{"modelOverrides":{"` + openai.DefaultModel + `":{"contextWindow":64000}}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "agent", "models.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	a, err := NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("NewWithSessionDir() error = %v", err)
+	}
+	if a.CurrentModel().ContextWindow != 64000 {
+		t.Errorf("model context window = %d, want 64000", a.CurrentModel().ContextWindow)
+	}
+	if a.coordinator.Compactor == nil || a.coordinator.Compactor.Config.ContextWindow != 64000 {
+		t.Errorf("compactor config = %+v, want 64000", a.coordinator.Compactor)
+	}
 }

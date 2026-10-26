@@ -3,6 +3,8 @@ package compaction
 import (
 	"strings"
 	"testing"
+
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 )
 
 func TestBuildSummarizePrompt(t *testing.T) {
@@ -58,9 +60,9 @@ func TestMergeSummaries(t *testing.T) {
 }
 
 func TestWrappedSummary(t *testing.T) {
-	got := WrappedSummary("content")
+	got := ctxview.WrappedSummary("content")
 	want := "The conversation history before this point was compacted into the following summary:\n\n<summary>\ncontent\n</summary>"
 	if got != want {
-		t.Errorf("WrappedSummary = %q, want %q", got, want)
+		t.Errorf("ctxview.WrappedSummary = %q, want %q", got, want)
 	}
 }

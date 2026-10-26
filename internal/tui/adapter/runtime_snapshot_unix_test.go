@@ -11,6 +11,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -19,7 +20,7 @@ func TestSessionScanDoesNotBlockRuntime(t *testing.T) {
 	for _, kind := range []string{"snapshot", "completion"} {
 		t.Run(kind, func(t *testing.T) {
 			setupAdapterEnv(t)
-			cfg, err := app.Load()
+			cfg, err := provider.Load()
 			if err != nil {
 				t.Fatal(err)
 			}

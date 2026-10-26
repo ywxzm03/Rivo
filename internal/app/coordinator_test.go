@@ -15,6 +15,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
@@ -253,7 +254,7 @@ func seedHistory(t *testing.T, coord *Coordinator, a *agent.Agent) {
 			t.Fatal(err)
 		}
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
+	a.ReplaceMessages(append(a.Context().Messages, seed...))
 }
 
 func TestCoordinatorOverflowRecovery(t *testing.T) {
@@ -274,9 +275,13 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		Model:    llm.Model{ID: "m1"},
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  modelStreamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -379,9 +384,13 @@ func TestCoordinatorOverflowRecoveryOnlyOnce(t *testing.T) {
 		Model:    llm.Model{ID: "m1"},
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  modelStreamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -701,7 +710,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 	if summaryCalls != 2 {
 		t.Fatalf("summary calls = %d, want 2", summaryCalls)
 	}
-	if strings.Contains(prompts[1], compaction.WrappedSummary("FIRST-SUMMARY")) {
+	if strings.Contains(prompts[1], ctxview.WrappedSummary("FIRST-SUMMARY")) {
 		t.Error("second compaction prompt reserialized the previous wrapped summary")
 	}
 	if got := strings.Count(prompts[1], "<previous-summary>\nFIRST-SUMMARY\n</previous-summary>"); got != 1 {
@@ -724,9 +733,13 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 		llm.AssistantMessage{StopReason: llm.StopReasonError},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  streamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 

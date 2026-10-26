@@ -1,15 +1,15 @@
 package session
 
 import (
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // BuildContext 从当前叶子沿父链回溯构建模型上下文视图：
 // 1.取活跃路径；2.应用最近的 compaction 替换历史；3.应用 context_edit 投影；4.生成带来源的上下文条目
-func (m *SessionManager) BuildContext() compact.ContextView {
+func (m *SessionManager) BuildContext() ctxview.ContextView {
 	path := m.activePath()
-	ctx := compact.ContextView{ThinkingLevel: "off"}
+	ctx := ctxview.ContextView{ThinkingLevel: "off"}
 
 	// 1.设置提取走完整路径：model 优先取最后一个 model_change，否则兜底最后一条 assistant 消息
 	var modelChange *ModelChangeEntry
@@ -108,9 +108,9 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 			} else {
 				message = e.Message
 			}
-			ctx.Entries = append(ctx.Entries, compact.ContextEntry{
+			ctx.Entries = append(ctx.Entries, ctxview.ContextEntry{
 				SourceID: e.base().ID,
-				Kind:     compact.ContextMessage,
+				Kind:     ctxview.ContextMessage,
 				Messages: []llm.Message{message},
 			})
 			if _, ok := message.(llm.AssistantMessage); ok {
@@ -126,11 +126,11 @@ func (m *SessionManager) BuildContext() compact.ContextView {
 				messages = append(messages, *e.SystemMessage)
 			}
 			messages = append(messages, llm.UserMessage{
-				Content: []llm.Content{llm.TextContent{Text: compact.WrappedSummary(e.Summary)}},
+				Content: []llm.Content{llm.TextContent{Text: ctxview.WrappedSummary(e.Summary)}},
 			})
-			ctx.Entries = append(ctx.Entries, compact.ContextEntry{
+			ctx.Entries = append(ctx.Entries, ctxview.ContextEntry{
 				SourceID: e.base().ID,
-				Kind:     compact.ContextCompaction,
+				Kind:     ctxview.ContextCompaction,
 				Messages: messages,
 				Summary:  e.Summary,
 				Details:  cloneFileLists(e.Details),

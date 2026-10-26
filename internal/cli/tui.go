@@ -14,12 +14,12 @@ import (
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
-	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
-func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
+func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
 	var runtime *adapter.Runtime
 	// panic 会跳过所有收尾逻辑并让进程直接消失;兜住它,并把子任务一起收掉
 	defer func() {

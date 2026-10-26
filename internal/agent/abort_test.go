@@ -33,7 +33,7 @@ func collectEvents() (*[]llm.AgentEvent, llm.AgentEventSink) {
 // 取消后即使流层静默关闭（防御路径），agent 也必须以 aborted assistant 收场并发出完整事件序列
 func TestRunAbortSilentStreamClosesWithAborted(t *testing.T) {
 	events, sink := collectEvents()
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, silentCancelStreamFn(), sink)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{}, Stream: silentCancelStreamFn(), Events: sink})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -63,7 +63,7 @@ func TestRunAbortErrorEventKeepsPartial(t *testing.T) {
 		close(events2)
 		return events2, nil
 	}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, sink)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{}, Stream: streamFn, Events: sink})
 	message, err := a.Run(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("abort should settle via events: %v", err)
@@ -89,7 +89,7 @@ func TestRunModelErrorKeepsErrorReason(t *testing.T) {
 		close(ch)
 		return ch, nil
 	}
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, sink)
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{}, Stream: streamFn, Events: sink})
 	message, err := a.Run(context.Background(), "hello")
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("err = %v, want boom", err)
@@ -126,8 +126,8 @@ func TestContextForModelFiltersAborted(t *testing.T) {
 
 // 工具批次执行中取消：未启动的工具以 aborted 错误结果收场，批次正常返回
 func TestToolBatchAbortsPendingCalls(t *testing.T) {
-	a := &Agent{AgentContext: llm.Context{}}
-	a.AgentContext.Tools = []llm.Tool{blockingTool{}, slowTool{}}
+	a := New(Options{})
+	a.ctx.Tools = []llm.Tool{blockingTool{}, slowTool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(30 * time.Millisecond)
@@ -160,8 +160,8 @@ func TestToolBatchAbortsPendingCalls(t *testing.T) {
 
 // 已完成的工具结果在取消后保留原内容，不被覆盖
 func TestToolBatchKeepsCompletedResultsAfterCancel(t *testing.T) {
-	a := &Agent{AgentContext: llm.Context{}}
-	a.AgentContext.Tools = []llm.Tool{instantTool{}, blockingTool{}}
+	a := New(Options{})
+	a.ctx.Tools = []llm.Tool{instantTool{}, blockingTool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	// instant 立即返回，blocking 等待取消；50ms 后取消 → blocking 记为 aborted，instant 结果保留
 	go func() {

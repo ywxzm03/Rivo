@@ -8,12 +8,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 func TestTUISendDoesNotBlockCancellation(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestTUISendDoesNotBlockCancellation(t *testing.T) {
 
 func TestTUIRequestStartsBeforeCommandAndSettlesBeforeCompletion(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -481,7 +482,7 @@ func (c *Coordinator) emit(event llm.AgentEvent) error {
 
 // contextTokens 按陈旧标记选择 token 估算方式：陈旧时尾部 usage 反映压缩前的大上下文，
 // 改用纯消息体估算，防止压缩刚结束就重复触发
-func contextTokens(proj compaction.ContextView) int {
+func contextTokens(proj ctxview.ContextView) int {
 	if proj.UsageStale {
 		return compaction.EstimateContextTokens(proj.Messages())
 	}

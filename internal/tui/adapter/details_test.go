@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -29,7 +29,7 @@ func TestToolDetailsProjectedSeparately(t *testing.T) {
 // 回放会话时同样把详情放进 ToolCallView
 func TestToolDetailsProjectedFromSessionReplay(t *testing.T) {
 	runtime := &Runtime{sequence: 1}
-	view := compaction.ContextView{Entries: []compaction.ContextEntry{{
+	view := ctxview.ContextView{Entries: []ctxview.ContextEntry{{
 		SourceID: "entry-1",
 		Messages: []llm.Message{
 			llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "call-1", Name: "edit", Arguments: map[string]any{"path": "a.go"}}}},

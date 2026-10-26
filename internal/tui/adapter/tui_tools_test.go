@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -147,12 +147,12 @@ func TestHistoryProjectionMarksUnfinishedToolsInterrupted(t *testing.T) {
 
 func TestHistoryProjectionHidesCompactionEntry(t *testing.T) {
 	runtime := &Runtime{}
-	view := compaction.ContextView{Entries: []compaction.ContextEntry{
-		{SourceID: "summary", Kind: compaction.ContextCompaction, Messages: []llm.Message{
+	view := ctxview.ContextView{Entries: []ctxview.ContextEntry{
+		{SourceID: "summary", Kind: ctxview.ContextCompaction, Messages: []llm.Message{
 			llm.SystemMessage{Sections: map[string]string{"preamble": "internal system snapshot"}},
-			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: compaction.WrappedSummary("internal summary")}}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: ctxview.WrappedSummary("internal summary")}}},
 		}},
-		{SourceID: "kept", Kind: compaction.ContextMessage, Messages: []llm.Message{
+		{SourceID: "kept", Kind: ctxview.ContextMessage, Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "kept message"}}},
 		}},
 	}}
@@ -165,10 +165,10 @@ func TestHistoryProjectionHidesCompactionEntry(t *testing.T) {
 	}
 }
 
-func testContext(messages []llm.Message) compaction.ContextView {
-	var view compaction.ContextView
+func testContext(messages []llm.Message) ctxview.ContextView {
+	var view ctxview.ContextView
 	for i, message := range messages {
-		view.Entries = append(view.Entries, compaction.ContextEntry{SourceID: fmt.Sprintf("test-%d", i), Kind: compaction.ContextMessage, Messages: []llm.Message{message}})
+		view.Entries = append(view.Entries, ctxview.ContextEntry{SourceID: fmt.Sprintf("test-%d", i), Kind: ctxview.ContextMessage, Messages: []llm.Message{message}})
 	}
 	return view
 }

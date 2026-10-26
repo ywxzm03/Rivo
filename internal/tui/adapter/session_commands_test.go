@@ -9,13 +9,14 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 func TestSessionCommandsPublishNameAndReplaceRuntime(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestSessionCommandsPublishNameAndReplaceRuntime(t *testing.T) {
 
 func TestModelAndThinkingCommandsReportNotices(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func submitAndSettle(t *testing.T, m *tui.Model, input string) tui.OperationDone
 
 func TestClearAndDeleteSessionCommands(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

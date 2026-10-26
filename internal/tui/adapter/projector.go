@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -359,7 +359,7 @@ func (r *Runtime) addDividerLocked() int {
 	return index
 }
 
-func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
+func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 	projected := make([]tui.Message, 0, len(view.Entries))
 	var group *tui.ToolGroupView
 	groupIndex := -1
@@ -378,7 +378,7 @@ func (r *Runtime) projectContext(view compaction.ContextView) []tui.Message {
 	round := 0
 	for _, entry := range view.Entries {
 		// 压缩快照与摘要只供模型使用
-		if entry.Kind == compaction.ContextCompaction {
+		if entry.Kind == ctxview.ContextCompaction {
 			continue
 		}
 		for _, message := range entry.Messages {

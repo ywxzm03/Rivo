@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -38,7 +39,7 @@ func newSkillRuntime(t *testing.T, handler http.HandlerFunc) (*Runtime, string, 
 	}
 	path := filepath.Join(agentDir, "skills", "docs & guide", "SKILL.md")
 	writeManualSkill(t, path, "Original instructions")
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

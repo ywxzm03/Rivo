@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 )
 
 func TestNonTUIInputsDoNotInterpretSessionOrSkillCommands(t *testing.T) {
@@ -24,7 +24,7 @@ func TestNonTUIInputsDoNotInterpretSessionOrSkillCommands(t *testing.T) {
 	}
 	for _, input := range inputs {
 		runner := &fakeRunner{msg: &llm.AssistantMessage{StopReason: llm.StopReasonStop}}
-		if code := printMode(app.Config{}, input, false, &stdout, &stderr, runner); code != 0 || runner.input != input {
+		if code := printMode(provider.Config{}, input, false, &stdout, &stderr, runner); code != 0 || runner.input != input {
 			t.Fatalf("print input = %q, code = %d", runner.input, code)
 		}
 	}

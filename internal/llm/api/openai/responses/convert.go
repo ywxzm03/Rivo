@@ -71,12 +71,6 @@ var reservedParamKeys = map[string]bool{
 	"prompt_cache_key": true, "prompt_cache_options": true, "prompt_cache_retention": true,
 }
 
-// thinkingLevels 是扩展思考等级体系，顺序从低到高
-var thinkingLevels = []llm.ThinkingLevel{
-	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
-	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
-}
-
 // resolveReasoningEffort 把思考等级解析为 reasoning effort：无显式等级沿用模型默认值，
 // 有显式等级时先收敛到模型支持的最近可用等级；非 reasoning 模型不经此函数
 func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffort {
@@ -111,7 +105,7 @@ func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLe
 		}
 	}
 	requestedIndex := -1
-	for i, l := range thinkingLevels {
+	for i, l := range llm.ThinkingLevels {
 		if l == level {
 			requestedIndex = i
 			break
@@ -120,14 +114,14 @@ func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLe
 	if requestedIndex == -1 {
 		return firstThinkingLevel(available)
 	}
-	for i := requestedIndex; i < len(thinkingLevels); i++ {
-		if containsThinkingLevel(available, thinkingLevels[i]) {
-			return thinkingLevels[i]
+	for i := requestedIndex; i < len(llm.ThinkingLevels); i++ {
+		if containsThinkingLevel(available, llm.ThinkingLevels[i]) {
+			return llm.ThinkingLevels[i]
 		}
 	}
 	for i := requestedIndex - 1; i >= 0; i-- {
-		if containsThinkingLevel(available, thinkingLevels[i]) {
-			return thinkingLevels[i]
+		if containsThinkingLevel(available, llm.ThinkingLevels[i]) {
+			return llm.ThinkingLevels[i]
 		}
 	}
 	return firstThinkingLevel(available)
@@ -140,7 +134,7 @@ func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
 		return []llm.ThinkingLevel{llm.ThinkingLevelOff}
 	}
 	var levels []llm.ThinkingLevel
-	for _, level := range thinkingLevels {
+	for _, level := range llm.ThinkingLevels {
 		mapped, ok := model.ThinkingLevelMap[level]
 		if ok && mapped == nil {
 			continue

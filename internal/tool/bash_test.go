@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
 func runBash(t *testing.T, ctx context.Context, args map[string]any) (llm.ToolResult, error) {
@@ -20,6 +21,9 @@ func runBash(t *testing.T, ctx context.Context, args map[string]any) (llm.ToolRe
 func bashText(result llm.ToolResult) string { return result.Content[0].(llm.TextContent).Text }
 
 func TestBashExecutesAndCombinesOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real shell")
+	}
 	result, err := runBash(t, context.Background(), map[string]any{"command": "printf out; printf err >&2"})
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +37,9 @@ func TestBashExecutesAndCombinesOutput(t *testing.T) {
 }
 
 func TestBashUsesConfiguredWorkingDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real shell")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("bash working directory test requires Unix shell")
 	}
@@ -51,6 +58,9 @@ func TestBashUsesConfiguredWorkingDir(t *testing.T) {
 }
 
 func TestBashEmptyOutputAndNonzeroExit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real shell")
+	}
 	result, err := runBash(t, context.Background(), map[string]any{"command": "true"})
 	if err != nil || bashText(result) != "(no output)" {
 		t.Errorf("empty result = %q, %v", bashText(result), err)
@@ -77,6 +87,9 @@ func TestBashValidatesArgumentsAndTimeout(t *testing.T) {
 }
 
 func TestBashContextCancellationKillsProcessGroup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real shell")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	timer := time.AfterFunc(50*time.Millisecond, cancel)
 	defer timer.Stop()
@@ -104,7 +117,7 @@ func TestBashEnvironmentAndSanitization(t *testing.T) {
 	if got, want := bashText(result), "red\nAB"; got != want {
 		t.Errorf("sanitized output = %q, want %q", got, want)
 	}
-	if !strings.Contains(strings.Join(shellEnvironment(), "\n"), binDir) {
+	if !strings.Contains(strings.Join(shell.Environment(), "\n"), binDir) {
 		t.Errorf("bash environment does not include cache bin %q", binDir)
 	}
 }

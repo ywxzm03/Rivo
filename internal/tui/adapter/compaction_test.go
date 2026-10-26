@@ -13,7 +13,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -41,7 +43,7 @@ func TestManualCompactionHidesPromptAfterCompletionAndResume(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"defaultProvider":"fixture","defaultModel":"fixture"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +101,12 @@ func TestManualCompactionHidesPromptAfterCompletionAndResume(t *testing.T) {
 	}
 
 	// 3.摘要与 system 快照仍经磁盘恢复进入模型上下文
-	for _, view := range []compaction.ContextView{a.ContextView(), reopened.ContextView()} {
-		if len(view.Entries) != 3 || view.Entries[0].Kind != compaction.ContextCompaction || view.Entries[0].Summary != "internal compaction summary" {
+	for _, view := range []ctxview.ContextView{a.ContextView(), reopened.ContextView()} {
+		if len(view.Entries) != 3 || view.Entries[0].Kind != ctxview.ContextCompaction || view.Entries[0].Summary != "internal compaction summary" {
 			t.Fatalf("model context lost compaction entry: %d entries", len(view.Entries))
 		}
 		messages := view.Messages()
-		if len(messages) != 4 || messages[0].Role() != llm.RoleSystem || textContent(messages[1].(llm.UserMessage).Content) != compaction.WrappedSummary("internal compaction summary") {
+		if len(messages) != 4 || messages[0].Role() != llm.RoleSystem || textContent(messages[1].(llm.UserMessage).Content) != ctxview.WrappedSummary("internal compaction summary") {
 			t.Fatalf("model context lost summary or snapshot: %d messages", len(messages))
 		}
 	}

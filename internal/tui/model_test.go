@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestMain(m *testing.M) {
@@ -170,7 +169,7 @@ func TestLayout(t *testing.T) {
 			if m.completionRows(len(m.completionItems())) != 5 {
 				t.Fatal("slash must show five command rows")
 			}
-			for _, kind := range []string{"model", "thinking", "resume"} {
+			for _, kind := range []RequestKind{RequestModel, RequestThinking, RequestResume} {
 				m.openSelector(kind, "")
 				assertFrame(t, m)
 				typeText(m, "no-such-match-xyz")
@@ -253,7 +252,7 @@ func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
 	m := testModel(60, 15)
 	m.busy, m.status = true, "Working"
 	m.state.FollowUp = []string{"follow-up"}
-	m.state.FollowUpInputs = []llm.UserMessage{textUserMessage("follow-up")}
+	m.state.FollowUpInputs = []ComposerPayload{textPayload("follow-up")}
 	typeText(m, "/clear-follow-up")
 	press(m, tea.KeyEnter)
 	if len(m.state.FollowUp) != 0 || len(m.state.FollowUpInputs) != 0 {
@@ -267,12 +266,12 @@ func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
 func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
 	m := testModel(60, 15)
 	var routed []string
-	m.handlers.EnqueueSteeringMessage = func(message llm.UserMessage) error {
-		routed = append(routed, "steering:"+userMessageText(message))
+	m.handlers.EnqueueSteeringMessage = func(message ComposerPayload) error {
+		routed = append(routed, "steering:"+payloadText(message))
 		return nil
 	}
-	m.handlers.EnqueueFollowUpMessage = func(message llm.UserMessage) error {
-		routed = append(routed, "follow-up:"+userMessageText(message))
+	m.handlers.EnqueueFollowUpMessage = func(message ComposerPayload) error {
+		routed = append(routed, "follow-up:"+payloadText(message))
 		return nil
 	}
 	m.busy, m.compacting = true, true
@@ -299,34 +298,27 @@ func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
 // 回填图片 follow-up 后必须仍可组装出原图片，验证 marker 与 images 表同步
 func TestRestoreFollowUpKeepsImageAttached(t *testing.T) {
 	m := testModel(60, 15)
-	image := llm.ImageContent{Data: "aGk=", MIMEType: "image/png"}
-	queued := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "look"}, image}}
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage { return []llm.UserMessage{queued} }
+	queued := ComposerPayload{Text: "look", Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload { return []ComposerPayload{queued} }
 	m.busy = true
 	if restored := m.restoreQueuedFollowUp(); restored != 1 {
 		t.Fatalf("restored = %d, want 1", restored)
 	}
-	built, ok := m.buildUserMessage()
+	built, ok := m.buildPayload()
 	if !ok {
-		t.Fatal("restored editor produced no message")
+		t.Fatal("restored editor produced no payload")
 	}
-	var images int
-	for _, content := range built.Content {
-		if got, ok := content.(llm.ImageContent); ok {
-			images++
-			if got != image {
-				t.Fatalf("image = %+v, want %+v", got, image)
-			}
-		}
+	if built.Text != "look" || len(built.Images) != 1 {
+		t.Fatalf("payload = %+v, want text look with one image", built)
 	}
-	if images != 1 {
-		t.Fatalf("image content count = %d, want 1", images)
+	if built.Images[0] != (ImagePart{Data: "aGk=", MIMEType: "image/png"}) {
+		t.Fatalf("image = %+v, want original attachment", built.Images[0])
 	}
 }
 
 func TestCompactionFailureRestoresStagedInput(t *testing.T) {
 	m := testModel(60, 15)
-	m.handlers.EnqueueSteeringMessage = func(llm.UserMessage) error { return fmt.Errorf("queue unavailable") }
+	m.handlers.EnqueueSteeringMessage = func(ComposerPayload) error { return fmt.Errorf("queue unavailable") }
 	m.busy, m.compacting = true, true
 	typeText(m, "restore after compact failure")
 	press(m, tea.KeyEnter)
@@ -442,9 +434,9 @@ func TestDequeueKeyLabels(t *testing.T) {
 func TestShiftRightRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
 	m := testModel(80, 24)
 	restored := 0
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
 		restored++
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
+		return []ComposerPayload{textPayload("queued follow-up")}
 	}
 	m.busy, m.status = true, "Working"
 	m.state.Steering = []string{"keep steering"}
@@ -483,9 +475,9 @@ func TestFollowUpDequeueKeyVariants(t *testing.T) {
 func TestPlainDownWithoutFollowUpNavigatesHistory(t *testing.T) {
 	m := testModel(80, 24)
 	restored := 0
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
 		restored++
-		return []llm.UserMessage{textUserMessage("queued")}
+		return []ComposerPayload{textPayload("queued")}
 	}
 	typeText(m, "draft")
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -567,8 +559,8 @@ func TestEmptySteeringRestoreKeepsSnapshotWithoutReplayingIt(t *testing.T) {
 	m := testModel(60, 15)
 	m.busy = true
 	m.state.Steering = []string{"already consumed"}
-	m.state.SteeringInputs = []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "already consumed"}}}}
-	m.handlers.RestoreSteeringMessages = func() []llm.UserMessage { return nil }
+	m.state.SteeringInputs = []ComposerPayload{{Text: "already consumed"}}
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return nil }
 	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "" {
 		t.Fatalf("editor = %q, want no stale replay", got)

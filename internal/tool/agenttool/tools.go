@@ -8,6 +8,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	toolpkg "github.com/ywxzm03/Rivo/internal/tool"
+	"github.com/ywxzm03/Rivo/internal/tool/backgroundbash"
 )
 
 // childTools 构造子 agent 的工具集。
@@ -24,7 +25,7 @@ func childTools(parent []llm.Tool, fork bool, childSession *session.SessionManag
 			tools = append(tools, &toolpkg.Edit{History: childSession.FileHistory()})
 			continue
 		case *toolpkg.Bash:
-			tools = append(tools, &toolpkg.Bash{Background: toolpkg.NewBackgroundBashRunner(taskStore)})
+			tools = append(tools, &toolpkg.Bash{Background: backgroundbash.New(taskStore)})
 			continue
 		}
 		// 2.fork 复用父的 agent 工具;typed subagent 不能继续派发,移除它

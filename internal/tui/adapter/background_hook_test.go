@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -14,7 +15,7 @@ import (
 // 会话切换后,新 App 的通知唤醒与后台结束兜底都必须照常工作
 func TestNotificationPathSurvivesSessionSwitch(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
 // Bash 执行 shell 命令。Background 非空时支持 run_in_background
@@ -49,7 +50,7 @@ func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return b.Background.RunBackground(ctx, args)
 	}
 	return executeShellCommand(ctx, args, "bash", b.WorkingDir, func(commandCtx context.Context, command string) (*exec.Cmd, error) {
-		bashPath, err := findBash()
+		bashPath, err := shell.FindBash()
 		if err != nil {
 			return nil, err
 		}

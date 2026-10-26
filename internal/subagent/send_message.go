@@ -86,8 +86,8 @@ func (m *Manager) resumeEvicted(ctx context.Context, taskID, prompt string) (Sen
 		m.store.DiscardReserved(stateID)
 		return SendMessageResult{}, errors.New("subagent: factory returned no agent")
 	}
-	if runtime.Done == nil {
-		runtime.Done = make(chan struct{})
+	if runtime.DoneChan == nil {
+		runtime.DoneChan = make(chan struct{})
 	}
 	lifecycleCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	runtime.Cancel = cancel

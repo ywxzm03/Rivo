@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
@@ -363,7 +363,7 @@ func TestPrintModeOutputsAssistantText(t *testing.T) {
 		StopReason: llm.StopReasonStop,
 	}}
 
-	code := printMode(app.Config{}, "question", false, &stdout, &stderr, runner)
+	code := printMode(provider.Config{}, "question", false, &stdout, &stderr, runner)
 	if code != 0 {
 		t.Fatalf("printMode() code = %d, want 0", code)
 	}
@@ -379,7 +379,7 @@ func TestPrintModeRunErrorReturnsOne(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	runner := &fakeRunner{err: errors.New("boom")}
 
-	code := printMode(app.Config{}, "q", false, &stdout, &stderr, runner)
+	code := printMode(provider.Config{}, "q", false, &stdout, &stderr, runner)
 	if code != 1 {
 		t.Fatalf("printMode() code = %d, want 1", code)
 	}
@@ -392,7 +392,7 @@ func TestPrintModeErrorStopReasonReturnsOne(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	runner := &fakeRunner{msg: &llm.AssistantMessage{StopReason: llm.StopReasonError}}
 
-	code := printMode(app.Config{}, "q", false, &stdout, &stderr, runner)
+	code := printMode(provider.Config{}, "q", false, &stdout, &stderr, runner)
 	if code != 1 {
 		t.Fatalf("printMode() code = %d, want 1", code)
 	}

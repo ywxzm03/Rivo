@@ -13,22 +13,20 @@ import (
 )
 
 type Agent struct {
-	AgentConfig  llm.AgentConfig
-	AgentContext llm.Context
-	StreamFn     llm.StreamFn
-	OnEvent      llm.AgentEventSink
-	// WorkingDir 是工具执行的工作目录,子 agent 用它指向 worktree
-	WorkingDir string
-	// MaxTurns 为 0 表示不限制;fork 与自定义定义用它封顶轮次
-	MaxTurns int
-	// ForkChild 标记该 agent 是 fork 子 agent,工具层据此拒绝递归派发
-	ForkChild bool
-	// AgentID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
+	cfg    llm.AgentConfig
+	ctx    llm.Context
+	stream llm.StreamFn
+	events llm.AgentEventSink
+	// workingDir 是工具执行的工作目录,子 agent 用它指向 worktree
+	workingDir string
+	// maxTurns 为 0 表示不限制;fork 与自定义定义用它封顶轮次
+	maxTurns int
+	// forkChild 标记该 agent 是 fork 子 agent,工具层据此拒绝递归派发
+	forkChild bool
+	// agentID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
 	// 归属到发起它的子 agent
-	AgentID string
-	// PrepareRequest 返回宿主准备的请求快照，核心不持有会话或压缩协调器
-	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
-	CommitMessages func([]llm.Message) ([]string, error)
+	agentID string
+	hooks   Hooks
 
 	runGuardOnce  sync.Once
 	runGuard      chan struct{}
@@ -159,50 +157,6 @@ func displayUserMessageText(message llm.UserMessage) string {
 	return strings.Join(parts, "")
 }
 
-func equalUserMessage(left, right llm.UserMessage) bool {
-	return reflect.DeepEqual(left, right)
-}
-
-// Steer 把用户输入加入当前运行的 steering 队列，不打断正在进行的模型或工具
-func (a *Agent) Steer(input string) error {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return errors.New("agent: steering input is empty")
-	}
-	return a.SteerMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
-}
-
-func (a *Agent) SteerMessage(message llm.UserMessage) error {
-	if len(message.Content) == 0 {
-		return errors.New("agent: steering input is empty")
-	}
-	a.steeringQueue.append(newPendingMessage(message))
-	return nil
-}
-
-// FollowUp 把用户输入加入当前运行完成后的 follow-up 队列
-func (a *Agent) FollowUp(input string) error {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return errors.New("agent: follow-up input is empty")
-	}
-	return a.FollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
-}
-
-func (a *Agent) FollowUpMessage(message llm.UserMessage) error {
-	if len(message.Content) == 0 {
-		return errors.New("agent: follow-up input is empty")
-	}
-	a.followUpQueue.append(newPendingMessage(message))
-	return nil
-}
-
-func (a *Agent) HasSteering() bool { return a.steeringQueue.hasItems() }
-
-func (a *Agent) HasFollowUp() bool { return a.followUpQueue.hasItems() }
-
-func (a *Agent) HasQueuedMessages() bool { return a.HasSteering() || a.HasFollowUp() }
-
 func pendingMessageTexts(items []pendingMessage) []string {
 	messages := make([]string, len(items))
 	for i, item := range items {
@@ -211,59 +165,162 @@ func pendingMessageTexts(items []pendingMessage) []string {
 	return messages
 }
 
-func pendingUserMessages(items []pendingMessage) []llm.UserMessage {
-	messages := make([]llm.UserMessage, len(items))
-	for i, item := range items {
-		messages[i] = cloneUserMessage(item.message)
+func equalUserMessage(left, right llm.UserMessage) bool {
+	return reflect.DeepEqual(left, right)
+}
+
+// QueueKind 区分运行中注入与运行后注入两条队列
+type QueueKind uint8
+
+const (
+	// QueueSteering 在模型或工具执行间隙注入
+	QueueSteering QueueKind = iota
+	// QueueFollowUp 在当前运行结束后注入
+	QueueFollowUp
+)
+
+// ImagePart 是队列消息中的一张图片，Data 为 base64 编码内容
+type ImagePart struct {
+	Data     string
+	MIMEType string
+}
+
+// PendingPayload 是入队的一条待注入内容
+type PendingPayload struct {
+	Text   string
+	Images []ImagePart
+}
+
+func (p PendingPayload) isEmpty() bool {
+	return strings.TrimSpace(p.Text) == "" && len(p.Images) == 0
+}
+
+func (p PendingPayload) userMessage() llm.UserMessage {
+	content := make([]llm.Content, 0, len(p.Images)+1)
+	if text := strings.TrimSpace(p.Text); text != "" {
+		content = append(content, llm.TextContent{Text: text})
 	}
-	return messages
+	for _, image := range p.Images {
+		content = append(content, llm.ImageContent{Data: image.Data, MIMEType: image.MIMEType})
+	}
+	return llm.UserMessage{Content: content}
 }
 
-func (a *Agent) SteeringMessages() []string { return pendingMessageTexts(a.steeringQueue.snapshot()) }
+// PayloadFromMessage 把领域消息转成待注入内容，保留图片
+func PayloadFromMessage(message llm.UserMessage) PendingPayload { return payloadOf(message) }
 
-func (a *Agent) FollowUpMessages() []string { return pendingMessageTexts(a.followUpQueue.snapshot()) }
-
-func (a *Agent) SteeringUserMessages() []llm.UserMessage {
-	return pendingUserMessages(a.steeringQueue.snapshot())
+func payloadOf(message llm.UserMessage) PendingPayload {
+	payload := PendingPayload{}
+	for _, content := range message.Content {
+		switch content := content.(type) {
+		case llm.TextContent:
+			payload.Text += content.Text
+		case llm.ImageContent:
+			payload.Images = append(payload.Images, ImagePart{Data: content.Data, MIMEType: content.MIMEType})
+		}
+	}
+	return payload
 }
 
-func (a *Agent) FollowUpUserMessages() []llm.UserMessage {
-	return pendingUserMessages(a.followUpQueue.snapshot())
+// queue 按种类返回对应队列，是两条队列共用一套 API 的唯一分叉点
+func (a *Agent) queue(kind QueueKind) *pendingMessageQueue {
+	if kind == QueueFollowUp {
+		return &a.followUpQueue
+	}
+	return &a.steeringQueue
 }
 
-func (a *Agent) SteeringRevision() uint64 { return a.steeringQueue.revisionValue() }
-
-func (a *Agent) FollowUpRevision() uint64 { return a.followUpQueue.revisionValue() }
-
-// TakeSteering 清空等待消费的 steering，按 FIFO 返回消息文本
-func (a *Agent) TakeSteering() []string {
-	return pendingMessageTexts(a.steeringQueue.takeAllForRestore())
+// Enqueue 把一条内容加入指定队列
+func (a *Agent) Enqueue(kind QueueKind, payload PendingPayload) error {
+	if payload.isEmpty() {
+		if kind == QueueFollowUp {
+			return errors.New("agent: follow-up input is empty")
+		}
+		return errors.New("agent: steering input is empty")
+	}
+	a.queue(kind).append(newPendingMessage(payload.userMessage()))
+	return nil
 }
 
-func (a *Agent) TakeFollowUp() []string {
-	return pendingMessageTexts(a.followUpQueue.takeAllForRestore())
+// Steer 把一段纯文本加入 steering 队列，是 Runner 接口要求的最小入口
+func (a *Agent) Steer(input string) error {
+	return a.Enqueue(QueueSteering, PendingPayload{Text: input})
 }
 
-func (a *Agent) TakeSteeringMessages() []llm.UserMessage {
-	return pendingUserMessages(a.steeringQueue.takeAllForRestore())
+// FollowUp 把一段纯文本加入 follow-up 队列
+func (a *Agent) FollowUp(input string) error {
+	return a.Enqueue(QueueFollowUp, PendingPayload{Text: input})
 }
 
-func (a *Agent) TakeFollowUpMessages() []llm.UserMessage {
-	return pendingUserMessages(a.followUpQueue.takeAllForRestore())
+// Len 返回队列中等待消费的条数
+func (a *Agent) Len(kind QueueKind) int { return len(a.queue(kind).snapshot()) }
+
+// Revision 返回队列的修订号，供 UI 判断是否需要刷新
+func (a *Agent) Revision(kind QueueKind) uint64 { return a.queue(kind).revisionValue() }
+
+// Messages 返回队列内容的纯文本视图
+func (a *Agent) Messages(kind QueueKind) []string {
+	return pendingMessageTexts(a.queue(kind).snapshot())
 }
 
-func (a *Agent) ClearFollowUp() []llm.UserMessage {
-	return pendingUserMessages(a.followUpQueue.clear())
+// Payloads 返回队列内容的完整视图，保留图片
+func (a *Agent) Payloads(kind QueueKind) []PendingPayload {
+	items := a.queue(kind).snapshot()
+	payloads := make([]PendingPayload, len(items))
+	for i, item := range items {
+		payloads[i] = payloadOf(item.message)
+	}
+	return payloads
 }
 
-// AcknowledgeSteering 确认宿主提交失败后恢复、且已由会话补写的 steering
-func (a *Agent) AcknowledgeSteering(input string) bool {
-	return a.acknowledgeSteering(func(message pendingMessage) bool { return message.input == input })
+// Take 取出并清空队列，按 FIFO 返回
+func (a *Agent) Take(kind QueueKind) []PendingPayload {
+	items := a.queue(kind).takeAllForRestore()
+	payloads := make([]PendingPayload, len(items))
+	for i, item := range items {
+		payloads[i] = payloadOf(item.message)
+	}
+	return payloads
 }
 
-// AcknowledgeSteeringMessage 确认宿主提交失败后恢复、且已由会话补写的 steering
-func (a *Agent) AcknowledgeSteeringMessage(input llm.UserMessage) bool {
-	return a.acknowledgeSteering(func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
+// Clear 清空队列并返回被清掉的内容
+func (a *Agent) Clear(kind QueueKind) []PendingPayload { return a.Take(kind) }
+
+// Restore 把一批内容按顺序放回队列头部，用于撤回未消费的输入
+func (a *Agent) Restore(kind QueueKind, payloads []PendingPayload) {
+	queue := a.queue(kind)
+	for i := len(payloads) - 1; i >= 0; i-- {
+		queue.restoreFront(newPendingMessage(payloads[i].userMessage()))
+	}
+}
+
+// Acknowledge 按谓词确认一条已由会话补写的内容，只处理可重试的条目
+func (a *Agent) Acknowledge(kind QueueKind, match func(PendingPayload) bool) bool {
+	return a.acknowledgeQueue(a.queue(kind), func(message pendingMessage) bool {
+		return match(payloadOf(message.message))
+	})
+}
+
+// AcknowledgePendingText 按纯文本确认最近一次 commit 失败恢复的队列项，
+// 是 AcknowledgePending 的宽松回退：落盘时消息可能被改写，完整内容对不上
+func (a *Agent) AcknowledgePendingText(text string) bool {
+	queue := a.pendingQueue()
+	if queue == nil {
+		return false
+	}
+	return a.acknowledgeQueue(queue, func(message pendingMessage) bool { return message.input == text })
+}
+
+// AcknowledgePending 只确认最近一次 commit 失败恢复的那条队列，
+// 同时匹配内容与队列类型，避免相同文本跨队列误删
+func (a *Agent) AcknowledgePending(payload PendingPayload) bool {
+	queue := a.pendingQueue()
+	if queue == nil {
+		return false
+	}
+	return a.acknowledgeQueue(queue, func(message pendingMessage) bool {
+		return reflect.DeepEqual(payloadOf(message.message), payload)
+	})
 }
 
 func (a *Agent) pendingQueue() *pendingMessageQueue {
@@ -272,25 +329,6 @@ func (a *Agent) pendingQueue() *pendingMessageQueue {
 	return a.retryableQueue
 }
 
-// AcknowledgePendingMessage 只确认最近一次 commit 失败恢复的那条队列，
-// 同时匹配完整消息和队列类型，避免相同文本跨队列误删
-func (a *Agent) AcknowledgePendingMessage(input llm.UserMessage) bool {
-	queue := a.pendingQueue()
-	if queue == nil {
-		return false
-	}
-	return a.acknowledgeQueue(queue, func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
-}
-
-func (a *Agent) AcknowledgePending(input string) bool {
-	queue := a.pendingQueue()
-	if queue == nil {
-		return false
-	}
-	return a.acknowledgeQueue(queue, func(message pendingMessage) bool { return message.input == input })
-}
-
-// markRetryableQueue 记录本次 commit 失败消息所属的队列
 func (a *Agent) markRetryableQueue(queue *pendingMessageQueue) {
 	a.retryableMu.Lock()
 	a.retryableQueue = queue
@@ -303,15 +341,6 @@ func (a *Agent) clearRetryableQueue(queue *pendingMessageQueue) {
 		a.retryableQueue = nil
 	}
 	a.retryableMu.Unlock()
-}
-
-// AcknowledgeFollowUp 确认宿主补写成功且已由会话落盘的 follow-up，避免 successor run 重复投放
-func (a *Agent) AcknowledgeFollowUp(input string) bool {
-	return a.acknowledgeQueue(&a.followUpQueue, func(message pendingMessage) bool { return message.input == input })
-}
-
-func (a *Agent) AcknowledgeFollowUpMessage(input llm.UserMessage) bool {
-	return a.acknowledgeQueue(&a.followUpQueue, func(message pendingMessage) bool { return equalUserMessage(message.message, input) })
 }
 
 func (a *Agent) acknowledgeSteering(match func(pendingMessage) bool) bool {
@@ -350,14 +379,109 @@ type PreparedRequest struct {
 	TransientAck func()
 }
 
-func NewAgent(cfg llm.AgentConfig, agentCtx llm.Context, streamFn llm.StreamFn, onEvent llm.AgentEventSink) *Agent {
+// Options 是一次装配的全部参数，Agent 不再暴露可写字段
+type Options struct {
+	Config llm.AgentConfig
+	// Context 是初始上下文，含工具与消息
+	Context llm.Context
+	Stream  llm.StreamFn
+	Events  llm.AgentEventSink
+	// WorkingDir 是工具执行的工作目录
+	WorkingDir string
+	// MaxTurns 为 0 表示不限制
+	MaxTurns int
+	// ForkChild 标记该 agent 是 fork 子 agent
+	ForkChild bool
+	// AgentID 是子 agent 的任务 ID，主 agent 留空
+	AgentID string
+	Hooks   Hooks
+}
+
+// Hooks 是宿主注入的边界回调，核心不持有会话或压缩协调器
+type Hooks struct {
+	// PrepareRequest 返回宿主准备的请求快照
+	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
+	// CommitMessages 把消息落盘并返回消息 ID
+	CommitMessages func([]llm.Message) ([]string, error)
+}
+
+// New 按 Options 装配 Agent
+func New(opts Options) *Agent {
 	return &Agent{
-		AgentConfig:  cfg,
-		AgentContext: agentCtx,
-		StreamFn:     streamFn,
-		OnEvent:      onEvent,
+		cfg:        opts.Config,
+		ctx:        opts.Context,
+		stream:     opts.Stream,
+		events:     opts.Events,
+		workingDir: opts.WorkingDir,
+		maxTurns:   opts.MaxTurns,
+		forkChild:  opts.ForkChild,
+		agentID:    opts.AgentID,
+		hooks:      opts.Hooks,
 	}
 }
+
+// Reconfigure 替换模型与流函数，保留队列等运行中状态；
+// 未提供的字段保持原值，便于只切换模型
+func (a *Agent) Reconfigure(opts Options) error {
+	if opts.Config.Model.ID != "" {
+		a.cfg = opts.Config
+	}
+	if opts.Stream != nil {
+		a.stream = opts.Stream
+	}
+	if opts.Events != nil {
+		a.events = opts.Events
+	}
+	if opts.WorkingDir != "" {
+		a.workingDir = opts.WorkingDir
+	}
+	if opts.MaxTurns != 0 {
+		a.maxTurns = opts.MaxTurns
+	}
+	if opts.AgentID != "" {
+		a.agentID = opts.AgentID
+	}
+	// Hooks 只覆盖显式提供的回调，未提供的保持原值
+	if opts.Hooks.PrepareRequest != nil {
+		a.hooks.PrepareRequest = opts.Hooks.PrepareRequest
+	}
+	if opts.Hooks.CommitMessages != nil {
+		a.hooks.CommitMessages = opts.Hooks.CommitMessages
+	}
+	return nil
+}
+
+// Emit 把事件交给当前订阅者，供宿主在装配后触发已安装的处理器
+func (a *Agent) Emit(event llm.AgentEvent) error { return a.emit(event) }
+
+// WrapEvents 在现有事件回调外面再包一层，保留已有订阅者；
+// 用于子 agent 在装配后追加事件处理
+func (a *Agent) WrapEvents(wrap func(next llm.AgentEventSink) llm.AgentEventSink) {
+	a.events = wrap(a.events)
+}
+
+// SetStream 替换流函数，保留模型与队列
+func (a *Agent) SetStream(stream llm.StreamFn) { a.stream = stream }
+
+// SetTools 替换工具集合，工具装配变化时使用
+func (a *Agent) SetTools(tools []llm.Tool) { a.ctx.Tools = tools }
+
+// SetThinkingLevel 就地更新思考等级，不重建 agent
+func (a *Agent) SetThinkingLevel(level llm.ThinkingLevel) { a.cfg.ThinkingLevel = level }
+
+// SetModel 就地更新模型元数据，流函数由 Reconfigure 负责
+func (a *Agent) SetModel(model llm.Model) { a.cfg.Model = model }
+
+// Context 返回当前上下文；工具能力位等就地修改通过 Tools 进行
+func (a *Agent) Context() llm.Context { return a.ctx }
+
+func (a *Agent) Config() llm.AgentConfig { return a.cfg }
+func (a *Agent) Stream() llm.StreamFn    { return a.stream }
+func (a *Agent) WorkingDir() string      { return a.workingDir }
+func (a *Agent) MaxTurns() int           { return a.maxTurns }
+func (a *Agent) ForkChild() bool         { return a.forkChild }
+func (a *Agent) AgentID() string         { return a.agentID }
+func (a *Agent) Hooks() Hooks            { return a.hooks }
 
 // acquireRunGuard 独占一次运行的执行权，并发 Run 在此排队且等待期间可被取消
 func (a *Agent) acquireRunGuard(ctx context.Context) (func(), error) {
@@ -392,7 +516,7 @@ func (a *Agent) RunMessage(ctx context.Context, userMessage llm.UserMessage) (*l
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a.currentUserID = ""
-	firstMessageIndex := len(a.AgentContext.Messages)
+	firstMessageIndex := len(a.ctx.Messages)
 	if err := a.emit(llm.AgentStartEvent{}); err != nil {
 		return nil, err
 	}
@@ -453,7 +577,7 @@ func (a *Agent) resumeQueued(ctx context.Context, committed *llm.AssistantMessag
 		a.currentUserID = ""
 	}
 	ctx = llm.WithCurrentUserMessageID(ctx, a.currentUserID)
-	firstMessageIndex := len(a.AgentContext.Messages)
+	firstMessageIndex := len(a.ctx.Messages)
 	var initialPending *pendingMessage
 	if queue != nil {
 		pending, ok := queue.takeOne()
@@ -476,7 +600,7 @@ func (a *Agent) resumeQueued(ctx context.Context, committed *llm.AssistantMessag
 	}
 	if committed != nil {
 		calls := assistantToolCalls(*committed)
-		if committed.StopReason == llm.StopReasonAborted || len(calls) == 0 || isRecoverableLength(*committed, a.AgentConfig.Model) {
+		if committed.StopReason == llm.StopReasonAborted || len(calls) == 0 || isRecoverableLength(*committed, a.cfg.Model) {
 			if err := a.emit(llm.TurnEndEvent{Message: *committed}); err != nil {
 				return nil, err
 			}
@@ -501,11 +625,11 @@ func (a *Agent) resumeQueued(ctx context.Context, committed *llm.AssistantMessag
 
 // ReplaceMessages 用编排层提供的投影消息替换内存消息序列
 func (a *Agent) ReplaceMessages(messages []llm.Message) {
-	a.AgentContext.Messages = messages
+	a.ctx.Messages = messages
 }
 
 func (a *Agent) AppendMessage(msg llm.Message) {
-	a.AgentContext.Messages = append(a.AgentContext.Messages, msg)
+	a.ctx.Messages = append(a.ctx.Messages, msg)
 }
 
 // runLoop 消费模型流并执行工具，循环顶回调编排层做阈值压缩
@@ -556,18 +680,18 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 
 		// 2.请求准备只返回快照，摘要失败的降级与存储失败的停止由宿主判断
-		if a.PrepareRequest != nil {
-			request, err := a.PrepareRequest(ctx, PreparedRequest{Context: a.AgentContext, Config: a.AgentConfig})
+		if a.hooks.PrepareRequest != nil {
+			request, err := a.hooks.PrepareRequest(ctx, PreparedRequest{Context: a.ctx, Config: a.cfg})
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return a.finishModelFailure(firstMessageIndex, llm.StopReasonAborted, err, nil)
 				}
 				return nil, err
 			}
-			a.AgentContext, a.AgentConfig = request.Context, request.Config
+			a.ctx, a.cfg = request.Context, request.Config
 			acknowledgeTransient = request.TransientAck
 			if request.Compacted {
-				firstMessageIndex = len(a.AgentContext.Messages)
+				firstMessageIndex = len(a.ctx.Messages)
 			}
 		}
 		// 3.消费模型流并同步发出 assistant partial 更新
@@ -577,10 +701,10 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 		// 每轮单独派生 stream ctx，错误事件分支只取消它
 		streamCtx, streamCancel := context.WithCancel(ctx)
-		requestContext := contextForModel(a.AgentContext)
-		events, streamErr := a.StreamFn(streamCtx, a.AgentConfig.Model, requestContext, llm.Options{
-			ThinkingLevel: a.AgentConfig.ThinkingLevel,
-			SessionID:     a.AgentConfig.SessionID,
+		requestContext := contextForModel(a.ctx)
+		events, streamErr := a.stream(streamCtx, a.cfg.Model, requestContext, llm.Options{
+			ThinkingLevel: a.cfg.ThinkingLevel,
+			SessionID:     a.cfg.SessionID,
 		})
 
 		var final *llm.AssistantMessage
@@ -654,9 +778,9 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
 		// 4.提交最终 assistant 消息，并检查是否需要执行工具
-		setAssistantMetadata(final, a.AgentConfig.Model)
+		setAssistantMetadata(final, a.cfg.Model)
 		if final.Usage.Cost == nil {
-			final.Usage.Cost = llm.PriceUsage(a.AgentConfig.Model, final.Usage)
+			final.Usage.Cost = llm.PriceUsage(a.cfg.Model, final.Usage)
 		}
 		if err := a.commitMessages([]llm.Message{*final}); err != nil {
 			cancel()
@@ -667,7 +791,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		}
 
 		// 达到轮次上限时先收尾本轮,再决定是否继续
-		if a.MaxTurns > 0 && turns >= a.MaxTurns {
+		if a.maxTurns > 0 && turns >= a.maxTurns {
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
 				return nil, err
@@ -685,7 +809,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		toolCalls := assistantToolCalls(*final)
 		// 5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
 		// 正常提交本轮后由编排层驱动溢出恢复；达到上限的截断是正常输出限制
-		if a.PrepareRequest != nil && isRecoverableLength(*final, a.AgentConfig.Model) {
+		if a.hooks.PrepareRequest != nil && isRecoverableLength(*final, a.cfg.Model) {
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
 				return nil, err
@@ -766,7 +890,7 @@ func cloneAssistantMessage(message llm.AssistantMessage) llm.AssistantMessage {
 
 func (a *Agent) newAssistantMessage() llm.AssistantMessage {
 	message := llm.AssistantMessage{}
-	setAssistantMetadata(&message, a.AgentConfig.Model)
+	setAssistantMetadata(&message, a.cfg.Model)
 	return message
 }
 
@@ -878,7 +1002,7 @@ func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason,
 		message.Usage = partial.Usage
 	}
 	if message.Usage.Cost == nil {
-		message.Usage.Cost = llm.PriceUsage(a.AgentConfig.Model, message.Usage)
+		message.Usage.Cost = llm.PriceUsage(a.cfg.Model, message.Usage)
 	}
 	if reason == llm.StopReasonAborted {
 		// 取消属于用户操作而非故障：固定文案，保留已收到的 partial 内容
@@ -905,13 +1029,13 @@ func (a *Agent) finishModelFailure(firstMessageIndex int, reason llm.StopReason,
 }
 
 func (a *Agent) emitAgentEnd(firstMessageIndex int, cause ...error) error {
-	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
+	messages := append([]llm.Message(nil), a.ctx.Messages[firstMessageIndex:]...)
 	return a.emitAgentEndMessages(messages, cause...)
 }
 
 // emitAgentEndWithMessages 在恢复路径补充已提交但不属于当前内存切片的消息
 func (a *Agent) emitAgentEndWithMessages(firstMessageIndex int, extra []llm.Message, cause ...error) error {
-	messages := append([]llm.Message(nil), a.AgentContext.Messages[firstMessageIndex:]...)
+	messages := append([]llm.Message(nil), a.ctx.Messages[firstMessageIndex:]...)
 	messages = append(messages, extra...)
 	return a.emitAgentEndMessages(messages, cause...)
 }
@@ -925,17 +1049,17 @@ func (a *Agent) emitAgentEndMessages(messages []llm.Message, cause ...error) err
 }
 
 func (a *Agent) emit(event llm.AgentEvent) error {
-	if a.OnEvent == nil {
+	if a.events == nil {
 		return nil
 	}
-	if err := a.OnEvent(event); err != nil {
+	if err := a.events(event); err != nil {
 		return fmt.Errorf("agent: event consumer failed: %w", err)
 	}
 	return nil
 }
 
 func (a *Agent) findTool(name string) llm.Tool {
-	for _, t := range a.AgentContext.Tools {
+	for _, t := range a.ctx.Tools {
 		if t.Name() == name {
 			return t
 		}
@@ -1062,8 +1186,8 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
 	// 工具需要执行中 agent 的上下文来派发子任务,但不该看到 Agent 本身
-	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.AgentContext, Config: a.AgentConfig, ForkChild: a.ForkChild, AgentID: a.AgentID})
-	ctx = llm.WithWorkingDir(ctx, a.WorkingDir)
+	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.ctx, Config: a.cfg, ForkChild: a.forkChild, AgentID: a.agentID})
+	ctx = llm.WithWorkingDir(ctx, a.workingDir)
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -1175,14 +1299,14 @@ func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {
 		return nil, nil
 	}
 	var ids []string
-	if a.CommitMessages != nil {
+	if a.hooks.CommitMessages != nil {
 		var err error
-		ids, err = a.CommitMessages(messages)
+		ids, err = a.hooks.CommitMessages(messages)
 		if err != nil {
 			return ids, err
 		}
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, messages...)
+	a.ctx.Messages = append(a.ctx.Messages, messages...)
 	return ids, nil
 }
 

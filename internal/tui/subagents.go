@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // SubagentTaskView 是单个 root-store 任务的不可变展示投影。
@@ -50,7 +49,7 @@ type SubagentSnapshot struct {
 type SubagentRequest struct {
 	Kind    string
 	TaskID  string
-	Message *llm.UserMessage
+	Message *ComposerPayload
 	// FollowUp 用于 dequeue:true 撤回 follow-up 队列,false 撤回 steering 队列
 	FollowUp bool
 }
@@ -59,9 +58,9 @@ type SubagentSnapshotMsg struct {
 	Snapshot SubagentSnapshot
 	Err      error
 	// RestoreMessage 是请求失败时要还给编辑器的输入
-	RestoreMessage *llm.UserMessage
+	RestoreMessage *ComposerPayload
 	// RestoreMessages 是从子任务队列撤回、要按顺序放回编辑器的输入
-	RestoreMessages []llm.UserMessage
+	RestoreMessages []ComposerPayload
 }
 
 type subagentRefreshMsg struct{}
@@ -70,6 +69,9 @@ type subagentRefreshMsg struct{}
 // 有任务留在面板上、正在查看某个任务,或主 agent 正在 run。
 // 终态任务也要继续轮询:驱逐由 store 侧定时器完成,不轮询就永远停在
 // 最后一张快照上,任务行不会消失
+// needsSubagentRefresh 报告是否需要继续轮询任务快照。
+// 面板里还有任务（含终态）就必须续链：终态任务要显示到被驱逐，
+// 首次进入视图时 transcript 也可能还没加载完
 func (m *Model) needsSubagentRefresh() bool {
 	if len(m.state.Subagents.Tasks) > 0 || m.viewingTaskID != "" {
 		return true
@@ -596,7 +598,7 @@ func (m *Model) dequeueSubagentMessages(followUp bool) tea.Cmd {
 }
 
 // restoreSubagentMessages 把撤回的子任务队列按顺序追加到编辑器
-func (m *Model) restoreSubagentMessages(messages []llm.UserMessage) {
+func (m *Model) restoreSubagentMessages(messages []ComposerPayload) {
 	if len(messages) == 0 {
 		m.status = "No queued messages to restore"
 		m.layout()
@@ -604,7 +606,7 @@ func (m *Model) restoreSubagentMessages(messages []llm.UserMessage) {
 	}
 	var parts []string
 	for _, message := range messages {
-		if text := strings.TrimSpace(m.editorTextForMessage(message)); text != "" {
+		if text := strings.TrimSpace(m.editorTextForPayload(message)); text != "" {
 			parts = append(parts, text)
 		}
 	}

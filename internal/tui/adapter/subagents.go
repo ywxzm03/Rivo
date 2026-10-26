@@ -54,16 +54,17 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 		case "exit":
 			activeApp.ExitSubagentView()
 		case "queue", "followup":
-			if request.Message == nil {
+			message := payloadMessage(request.Message)
+			if message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				err = activeApp.QueueSubagentMessage(request.TaskID, *request.Message, request.Kind == "followup")
+				err = activeApp.QueueSubagentMessage(request.TaskID, *message, request.Kind == "followup")
 			}
 		case "continue":
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, taskMessageText(*request.Message))
+				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, taskMessageText(*payloadMessage(request.Message)))
 			}
 		case "dequeue":
 			// 从子任务队列撤回:与主 agent 一样,取出后交回编辑器
@@ -84,7 +85,7 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 				err = fmt.Errorf("subagent task %s cannot be evicted", request.TaskID)
 			}
 		}
-		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: restored}
+		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: payloadsFromMessages(restored)}
 		if err != nil {
 			result.RestoreMessage = request.Message
 		}

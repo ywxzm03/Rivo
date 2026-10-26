@@ -246,8 +246,14 @@ func resolveEditPathFrom(path, cwd string) (string, error) {
 	return filepath.Clean(filepath.Join(cwd, path)), nil
 }
 
+// isWindowsDrivePath 判定 path 是否以盘符开头；不足两个字符时直接判否，
+// 避免越界
 func isWindowsDrivePath(path string) bool {
-	return ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':'
+	if len(path) < 2 {
+		return false
+	}
+	letter := path[0]
+	return ((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')) && path[1] == ':'
 }
 
 func normalizeLineEndings(text string) string {

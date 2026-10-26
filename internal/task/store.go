@@ -12,15 +12,15 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-// panelGracePeriod 是终态任务在根投影中保留的时长,
+// defaultGracePeriod 是终态任务在根投影中保留的默认时长,
 // 让 TUI 面板有机会展示结束状态后再自动驱逐
-const panelGracePeriod = 30 * time.Second
+const defaultGracePeriod = 30 * time.Second
 
 // Store 是任务状态、lifecycle runtime 句柄和通知的唯一所有者
 type Store struct {
 	mu            sync.Mutex
 	tasks         map[string]State
-	runtimes      map[string]*AgentRuntime
+	runtimes      map[string]Runtime
 	notifications []Notification
 	nextID        uint64
 	nextToken     uint64
@@ -28,10 +28,43 @@ type Store struct {
 	// notify 是通知入队时的唤醒回调。主 agent 空闲时靠它启动消费通知的 run,
 	// 否则通知要等用户下次输入才投递
 	notify func()
+
+	// GracePeriod 是终态任务的驱逐宽限期，零值表示用 defaultGracePeriod。
+	// 测试注入毫秒级宽限期，避免真等 30 秒
+	GracePeriod time.Duration
+
+	// 下面三组子结构不持有独立锁，复用 Store 的锁与状态，
+	// 只是把平铺方法按职责分组
+	Notifications NotificationQueue
+	Pending       PendingQueues
+	Views         TaskViews
 }
 
 func NewStore() *Store {
-	return &Store{tasks: make(map[string]State), runtimes: make(map[string]*AgentRuntime)}
+	store := &Store{tasks: make(map[string]State), runtimes: make(map[string]Runtime)}
+	store.Notifications = NotificationQueue{store: store}
+	store.Pending = PendingQueues{store: store}
+	store.Views = TaskViews{store: store}
+	return store
+}
+
+// gracePeriod 返回生效的宽限期，零值时用默认值
+func (s *Store) gracePeriod() time.Duration {
+	if s.GracePeriod > 0 {
+		return s.GracePeriod
+	}
+	return defaultGracePeriod
+}
+
+// tokenOf 返回任务当前的 lifecycle token，供子结构复用既有入口
+func (s *Store) tokenOf(id string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[id]
+	if !ok {
+		return 0
+	}
+	return task.Base().LifecycleToken
 }
 
 // SetNotifyHook 安装通知入队回调。回调在锁外执行,避免宿主侧逻辑与 store 锁互等
@@ -54,7 +87,7 @@ type RegisterSpec struct {
 	Thinking     llm.ThinkingLevel
 	WorktreePath string
 	Worktree     bool
-	Runtime      *AgentRuntime
+	Runtime      Runtime
 	BashState    *BashState
 	AgentState   *AgentState
 }
@@ -105,7 +138,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	}
 	s.tasks[id] = state
 	if spec.Runtime != nil {
-		spec.Runtime.LifecycleToken = token
+		spec.Runtime.SetToken(token)
 		s.runtimes[id] = spec.Runtime
 	}
 	return id, token, nil
@@ -147,7 +180,7 @@ func (s *Store) EnterView(id string) bool {
 	if previous, ok := s.tasks[s.viewingTaskID].(*AgentState); ok && previous != task {
 		previous.Retain = false
 		if previous.Base().Status.Terminal() {
-			setEvictAfter(&previous.StateBase, false, time.Now())
+			setEvictAfter(&previous.StateBase, false, time.Now(), s.gracePeriod())
 		}
 	}
 	s.viewingTaskID = id
@@ -169,7 +202,7 @@ func (s *Store) ExitView() {
 		}
 		task.Retain = false
 		if task.Base().Status.Terminal() {
-			setEvictAfter(&task.StateBase, false, time.Now())
+			setEvictAfter(&task.StateBase, false, time.Now(), s.gracePeriod())
 		}
 	}
 }
@@ -225,6 +258,20 @@ func (s *Store) Evict(id string) bool {
 
 // EvictExpired 驱逐宽限期已过、且通知已投递过的终态任务,返回驱逐数量。
 // bash 与 agent 共用同一套策略:终态 + 已通知 + 过了宽限期
+// HasEvictionWork 报告是否有等待宽限期的终态任务。
+// 驱逐循环据此在空闲时停止轮询，而不是每秒空转
+func (s *Store) HasEvictionWork() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, state := range s.tasks {
+		base := state.Base()
+		if base.Status.Terminal() && base.Notified && base.EvictAfter != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) EvictExpired() int {
 	s.mu.Lock()
 	now := time.Now()
@@ -266,7 +313,7 @@ func (s *Store) KillAllRunningTasks() int {
 			bashIDs = append(bashIDs, id)
 		}
 	}
-	runtimes := make([]*AgentRuntime, 0, len(agentIDs))
+	runtimes := make([]Runtime, 0, len(agentIDs))
 	for _, id := range agentIDs {
 		runtimes = append(runtimes, s.runtimes[id])
 	}
@@ -280,9 +327,9 @@ func (s *Store) KillAllRunningTasks() int {
 	// 取消只发信号。等 lifecycle 真正收尾,子 agent 才会在退出前
 	// 走完工具层的进程树清理
 	for _, runtime := range runtimes {
-		if runtime != nil && runtime.Done != nil {
+		if runtime != nil {
 			select {
-			case <-runtime.Done:
+			case <-runtime.Done():
 			case <-time.After(shutdownWait):
 			}
 		}
@@ -585,7 +632,7 @@ func (s *Store) completeAgent(id string, token uint64, result *AgentResult, err 
 	now := time.Now()
 	task.Base().EndTime = &now
 	task.Abort = nil
-	setEvictAfter(&task.StateBase, task.Retain, now)
+	setEvictAfter(&task.StateBase, task.Retain, now, s.gracePeriod())
 	if err != nil {
 		task.Base().Status = StatusFailed
 		task.Error = err.Error()
@@ -613,11 +660,11 @@ func (s *Store) completeBash(id string, token uint64, result *BashResult, err er
 	}
 	task.Result = result
 	// bash 与 agent 共用面板宽限期,通知投递后由 EvictExpired 回收
-	setEvictAfter(&task.StateBase, false, now)
+	setEvictAfter(&task.StateBase, false, now, s.gracePeriod())
 	return true
 }
 
-func (s *Store) beginAgentKill(id string, reason StopReason) (*AgentRuntime, context.CancelFunc, uint64, error) {
+func (s *Store) beginAgentKill(id string, reason StopReason) (Runtime, context.CancelFunc, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -635,23 +682,23 @@ func (s *Store) beginAgentKill(id string, reason StopReason) (*AgentRuntime, con
 	task.Abort = nil
 	task.PendingSteering = nil
 	task.PendingFollowUp = nil
-	setEvictAfter(&task.StateBase, task.Retain, now)
+	setEvictAfter(&task.StateBase, task.Retain, now, s.gracePeriod())
 	return runtime, abort, token, nil
 }
 
 // setEvictAfter 在终态转移时写入面板宽限期;Retain 任务永不驱逐
-func setEvictAfter(base *StateBase, retain bool, now time.Time) {
+func setEvictAfter(base *StateBase, retain bool, now time.Time, gracePeriod time.Duration) {
 	if retain {
 		base.EvictAfter = nil
 		return
 	}
-	deadline := now.Add(panelGracePeriod)
+	deadline := now.Add(gracePeriod)
 	base.EvictAfter = &deadline
 }
 
 // ContinuationRuntime 返回当前 runtime 和 token,调用方据此取消它
 // 并在替换任务状态前等待 Done。
-func (s *Store) ContinuationRuntime(id string) (*AgentRuntime, uint64, error) {
+func (s *Store) ContinuationRuntime(id string) (Runtime, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -670,7 +717,7 @@ func (s *Store) ContinuationRuntime(id string) (*AgentRuntime, uint64, error) {
 
 // RegisterContinuation 替换任务的运行中 lifecycle,同时保留稳定 task ID
 // 和 Claude 风格的 UI/transcript 字段。
-func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
+func (s *Store) RegisterContinuation(id string, runtime Runtime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.tasks[id].(*AgentState)
@@ -706,7 +753,7 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 	}
 	s.tasks[id] = state
 	if runtime != nil {
-		runtime.LifecycleToken = token
+		runtime.SetToken(token)
 		s.runtimes[id] = runtime
 	}
 	return token, nil
@@ -762,7 +809,7 @@ func (s *Store) beginBashKill(id string) (*BashState, BashProcess, uint64, error
 	task.Base().Notified = true
 	task.Result = &BashResult{Code: 137, Interrupted: true}
 	task.Process = nil
-	setEvictAfter(&task.StateBase, false, now)
+	setEvictAfter(&task.StateBase, false, now, s.gracePeriod())
 	return task, process, token, nil
 }
 
@@ -790,7 +837,7 @@ func (s *Store) RemoveRuntime(id string, token uint64) {
 	}
 }
 
-func (s *Store) AttachAgentRuntime(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
+func (s *Store) AttachAgentRuntime(id string, runtime Runtime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -798,23 +845,23 @@ func (s *Store) AttachAgentRuntime(id string, runtime *AgentRuntime, prompt stri
 		return 0, errors.New("subagent: task is not running")
 	}
 	task.Prompt = prompt
-	task.Abort = runtime.Cancel
+	task.Abort = runtime.Abort()
 	s.runtimes[id] = runtime
 	return task.Base().LifecycleToken, nil
 }
 
-func (s *Store) SetRuntimeMetadata(id string, token uint64, runtime *AgentRuntime) bool {
+func (s *Store) SetRuntimeMetadata(id string, token uint64, runtime Runtime) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
-	if runtime.OutputFile != "" {
-		task.Base().OutputFile = runtime.OutputFile
+	if path := runtime.OutputPath(); path != "" {
+		task.Base().OutputFile = path
 	}
-	if runtime.WorktreePath != "" {
-		task.WorktreePath = runtime.WorktreePath
+	if path := runtime.Worktree(); path != "" {
+		task.WorktreePath = path
 	}
 	return true
 }

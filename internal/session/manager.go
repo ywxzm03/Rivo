@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -191,7 +191,7 @@ func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, toke
 	return m.AppendCompactionWithDetails(summary, firstKeptEntryID, tokensBefore, systemMessage, usage, nil)
 }
 
-func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *compact.FileLists) error {
+func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *ctxview.FileLists) error {
 	e := &CompactionEntry{
 		Summary:          summary,
 		FirstKeptEntryID: firstKeptEntryID,

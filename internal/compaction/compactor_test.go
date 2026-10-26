@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -39,25 +40,25 @@ func compactFixture() []llm.Message {
 	}
 }
 
-func contextView(messages []llm.Message) ContextView {
-	entries := make([]ContextEntry, 0, len(messages))
+func contextView(messages []llm.Message) ctxview.ContextView {
+	entries := make([]ctxview.ContextEntry, 0, len(messages))
 	for i, message := range messages {
-		entries = append(entries, ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ContextMessage, Messages: []llm.Message{message}})
+		entries = append(entries, ctxview.ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ctxview.ContextMessage, Messages: []llm.Message{message}})
 	}
-	return ContextView{Entries: entries}
+	return ctxview.ContextView{Entries: entries}
 }
 
-func contextViewWithCompaction(summary string, snapshot *llm.SystemMessage, messages []llm.Message) ContextView {
+func contextViewWithCompaction(summary string, snapshot *llm.SystemMessage, messages []llm.Message) ctxview.ContextView {
 	compactionMessages := make([]llm.Message, 0, 2)
 	if snapshot != nil {
 		compactionMessages = append(compactionMessages, *snapshot)
 	}
-	compactionMessages = append(compactionMessages, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: WrappedSummary(summary)}}})
-	entries := []ContextEntry{{SourceID: "compaction", Kind: ContextCompaction, Messages: compactionMessages, Summary: summary}}
+	compactionMessages = append(compactionMessages, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: ctxview.WrappedSummary(summary)}}})
+	entries := []ctxview.ContextEntry{{SourceID: "compaction", Kind: ctxview.ContextCompaction, Messages: compactionMessages, Summary: summary}}
 	for i, message := range messages {
-		entries = append(entries, ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ContextMessage, Messages: []llm.Message{message}})
+		entries = append(entries, ctxview.ContextEntry{SourceID: fmt.Sprintf("entry-%d", i), Kind: ctxview.ContextMessage, Messages: []llm.Message{message}})
 	}
-	return ContextView{Entries: entries}
+	return ctxview.ContextView{Entries: entries}
 }
 
 // singleCallConfig 让预算落在 index 2 的 user 消息上，切割点在轮次边界，走单次摘要路径
@@ -179,7 +180,7 @@ func TestCompactTracksFileListsAcrossSummaryBoundary(t *testing.T) {
 func TestCompactCarriesPreviousFileLists(t *testing.T) {
 	streamFn, _ := recordingStreamFn("SUMMARY")
 	view := contextViewWithCompaction("old summary", nil, compactFixture())
-	view.Entries[0].Details = &FileLists{ReadFiles: []string{"old.go"}, ModifiedFiles: []string{"changed.go"}}
+	view.Entries[0].Details = &ctxview.FileLists{ReadFiles: []string{"old.go"}, ModifiedFiles: []string{"changed.go"}}
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
 	result, err := c.Compact(context.Background(), view, "")
 	if err != nil {
@@ -325,7 +326,7 @@ func TestCompactDoesNotRetryAbortedSummary(t *testing.T) {
 func TestCompactRejectsEmptyRegion(t *testing.T) {
 	streamFn, _ := recordingStreamFn("SUMMARY")
 	c := &Compactor{StreamFn: streamFn, Config: singleCallConfig()}
-	if _, err := c.Compact(context.Background(), ContextView{}, ""); err == nil {
+	if _, err := c.Compact(context.Background(), ctxview.ContextView{}, ""); err == nil {
 		t.Fatal("compacting empty messages should fail")
 	}
 }

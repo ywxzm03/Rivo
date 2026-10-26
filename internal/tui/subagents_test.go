@@ -11,7 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestSubagentRowsAndViewSwitch(t *testing.T) {
@@ -187,8 +186,8 @@ func TestSubagentViewSubmitsQueueAndContinuation(t *testing.T) {
 	if len(requests) != 2 || requests[1].Kind != "continue" || requests[1].Message == nil {
 		t.Fatalf("continuation request = %#v", requests)
 	}
-	if _, ok := requests[1].Message.Content[0].(llm.TextContent); !ok {
-		t.Fatalf("continuation message = %#v", requests[1].Message)
+	if requests[1].Message.Text == "" {
+		t.Fatalf("continuation payload = %#v, want text", requests[1].Message)
 	}
 }
 
@@ -701,9 +700,9 @@ func TestSubagentViewDequeuesOwnQueue(t *testing.T) {
 func TestSubagentMessagesRestoreToEditor(t *testing.T) {
 	m := New(Snapshot{}, Handlers{})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
-	m.restoreSubagentMessages([]llm.UserMessage{
-		{Content: []llm.Content{llm.TextContent{Text: "first"}}},
-		{Content: []llm.Content{llm.TextContent{Text: "second"}}},
+	m.restoreSubagentMessages([]ComposerPayload{
+		{Text: "first"},
+		{Text: "second"},
 	})
 	if got := m.editor.Value(); !strings.Contains(got, "first") || !strings.Contains(got, "second") {
 		t.Fatalf("editor = %q, want both restored messages", got)
@@ -1026,8 +1025,8 @@ func TestFollowUpDequeueWorksWhileTaskFocused(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.busy = true
 	m.state.FollowUp = []string{"queued follow-up"}
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
+		return []ComposerPayload{textPayload("queued follow-up")}
 	}
 	m.setTaskFocus(true)
 
@@ -1242,7 +1241,7 @@ func TestPendingRowsMatchRenderedLines(t *testing.T) {
 			m.enterSubagentView("a1")
 			m.setTaskFocus(focused)
 			m.state.Steering = []string{"queued"}
-			m.state.SteeringInputs = []llm.UserMessage{textUserMessage("queued")}
+			m.state.SteeringInputs = []ComposerPayload{textPayload("queued")}
 			m.layout()
 			if got, want := m.pendingRows(), len(m.pendingLines()); got != want {
 				t.Fatalf("h=%d focused=%v pendingRows=%d lines=%d", height, focused, got, want)
@@ -1260,11 +1259,11 @@ func TestSubagentDequeueKeepsFrameFull(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 16})
 	m.enterSubagentView("a1")
 	m.state.Steering = []string{"queued steering"}
-	m.state.SteeringInputs = []llm.UserMessage{textUserMessage("queued steering")}
+	m.state.SteeringInputs = []ComposerPayload{textPayload("queued steering")}
 	m.layout()
 	before := len(splitFrameLines(m.View()))
 
-	m.restoreSubagentMessages([]llm.UserMessage{textUserMessage("queued steering")})
+	m.restoreSubagentMessages([]ComposerPayload{textPayload("queued steering")})
 	m.state.Steering = nil
 	m.state.SteeringInputs = nil
 	m.layout()
@@ -1319,7 +1318,7 @@ func TestDequeueRelayoutsViewport(t *testing.T) {
 		t.Fatalf("frame before dequeue = %d", len(splitFrameLines(m.View())))
 	}
 
-	m.restoreSubagentMessages([]llm.UserMessage{textUserMessage("queued")})
+	m.restoreSubagentMessages([]ComposerPayload{textPayload("queued")})
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{
 		{ID: "a1", AgentType: "explore", Status: "running", Description: "one"},
 	}})

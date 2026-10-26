@@ -13,6 +13,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
+	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
@@ -50,7 +51,7 @@ func (r *Runner) modelAndStream() (llm.Model, llm.StreamFn) {
 }
 
 // Run 按 spec 装配并返回一个已就绪的子 agent runtime
-func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.AgentRuntime, error) {
 	cwd := r.ParentCwd
 	worktreePath := spec.WorktreePath
 	worktreeBase := ""
@@ -153,19 +154,25 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentR
 	}
 	// 5.子事件由 Manager 的 task 级 handler 消费。把它们送到父 sink 会把
 	// sidechain transcript 更新混进主 TUI 流。
-	child := agent.NewAgent(cfg, llm.Context{Tools: tools, Messages: messages}, streamFn, nil)
-	child.WorkingDir = cwd
-	child.ForkChild = fork
-	child.AgentID = spec.ID
+	maxTurns := 0
 	if fork {
-		child.MaxTurns = forkMaxTurns
+		maxTurns = forkMaxTurns
 	}
 	if definition != nil {
-		child.MaxTurns = definition.MaxTurns
+		maxTurns = definition.MaxTurns
 	}
-	child.CommitMessages = sm.AppendMessages
-	runtime := &taskpkg.AgentRuntime{
-		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, Done: make(chan struct{}),
+	child := agent.New(agent.Options{
+		Config:     cfg,
+		Context:    llm.Context{Tools: tools, Messages: messages},
+		Stream:     streamFn,
+		WorkingDir: cwd,
+		MaxTurns:   maxTurns,
+		ForkChild:  fork,
+		AgentID:    spec.ID,
+		Hooks:      agent.Hooks{CommitMessages: sm.AppendMessages},
+	})
+	runtime := &subagent.AgentRuntime{
+		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, DoneChan: make(chan struct{}),
 		MessageStart: len(messages),
 	}
 	// 只有本生命周期新建的 worktree 才装回收钩子:恢复沿用的 worktree 里可能已有

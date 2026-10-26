@@ -15,7 +15,7 @@ import (
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
-type AgentRuntimeFactory func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error)
+type AgentRuntimeFactory func(context.Context, taskpkg.AgentSpec) (*AgentRuntime, error)
 
 type Manager struct {
 	store          *taskpkg.Store
@@ -132,12 +132,12 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 		return taskpkg.AgentLaunched{}, err
 	}
 	if oldRuntime != nil {
-		if oldRuntime.Cancel != nil {
-			oldRuntime.Cancel()
+		if abort := oldRuntime.Abort(); abort != nil {
+			abort()
 		}
-		if oldRuntime.Done != nil {
+		if done := oldRuntime.Done(); done != nil {
 			select {
-			case <-oldRuntime.Done:
+			case <-done:
 			case <-ctx.Done():
 				return taskpkg.AgentLaunched{}, ctx.Err()
 			}
@@ -170,12 +170,12 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 }
 
 // launch 校验 runtime、绑定 lifecycle context 并在后台启动任务
-func (m *Manager) launch(ctx context.Context, taskID string, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput, register func() (uint64, error)) error {
+func (m *Manager) launch(ctx context.Context, taskID string, runtime *AgentRuntime, input taskpkg.AgentInput, register func() (uint64, error)) error {
 	if runtime == nil || runtime.Agent == nil {
 		return errors.New("agent: factory returned no agent")
 	}
-	if runtime.Done == nil {
-		runtime.Done = make(chan struct{})
+	if runtime.DoneChan == nil {
+		runtime.DoneChan = make(chan struct{})
 	}
 	// Agent 工具是显式异步的。工具批次在返回结果后就会取消其子 context,
 	// 因此要把任务 lifecycle 与该短命请求 context 解绑。TaskStop 仍是子任务的
@@ -214,7 +214,7 @@ func thinkingValue(thinking *llm.ThinkingLevel) llm.ThinkingLevel {
 	return *thinking
 }
 
-func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput) {
+func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, runtime *AgentRuntime, input taskpkg.AgentInput) {
 	started := time.Now()
 	// goroutine 边界是唯一可靠的 panic 捕获点。panic 会跳过终态转换、runtime 移除和
 	// Done 关闭,任务永久卡在 running,所以在这里兜成 failed 并走完整清理路径
@@ -229,7 +229,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 			// 先回收孤儿 bash 再关闭 Done:Continue 只等 Done,
 			// 提前关闭会让新 lifecycle 与旧进程并发,清理还会误杀新任务
 			m.store.KillBashTasksForAgent(taskID)
-			close(runtime.Done)
+			close(runtime.DoneChan)
 		}()
 		// 收尾路径自身的 panic 只记录,不能带崩进程
 		defer func() {
@@ -250,7 +250,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 		}
 	}
 	reply, runErr := run(ctx, input.Prompt)
-	m.store.RecordAgentMessages(taskID, token, runtime.Agent.AgentContext.Messages)
+	m.store.RecordAgentMessages(taskID, token, runtime.Agent.Context().Messages)
 	wasKilled := false
 	stopReason := taskpkg.StopReasonAborted
 	if task, ok := m.store.Task(taskID); ok {
@@ -267,7 +267,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 				m.store.FailAgent(taskID, token, fmt.Errorf("agent: stop after cancellation failed: %w", err))
 			}
 		}
-		partialResult := agentResult(taskID, runtime.Agent.AgentContext.Messages, runtime.MessageStart, partial, time.Since(started))
+		partialResult := agentResult(taskID, runtime.Agent.Context().Messages, runtime.MessageStart, partial, time.Since(started))
 		status := taskpkg.StatusKilled
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusFailed {
 			status = taskpkg.StatusFailed
@@ -282,7 +282,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 	} else if runErr != nil {
 		m.failAgent(taskID, token, runtime, input, runErr, started)
 	} else {
-		result := agentResult(taskID, runtime.Agent.AgentContext.Messages, runtime.MessageStart, reply, time.Since(started))
+		result := agentResult(taskID, runtime.Agent.Context().Messages, runtime.MessageStart, reply, time.Since(started))
 		transitioned := m.store.CompleteAgent(taskID, token, &result)
 		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: input.Description, Result: joinText(result.Content), TotalTokens: result.TotalTokens, DurationMs: result.TotalDurationMs, ToolUses: result.TotalToolUseCount})
 		m.cleanupWorktree(taskID, token, runtime)
@@ -294,7 +294,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 
 // failAgent 把任务转成 failed、清理 worktree 并入队 failed 通知。
 // 正常失败和 panic 恢复共用这条路径
-func (m *Manager) failAgent(taskID string, token uint64, runtime *taskpkg.AgentRuntime, input taskpkg.AgentInput, cause error, started time.Time) {
+func (m *Manager) failAgent(taskID string, token uint64, runtime *AgentRuntime, input taskpkg.AgentInput, cause error, started time.Time) {
 	transitioned := m.store.FailAgent(taskID, token, cause)
 	notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusFailed, Summary: cause.Error(), DurationMs: time.Since(started).Milliseconds()})
 	m.cleanupWorktree(taskID, token, runtime)
@@ -305,7 +305,7 @@ func (m *Manager) failAgent(taskID string, token uint64, runtime *taskpkg.AgentR
 	}
 }
 
-func (m *Manager) cleanupWorktree(taskID string, token uint64, runtime *taskpkg.AgentRuntime) {
+func (m *Manager) cleanupWorktree(taskID string, token uint64, runtime *AgentRuntime) {
 	if runtime == nil || runtime.WorktreeCleanup == nil {
 		return
 	}
@@ -318,8 +318,8 @@ func latestAssistant(runtime *agent.Agent) *llm.AssistantMessage {
 	if runtime == nil {
 		return nil
 	}
-	for i := len(runtime.AgentContext.Messages) - 1; i >= 0; i-- {
-		if message, ok := runtime.AgentContext.Messages[i].(llm.AssistantMessage); ok {
+	for i := len(runtime.Context().Messages) - 1; i >= 0; i-- {
+		if message, ok := runtime.Context().Messages[i].(llm.AssistantMessage); ok {
 			copy := message
 			return &copy
 		}
@@ -340,45 +340,46 @@ func (m *Manager) notification(taskID string, token uint64, notification taskpkg
 	return notification
 }
 
-func (m *Manager) installPendingDrain(taskID string, token uint64, runtime *taskpkg.AgentRuntime) {
-	previous := runtime.Agent.OnEvent
-	runtime.Agent.OnEvent = func(event llm.AgentEvent) error {
-		if previous != nil {
-			if err := previous(event); err != nil {
-				return err
+func (m *Manager) installPendingDrain(taskID string, token uint64, runtime *AgentRuntime) {
+	runtime.Agent.WrapEvents(func(previous llm.AgentEventSink) llm.AgentEventSink {
+		return func(event llm.AgentEvent) error {
+			if previous != nil {
+				if err := previous(event); err != nil {
+					return err
+				}
 			}
-		}
-		// 只发布已提交的消息边界。若每个流式 delta 都复制完整子 context,
-		// 子任务继承大 transcript 时会产生平方级分配压力。
-		switch event.(type) {
-		case llm.MessageEndEvent, llm.TurnEndEvent:
-			m.store.RecordAgentMessages(taskID, token, runtime.Agent.AgentContext.Messages)
-		}
-		if event.Type() != llm.AgentEventTurnEnd {
+			// 只发布已提交的消息边界。若每个流式 delta 都复制完整子 context,
+			// 子任务继承大 transcript 时会产生平方级分配压力。
+			switch event.(type) {
+			case llm.MessageEndEvent, llm.TurnEndEvent:
+				m.store.RecordAgentMessages(taskID, token, runtime.Agent.Context().Messages)
+			}
+			if event.Type() != llm.AgentEventTurnEnd {
+				m.updateProgress(taskID, token, event)
+				return nil
+			}
 			m.updateProgress(taskID, token, event)
+			// 1.steering 在工具轮次边界注入,模型下一轮就能看到
+			if messages := m.store.DrainPendingMessages(taskID, token); len(messages) > 0 {
+				for i, message := range messages {
+					if err := runtime.Agent.Enqueue(agent.QueueSteering, agent.PayloadFromMessage(message)); err != nil {
+						m.store.RequeuePendingMessagesFront(taskID, token, messages[i:])
+						return err
+					}
+				}
+			}
+			// 2.follow-up 只在当前轮彻底结束后注入,作为下一轮的用户输入
+			if messages := m.store.DrainPendingFollowUpMessages(taskID, token); len(messages) > 0 {
+				for i, message := range messages {
+					if err := runtime.Agent.Enqueue(agent.QueueFollowUp, agent.PayloadFromMessage(message)); err != nil {
+						m.store.RequeuePendingFollowUpMessagesFront(taskID, token, messages[i:])
+						return err
+					}
+				}
+			}
 			return nil
 		}
-		m.updateProgress(taskID, token, event)
-		// 1.steering 在工具轮次边界注入,模型下一轮就能看到
-		if messages := m.store.DrainPendingMessages(taskID, token); len(messages) > 0 {
-			for i, message := range messages {
-				if err := runtime.Agent.SteerMessage(message); err != nil {
-					m.store.RequeuePendingMessagesFront(taskID, token, messages[i:])
-					return err
-				}
-			}
-		}
-		// 2.follow-up 只在当前轮彻底结束后注入,作为下一轮的用户输入
-		if messages := m.store.DrainPendingFollowUpMessages(taskID, token); len(messages) > 0 {
-			for i, message := range messages {
-				if err := runtime.Agent.FollowUpMessage(message); err != nil {
-					m.store.RequeuePendingFollowUpMessagesFront(taskID, token, messages[i:])
-					return err
-				}
-			}
-		}
-		return nil
-	}
+	})
 }
 
 func (m *Manager) updateProgress(taskID string, token uint64, event llm.AgentEvent) {

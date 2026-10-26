@@ -361,29 +361,6 @@ func writeTempBytes(t *testing.T, name string, data []byte) string {
 	return path
 }
 
-func TestSniffImage(t *testing.T) {
-	tests := []struct {
-		name string
-		data []byte
-		want string
-	}{
-		{"png", makePNG(t, 2, 2), "image/png"},
-		{"jpeg", makeJPEG(t, 2, 2), "image/jpeg"},
-		{"webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp"},
-		{"plain text", []byte("hello world"), ""},
-		{"empty file", nil, ""},
-		{"jpeg-ls is not jpeg", []byte{0xff, 0xd8, 0xff, 0xf7}, ""},
-		{"riff but not webp", []byte("RIFF\x00\x00\x00\x00WAVEfmt "), ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := sniffImage(tt.data); got != tt.want {
-				t.Errorf("sniffImage() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestReadImageAsAttachment(t *testing.T) {
 	data := makePNG(t, 4, 4)
 	path := writeTempBytes(t, "pic.png", data)
@@ -432,7 +409,7 @@ func TestReadImageWithoutVisionSupport(t *testing.T) {
 
 // 模型不收图时完全不该碰图片内容：坏图与好图给出同样的说明
 func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
-	broken := append(append([]byte{}, pngSignature...), []byte("this is not a real png")...)
+	broken := append(append([]byte{}, brokenPNGSignature...), []byte("this is not a real png")...)
 	path := writeTempBytes(t, "broken.png", broken)
 
 	content, err := (&Read{}).Execute(context.Background(), map[string]any{"path": path})
@@ -446,19 +423,9 @@ func TestReadImageWithoutVisionDoesNotTouchImage(t *testing.T) {
 	}
 }
 
-// 质量档位必须严格递减，否则某一档永远选不到（pi 原本的顺序就踩了这个）
-func TestImageJPEGQualitiesDescend(t *testing.T) {
-	for i := 1; i < len(imageJPEGQualities); i++ {
-		if imageJPEGQualities[i] >= imageJPEGQualities[i-1] {
-			t.Errorf("quality tier %d (%d) is not smaller than the previous %d — this tier is never selected",
-				i, imageJPEGQualities[i], imageJPEGQualities[i-1])
-		}
-	}
-}
-
 func TestReadImageDecodeFailure(t *testing.T) {
 	// 魔数对但内容是垃圾，不能 panic
-	bad := append(append([]byte{}, pngSignature...), []byte("not a real png")...)
+	bad := append(append([]byte{}, brokenPNGSignature...), []byte("not a real png")...)
 	path := writeTempBytes(t, "broken.png", bad)
 
 	content, err := (&Read{SupportsImages: true}).Execute(context.Background(), map[string]any{"path": path})
@@ -474,82 +441,8 @@ func TestReadImageDecodeFailure(t *testing.T) {
 	}
 }
 
-func TestProcessImage(t *testing.T) {
-	t.Run("scales down proportionally when oversized", func(t *testing.T) {
-		result, err := processImage(makePNG(t, 3000, 100), "image/png", defaultImageLimits)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !result.Resized {
-			t.Error("Resized = false, want true")
-		}
-		if result.Width != imageMaxWidth {
-			t.Errorf("Width = %d, want %d", result.Width, imageMaxWidth)
-		}
-		if result.OriginalWidth != 3000 || result.OriginalHeight != 100 {
-			t.Errorf("original size = %dx%d, want 3000x100", result.OriginalWidth, result.OriginalHeight)
-		}
-		note := dimensionNote(result)
-		if !strings.Contains(note, "original 3000x100") {
-			t.Errorf("dimensionNote() = %q", note)
-		}
-		if !strings.Contains(note, "Multiply coordinates by") {
-			t.Errorf("dimensionNote() = %q, want it to mention coordinate conversion", note)
-		}
-	})
-
-	t.Run("shrinks round by round until it fits when over the byte limit", func(t *testing.T) {
-		// 上限压到 4KB：200x200 的噪点图连 JPEG 最低质量都装不下，必须靠缩尺寸
-		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 4 * 1024}
-		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
-		if err != nil {
-			t.Fatalf("err = %v, want it to shrink within the limit", err)
-		}
-		if len(result.Data) >= limits.maxBytes {
-			t.Errorf("output is %d bytes, still over the limit %d", len(result.Data), limits.maxBytes)
-		}
-		if result.Width >= 200 {
-			t.Errorf("Width = %d, want it below 200 (should have been resized)", result.Width)
-		}
-	})
-
-	t.Run("re-encoding at the same size fits", func(t *testing.T) {
-		// 上限够大：不必缩尺寸，换 JPEG 编码即可，Resized 仍为 true
-		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 20 * 1024}
-		result, err := processImage(makeNoisePNG(t, 200, 200), "image/png", limits)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !result.Resized {
-			t.Error("Resized = false, want true (re-encoded)")
-		}
-		if result.Width != 200 {
-			t.Errorf("Width = %d, want 200 (size unchanged; only re-encoded)", result.Width)
-		}
-		if result.MIMEType == "image/png" {
-			t.Errorf("MIMEType = %q, want it switched to the smaller JPEG", result.MIMEType)
-		}
-	})
-
-	t.Run("errors when even 1x1 does not fit", func(t *testing.T) {
-		limits := imageLimits{maxWidth: 1000, maxHeight: 1000, maxBytes: 10}
-		_, err := processImage(makeNoisePNG(t, 50, 50), "image/png", limits)
-		if !errors.Is(err, errImageTooBig) {
-			t.Errorf("err = %v, want errImageTooBig", err)
-		}
-	})
-
-	t.Run("web formats are handled too", func(t *testing.T) {
-		// 用 JPEG 走一遍，确认解码器分派正确
-		result, err := processImage(makeJPEG(t, 20, 20), "image/jpeg", defaultImageLimits)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.MIMEType != "image/jpeg" {
-			t.Errorf("MIMEType = %q, want image/jpeg", result.MIMEType)
-		}
-	})
-}
+// brokenPNGSignature 只用于构造「魔数对但内容坏」的样本
+var brokenPNGSignature = []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 
 func head(s string) string {
 	if len(s) > 80 {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -107,17 +107,17 @@ type CompactionEntry struct {
 	Summary          string             `json:"summary"`
 	FirstKeptEntryID string             `json:"firstKeptEntryId"`
 	TokensBefore     int                `json:"tokensBefore"`
-	Details          *compact.FileLists `json:"details,omitempty"`
+	Details          *ctxview.FileLists `json:"details,omitempty"`
 	SystemMessage    *llm.SystemMessage `json:"systemMessage,omitempty"`
 	Usage            *Usage             `json:"usage,omitempty"`
 }
 
 // cloneFileLists 复制结构化文件元数据，避免会话条目共享可变切片
-func cloneFileLists(details *compact.FileLists) *compact.FileLists {
+func cloneFileLists(details *ctxview.FileLists) *ctxview.FileLists {
 	if details == nil {
 		return nil
 	}
-	return &compact.FileLists{
+	return &ctxview.FileLists{
 		ReadFiles:     append([]string{}, details.ReadFiles...),
 		ModifiedFiles: append([]string{}, details.ModifiedFiles...),
 	}

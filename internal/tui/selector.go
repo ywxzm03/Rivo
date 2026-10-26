@@ -12,8 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sahilm/fuzzy"
-
-	"github.com/ywxzm03/Rivo/internal/filehistory"
 )
 
 type choice struct {
@@ -25,16 +23,17 @@ type choice struct {
 
 // selector 在输入坞内展示，不创建覆盖消息区的全屏 overlay
 type selector struct {
-	kind, title       string
+	kind              RequestKind
+	title             string
 	treeRestoreTarget string
 	input             textinput.Model
 	items, filtered   []choice
 	selected          int
 }
 
-func (m *Model) openSelector(kind, query string) tea.Cmd {
+func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
 	if m.busy {
-		if kind == "tree" {
+		if kind == RequestTree {
 			m.notice("Wait for the current operation to finish before opening the tree.")
 		} else {
 			m.notice("An operation is running. Press Escape to interrupt.")
@@ -105,11 +104,11 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 }
 
 func (m *Model) openTreeRestoreSelector(target string) tea.Cmd {
-	s := &selector{kind: "tree_restore", title: "Restore conversation tree", treeRestoreTarget: target}
+	s := &selector{kind: RequestTreeRestore, title: "Restore conversation tree", treeRestoreTarget: target}
 	s.items = []choice{
-		{value: string(filehistory.RestoreContext), label: "Restore conversation", detail: "Move the conversation tree only"},
-		{value: string(filehistory.RestoreCode), label: "Restore code", detail: "Restore tracked Write/Edit changes only"},
-		{value: string(filehistory.RestoreCodeAndContext), label: "Restore code and conversation", detail: "Restore tracked code, then move the conversation tree"},
+		{value: string(RestoreContext), label: "Restore conversation", detail: "Move the conversation tree only"},
+		{value: string(RestoreCode), label: "Restore code", detail: "Restore tracked Write/Edit changes only"},
+		{value: string(RestoreCodeAndContext), label: "Restore code and conversation", detail: "Restore tracked code, then move the conversation tree"},
 	}
 	s.input = textinput.New()
 	s.input.Prompt = "> "
@@ -186,7 +185,7 @@ func (s *selector) window(budget int) (count int, truncated bool) {
 
 // numbered 表示是否给每行加序号：tree 保持原有的缩进树形，不参与编号
 func (s *selector) numbered() bool {
-	return s.kind != "tree"
+	return s.kind != RequestTree
 }
 
 // rowLine 画一行候选：序号、游标位、正文与当前项勾
@@ -220,7 +219,7 @@ func (s *selector) rowLine(index, start, end int, numbered bool, width int) stri
 	}
 	label := item.label
 	// provider 与 default 标记保持 muted，不给整行统一着色
-	if s.kind == "model" {
+	if s.kind == RequestModel {
 		if n := strings.LastIndex(label, " ["); n >= 0 {
 			label = colored(color, label[:n]) + colored(mutedColor, label[n:])
 		}
@@ -316,25 +315,25 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 		m.layout()
 		return m.editor.Focus()
 	case "up", "ctrl+p":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeSelection(-1)
 		} else {
 			s.selected = max(0, s.selected-1)
 		}
 	case "down", "ctrl+n":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeSelection(1)
 		} else {
 			s.selected = min(max(0, len(s.filtered)-1), s.selected+1)
 		}
 	case "left":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeToParent()
 			return nil
 		}
 		return m.updateSelectorInput(msg)
 	case "right":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeToFirstChild()
 			return nil
 		}
@@ -348,13 +347,13 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		item := s.filtered[s.selected]
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			return m.openTreeRestoreSelector(item.value)
 		}
 		m.selector = nil
 		m.layout()
-		if s.kind == "tree_restore" {
-			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, filehistory.RestoreMode(item.value)))
+		if s.kind == RequestTreeRestore {
+			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, RestoreKind(item.value)))
 		}
 		return tea.Batch(m.editor.Focus(), m.dispatch(s.kind, item.value))
 	default:
@@ -363,7 +362,7 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode) tea.Cmd {
+func (m *Model) dispatchTreeRestore(target string, mode RestoreKind) tea.Cmd {
 	if m.busy {
 		m.notice("Wait for the current operation to finish before restoring the tree.")
 		return nil
@@ -374,7 +373,7 @@ func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode)
 	m.busy, m.status = true, "Working"
 	m.canceling, m.compacting = false, false
 	m.operationID++
-	return tea.Batch(m.startSpinner(), m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
+	return tea.Batch(m.startSpinner(), m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: RequestTree, Value: target, RestoreMode: mode}))
 }
 
 func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {

@@ -22,9 +22,7 @@ func operationApp(t *testing.T, stream llm.StreamFn, sink llm.AgentEventSink) *A
 	t.Helper()
 	setupPromptEnv(t)
 	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
-	spec := cfg.registry[deepseek.ProviderID]
-	spec.new = func(string, string) ([]llm.Model, llm.StreamFn) { return spec.models, stream }
-	cfg.registry[deepseek.ProviderID] = spec
+	cfg = cfg.WithStreamForTest(deepseek.ProviderID, cfg.AvailableModels(), stream)
 	a, err := NewWithSessionDir(cfg, t.TempDir(), sink)
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +155,7 @@ func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.Assista
 func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
 	a := operationApp(t, nil, nil)
 	runner := &steeringWithdrawRunner{}
-	runner.withdraw = func() { a.agent.TakeSteering() }
+	runner.withdraw = func() { a.agent.Take(agent.QueueSteering) }
 	a.coordinator.Agent = runner
 	a.active = &Operation{kind: OperationRun}
 	if err := a.agent.Steer("withdraw me"); err != nil {
@@ -201,8 +199,8 @@ func TestContinueQueuedDrainsSteeringBeforeFollowUp(t *testing.T) {
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("continuation order = %v, want %v", runner.calls, want)
 	}
-	if a.agent.HasSteering() || a.agent.HasFollowUp() {
-		t.Fatalf("queues not drained: %v / %v", a.agent.SteeringMessages(), a.agent.FollowUpMessages())
+	if a.agent.Len(agent.QueueSteering) > 0 || a.agent.Len(agent.QueueFollowUp) > 0 {
+		t.Fatalf("queues not drained: %v / %v", a.agent.Messages(agent.QueueSteering), a.agent.Messages(agent.QueueFollowUp))
 	}
 	if !a.active.closing {
 		t.Fatal("operation stayed open after queues drained")
@@ -228,13 +226,13 @@ func (r *orderRecordingRunner) Steer(string) error { return nil }
 
 func (r *orderRecordingRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
 	r.calls = append(r.calls, "steering")
-	r.queue.TakeSteering()
+	r.queue.Take(agent.QueueSteering)
 	return nil, nil
 }
 
 func (r *orderRecordingRunner) ContinueFollowUp(context.Context) (*llm.AssistantMessage, error) {
 	r.calls = append(r.calls, "follow-up")
-	r.queue.TakeFollowUp()
+	r.queue.Take(agent.QueueFollowUp)
 	if r.onContinueFollowUp != nil {
 		r.onContinueFollowUp()
 		r.onContinueFollowUp = nil
@@ -273,8 +271,8 @@ func TestContinueQueuedClosesSubmissionWindowAtomically(t *testing.T) {
 	if err := a.EnqueueFollowUp("after teardown"); !errors.Is(err, ErrFollowUpUnavailable) {
 		t.Fatalf("EnqueueFollowUp() after teardown = %v, want unavailable", err)
 	}
-	if a.agent.HasSteering() || a.agent.HasFollowUp() {
-		t.Fatalf("rejected input leaked into queues: %v / %v", a.agent.SteeringMessages(), a.agent.FollowUpMessages())
+	if a.agent.Len(agent.QueueSteering) > 0 || a.agent.Len(agent.QueueFollowUp) > 0 {
+		t.Fatalf("rejected input leaked into queues: %v / %v", a.agent.Messages(agent.QueueSteering), a.agent.Messages(agent.QueueFollowUp))
 	}
 }
 
@@ -303,7 +301,7 @@ func TestClearOperationMovesLeafWithoutChangingFileOrSettings(t *testing.T) {
 	if result := op.Wait(); result.Err != nil || result.Exit {
 		t.Fatalf("clear result = %+v", result)
 	}
-	if a.session.LeafID() != "" || len(a.ContextView().Messages()) != 0 || len(a.agent.AgentContext.Messages) != 0 {
+	if a.session.LeafID() != "" || len(a.ContextView().Messages()) != 0 || len(a.agent.Context().Messages) != 0 {
 		t.Fatal("clear retained the active context")
 	}
 	if a.CurrentModel().Provider != model.Provider || a.CurrentModel().ID != model.ID || a.CurrentThinkingLevel() != thinking {
@@ -379,7 +377,7 @@ func TestAssistantCommitRetryReusesOutputAndEntryID(t *testing.T) {
 	if result := op.Wait(); !errors.As(result.Err, &commitErr) {
 		t.Fatalf("result = %+v, want storage failure", result)
 	}
-	if !reflect.DeepEqual(before, a.session.BuildContext()) || !reflect.DeepEqual(before.Messages(), a.agent.AgentContext.Messages) {
+	if !reflect.DeepEqual(before, a.session.BuildContext()) || !reflect.DeepEqual(before.Messages(), a.agent.Context().Messages) {
 		t.Fatal("failed assistant commit changed authoritative context")
 	}
 	restore()
@@ -441,14 +439,14 @@ func TestSteeringCommitRetryDoesNotDuplicateQueuedMessage(t *testing.T) {
 	if result := op.Wait(); result.Err == nil {
 		t.Fatal("want steering commit failure")
 	}
-	if got := a.SteeringMessages(); len(got) != 1 || got[0] != "queued" {
+	if got := a.QueueMessages(agent.QueueSteering); len(got) != 1 || got[0] != "queued" {
 		t.Fatalf("steering queue = %v, want queued message restored", got)
 	}
 	restore()
 	if _, err := a.Run(context.Background(), "next"); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.SteeringMessages(); len(got) != 0 {
+	if got := a.QueueMessages(agent.QueueSteering); len(got) != 0 {
 		t.Fatalf("steering queue after retry = %v, want empty", got)
 	}
 	queued, next := 0, 0
@@ -531,7 +529,9 @@ func TestImagePendingIsRejectedBeforeReplayOnTextOnlyModel(t *testing.T) {
 	if !a.session.HasPending() {
 		t.Fatal("image message was not retained as pending")
 	}
-	a.agent.AgentConfig.Model.SupportsImages = false
+	model := a.agent.Config().Model
+	model.SupportsImages = false
+	a.agent.SetModel(model)
 	result := a.executeOperation(context.Background(), OperationRequest{Kind: OperationRun, Value: "next"})
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "pending image input") {
 		t.Fatalf("result = %+v, want pending image capability error", result)
@@ -678,7 +678,7 @@ func TestToolBatchCommitRetryDoesNotExecuteAgain(t *testing.T) {
 		return events, nil
 	}, nil)
 	tool := &trackedTool{started: make(chan struct{}, 2), release: make(chan struct{})}
-	a.agent.AgentContext.Tools = []llm.Tool{tool}
+	a.agent.SetTools([]llm.Tool{tool})
 	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "execute"})
 	if err != nil {
 		t.Fatal(err)
@@ -769,14 +769,14 @@ func TestPromptPatchCommitFailureDoesNotDisappearOnRetry(t *testing.T) {
 	if _, err := a.Run(context.Background(), "hello"); err == nil {
 		t.Fatal("want patch storage failure")
 	}
-	if calls != 0 || llm.CurrentSystemMessage(a.agent.AgentContext.Messages).Sections["preamble"] != "old" {
+	if calls != 0 || llm.CurrentSystemMessage(a.agent.Context().Messages).Sections["preamble"] != "old" {
 		t.Fatal("failed patch changed request state")
 	}
 	restore()
 	if _, err := a.Run(context.Background(), "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || llm.CurrentSystemMessage(a.agent.AgentContext.Messages).Sections["preamble"] != "new" {
+	if calls != 1 || llm.CurrentSystemMessage(a.agent.Context().Messages).Sections["preamble"] != "new" {
 		t.Fatal("retried request lost system patch")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 )
@@ -22,30 +23,26 @@ func sendTest(ctx context.Context, events chan<- llm.AssistantMessageEvent, even
 // Escape 取消后 app.Run 以 aborted 消息收场且不返回错误；错误消息不污染下一次请求
 func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
-	spec := cfg.registry[deepseek.ProviderID]
-	spec.new = func(string, string) ([]llm.Model, llm.StreamFn) {
-		streamFn := func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
-			events := make(chan llm.AssistantMessageEvent)
-			go func() {
-				defer close(events)
-				partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
-				partial.Content = append(partial.Content, llm.TextContent{Text: "partial answer"})
-				if !sendTest(ctx, events, llm.AssistantMessageStartEvent{Partial: partial}) {
-					return
-				}
-				select {
-				case events <- llm.AssistantMessageTextDeltaEvent{ContentIndex: 0, Delta: " more", Partial: partial}:
-				case <-ctx.Done():
-					// 发送 delta 途中被取消：静默关闭，覆盖 agent 的 aborted 兜底路径
-					return
-				}
-				<-ctx.Done()
-			}()
-			return events, nil
-		}
-		return []llm.Model{spec.models[0]}, streamFn
+	streamFn := func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+		events := make(chan llm.AssistantMessageEvent)
+		go func() {
+			defer close(events)
+			partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
+			partial.Content = append(partial.Content, llm.TextContent{Text: "partial answer"})
+			if !sendTest(ctx, events, llm.AssistantMessageStartEvent{Partial: partial}) {
+				return
+			}
+			select {
+			case events <- llm.AssistantMessageTextDeltaEvent{ContentIndex: 0, Delta: " more", Partial: partial}:
+			case <-ctx.Done():
+				// 发送 delta 途中被取消：静默关闭，覆盖 agent 的 aborted 兜底路径
+				return
+			}
+			<-ctx.Done()
+		}()
+		return events, nil
 	}
-	cfg.registry[deepseek.ProviderID] = spec
+	cfg = cfg.WithStreamForTest(deepseek.ProviderID, cfg.AvailableModels(), streamFn)
 
 	a, err := NewWithSessionDir(cfg, t.TempDir(), func(event llm.AgentEvent) error { return nil })
 	if err != nil {
@@ -102,9 +99,9 @@ func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 	}
 	if err := a.SetModel(deepseek.ProviderID, deepseek.DefaultModel); err == nil {
 		// SetModel 会覆盖 StreamFn；改为直接注入测试流
-		a.agent.StreamFn = next
+		a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: next})
 	} else {
-		a.agent.StreamFn = next
+		a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: next})
 	}
 	if _, err := a.Run(context.Background(), "again"); err != nil {
 		t.Fatal(err)

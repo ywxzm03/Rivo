@@ -14,13 +14,16 @@ import (
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
 	"github.com/ywxzm03/Rivo/internal/config"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tool"
 	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
+	"github.com/ywxzm03/Rivo/internal/tool/backgroundbash"
 	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
 	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
 )
@@ -43,7 +46,7 @@ type App struct {
 	active         *Operation
 	operationID    uint64
 	pendingRequest *OperationRequest
-	cfg            Config
+	cfg            provider.Config
 	onEvent        llm.AgentEventSink
 	// loader 持有 AGENTS.md 链与 skills，Reload 时重读
 	loader *prompt.Loader
@@ -61,6 +64,12 @@ type App struct {
 	// 通道本身只读,关闭动作由 evictStopOnce 保证只执行一次
 	evictStop     chan struct{}
 	evictStopOnce sync.Once
+	// evictionInterval 是驱逐轮询间隔，零值表示用 evictInterval。
+	// 测试注入毫秒级间隔，避免真等
+	evictionMu       sync.Mutex
+	evictionInterval time.Duration
+	// evictWake 在出现新的待驱逐任务时唤醒已停表的驱逐循环
+	evictWake chan struct{}
 	// closed 在进程收尾时置位,让通知循环退出而不是继续起 run
 	closed atomic.Bool
 	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
@@ -82,7 +91,7 @@ func (a *App) Warnings() []string {
 
 // Open 恢复指定会话文件：按投影记录的 Provider/Model 装配运行链，
 // 模型解析失败时回退 env 配置并记录警告
-func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
+func Open(path string, cfg provider.Config, onEvent llm.AgentEventSink) (*App, error) {
 	commandCwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
@@ -102,7 +111,7 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 	}
 	// 2.思考等级：仅在 settings 未指定时回填会话投影的显式记录
 	if cfg.ThinkingLevel == "" && proj.HasThinkingLevel {
-		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(proj.ThinkingLevel)
+		a.agent.SetThinkingLevel(llm.ThinkingLevel(proj.ThinkingLevel))
 	}
 	a.modelFallback = warning
 	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills
@@ -111,7 +120,7 @@ func Open(path string, cfg Config, onEvent llm.AgentEventSink) (*App, error) {
 }
 
 // assembleResume 按投影模型装配运行链，解析失败回退 env 默认模型并返回回退警告
-func assembleResume(cfg Config, proj compaction.ContextView, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
+func assembleResume(cfg provider.Config, proj ctxview.ContextView, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, string, error) {
 	if proj.Provider == "" || proj.Model == "" {
 		a, err := newApp(cfg, sm, onEvent)
 		return a, "", err
@@ -128,23 +137,21 @@ func assembleResume(cfg Config, proj compaction.ContextView, sm *session.Session
 }
 
 // fallbackWarning 拼回退警告文案；newApp 装配已成功，cfg 的默认模型必然有效
-func fallbackWarning(cfg Config, proj compaction.ContextView) string {
+func fallbackWarning(cfg provider.Config, proj ctxview.ContextView) string {
 	modelID := cfg.ModelID
 	if modelID == "" {
 		// 空 ModelID 经装配兜底为 provider 默认模型
-		if spec, err := cfg.lookupProvider(cfg.ProviderID); err == nil {
-			modelID = spec.defaultModel
-		}
+		modelID = cfg.DefaultModelID(cfg.ProviderID)
 	}
 	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, modelID)
 }
 
 // New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
-func New(cfg Config, onEvent llm.AgentEventSink) (*App, error) {
+func New(cfg provider.Config, onEvent llm.AgentEventSink) (*App, error) {
 	return NewWithSessionDir(cfg, "", onEvent)
 }
 
-func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App, error) {
+func NewWithSessionDir(cfg provider.Config, dir string, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
@@ -160,12 +167,12 @@ func NewWithSessionDir(cfg Config, dir string, onEvent llm.AgentEventSink) (*App
 }
 
 // NewWithSessionID 创建指定 ID 且延迟发布的会话
-func NewWithSessionID(cfg Config, id string, onEvent llm.AgentEventSink) (*App, error) {
+func NewWithSessionID(cfg provider.Config, id string, onEvent llm.AgentEventSink) (*App, error) {
 	return NewWithSessionIDInDir(cfg, "", id, onEvent)
 }
 
 // NewWithSessionIDInDir 在指定目录创建稳定 ID 的会话
-func NewWithSessionIDInDir(cfg Config, dir, id string, onEvent llm.AgentEventSink) (*App, error) {
+func NewWithSessionIDInDir(cfg provider.Config, dir, id string, onEvent llm.AgentEventSink) (*App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("app: failed to get working directory: %w", err)
@@ -184,26 +191,18 @@ func NewWithSessionIDInDir(cfg Config, dir, id string, onEvent llm.AgentEventSin
 }
 
 // newApp 组装编排层与 Agent，模型取自 env 配置
-func newApp(cfg Config, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
+func newApp(cfg provider.Config, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
 	return newAppWithModel(cfg, cfg.ProviderID, cfg.ModelID, sm, onEvent)
 }
 
 // newAppWithModel 按指定厂商与模型装配编排层与 Agent：事件经编排层落盘，
 // 压缩与溢出恢复由编排层驱动
-func newAppWithModel(cfg Config, providerID, modelID string, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
-	spec, err := cfg.lookupProvider(providerID)
+func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *session.SessionManager, onEvent llm.AgentEventSink) (*App, error) {
+	resolved, err := cfg.Resolve(providerID, modelID)
 	if err != nil {
 		return nil, err
 	}
-
-	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
-	if modelID == "" {
-		modelID = spec.defaultModel
-	}
-	model, err := findModel(spec.id, models, modelID)
-	if err != nil {
-		return nil, err
-	}
+	model, streamFn := resolved.Model, resolved.Stream
 	agentDir, err := config.Dir()
 	if err != nil {
 		return nil, err
@@ -228,7 +227,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		&tool.Ls{WorkingDir: cwd},
 		&tool.Grep{WorkingDir: cwd},
 		&tool.Find{WorkingDir: cwd},
-		&tool.Bash{WorkingDir: cwd, Background: tool.NewBackgroundBashRunner(manager.Store())},
+		&tool.Bash{WorkingDir: cwd, Background: backgroundbash.New(manager.Store())},
 		&tool.Write{History: sm.FileHistory(), WorkingDir: cwd},
 		&tool.Edit{History: sm.FileHistory(), WorkingDir: cwd},
 		agenttool.New(manager),
@@ -273,17 +272,14 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		ContextFiles: loader.ContextFiles(),
 		Skills:       loader.Skills(),
 	}))
-	ag := agent.NewAgent(
-		llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel, SessionID: sm.ID()},
-		llm.Context{
-			Tools: tools,
-		},
-		streamFn,
-		coord.Handle,
-	)
-	ag.WorkingDir = cwd
-	ag.PrepareRequest = coord.PrepareRequest
-	ag.CommitMessages = coord.CommitMessages
+	ag := agent.New(agent.Options{
+		Config:     llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel, SessionID: sm.ID()},
+		Context:    llm.Context{Tools: tools},
+		Stream:     streamFn,
+		Events:     coord.Handle,
+		WorkingDir: cwd,
+		Hooks:      agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = ag
 	runner := &agenttool.Runner{
 		ParentCwd:   cwd,
@@ -309,6 +305,7 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 		tools:          tools,
 		notifyQueue:    make(chan struct{}, 1),
 		evictStop:      make(chan struct{}),
+		evictWake:      make(chan struct{}, 1),
 	}
 	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
 	manager.Store().SetNotifyHook(app.wakeForNotification)
@@ -323,6 +320,11 @@ func newAppWithModel(cfg Config, providerID, modelID string, sm *session.Session
 func (a *App) wakeForNotification() {
 	if a.closed.Load() {
 		return
+	}
+	// 新的终态任务可能让已停表的驱逐循环重新有工作
+	select {
+	case a.evictWake <- struct{}{}:
+	default:
 	}
 	select {
 	case a.notifyQueue <- struct{}{}:
@@ -371,9 +373,25 @@ func (a *App) retryNotificationWake() {
 // runEvictionLoop 每秒回收宽限期已过的终态任务。
 // 只靠请求边界驱逐不够:用户不再发消息时终态任务会永久留在 store 里,
 // TUI 任务行也就一直不消失
+// SetEvictionInterval 覆盖驱逐轮询间隔，只对随后启动的循环生效
+func (a *App) SetEvictionInterval(interval time.Duration) {
+	a.evictionMu.Lock()
+	a.evictionInterval = interval
+	a.evictionMu.Unlock()
+}
+
+func (a *App) evictionTick() time.Duration {
+	a.evictionMu.Lock()
+	defer a.evictionMu.Unlock()
+	if a.evictionInterval > 0 {
+		return a.evictionInterval
+	}
+	return evictInterval
+}
+
 func (a *App) runEvictionLoop() {
 	stop := a.evictStop
-	ticker := time.NewTicker(evictInterval)
+	ticker := time.NewTicker(a.evictionTick())
 	defer ticker.Stop()
 	for {
 		select {
@@ -385,6 +403,17 @@ func (a *App) runEvictionLoop() {
 				return
 			}
 			store.EvictExpired()
+			// 没有待驱逐的终态任务时停表，避免空闲进程每秒空转；
+			// 新任务完成时会重新启动循环
+			if !store.HasEvictionWork() {
+				ticker.Stop()
+				select {
+				case <-stop:
+					return
+				case <-a.evictWake:
+				}
+				ticker = time.NewTicker(a.evictionTick())
+			}
 		}
 	}
 }
@@ -563,7 +592,7 @@ func (a *App) Compact(ctx context.Context, instructions string) error {
 }
 
 // ContextView 返回带来源的已提交会话投影
-func (a *App) ContextView() compaction.ContextView { return a.session.BuildContext() }
+func (a *App) ContextView() ctxview.ContextView { return a.session.BuildContext() }
 
 // Tree 返回当前会话的防御性树快照，供 fullscreen TUI 构建 user-only 选择器
 func (a *App) Tree() session.TreeSnapshot { return a.session.Tree() }
@@ -578,90 +607,71 @@ func (a *App) SessionName() string { return a.session.Name() }
 // SessionPath 返回会话 transcript 的绝对路径，尚未落盘时也是预定文件名
 func (a *App) SessionPath() string { return a.session.Path() }
 
-func (a *App) TakeSteering() []string {
+// Enqueue 把一条内容加入指定队列
+func (a *App) Enqueue(kind agent.QueueKind, payload agent.PendingPayload) error {
 	if a == nil || a.agent == nil {
-		return nil
+		if kind == agent.QueueFollowUp {
+			return ErrFollowUpUnavailable
+		}
+		return ErrSteeringUnavailable
 	}
-	return a.agent.TakeSteering()
+	return a.agent.Enqueue(kind, payload)
 }
 
-func (a *App) TakeSteeringMessages() []llm.UserMessage {
+// QueueLen 返回指定队列等待消费的条数
+func (a *App) QueueLen(kind agent.QueueKind) int {
 	if a == nil || a.agent == nil {
-		return nil
+		return 0
 	}
-	return a.agent.TakeSteeringMessages()
+	return a.agent.Len(kind)
 }
 
-func (a *App) TakeFollowUp() []string {
+// QueueRevision 返回指定队列的修订号
+func (a *App) QueueRevision(kind agent.QueueKind) uint64 {
 	if a == nil || a.agent == nil {
-		return nil
+		return 0
 	}
-	return a.agent.TakeFollowUp()
+	return a.agent.Revision(kind)
 }
 
-func (a *App) TakeFollowUpMessages() []llm.UserMessage {
+// QueueMessages 返回指定队列的纯文本视图
+func (a *App) QueueMessages(kind agent.QueueKind) []string {
 	if a == nil || a.agent == nil {
 		return nil
 	}
-	return a.agent.TakeFollowUpMessages()
+	return a.agent.Messages(kind)
 }
 
-func (a *App) ClearFollowUp() []llm.UserMessage {
+// QueuePayloads 返回指定队列的完整内容视图
+func (a *App) QueuePayloads(kind agent.QueueKind) []agent.PendingPayload {
 	if a == nil || a.agent == nil {
 		return nil
 	}
-	return a.agent.ClearFollowUp()
+	return a.agent.Payloads(kind)
+}
+
+// TakeQueue 取出并清空指定队列
+func (a *App) TakeQueue(kind agent.QueueKind) []agent.PendingPayload {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.Take(kind)
+}
+
+// ClearQueue 清空指定队列并返回被清掉的内容
+func (a *App) ClearQueue(kind agent.QueueKind) []agent.PendingPayload {
+	if a == nil || a.agent == nil {
+		return nil
+	}
+	return a.agent.Clear(kind)
 }
 
 // Skills 返回当前已发现技能的副本
 func (a *App) Skills() []prompt.Skill { return append([]prompt.Skill(nil), a.loader.Skills()...) }
 
-func (a *App) CurrentModel() llm.Model { return a.agent.AgentConfig.Model }
+func (a *App) CurrentModel() llm.Model { return a.agent.Config().Model }
 
-func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.AgentConfig.ThinkingLevel }
-
-// SteeringMessages 返回当前尚未消费的 steering 文本，供显示层生成快照
-func (a *App) SteeringMessages() []string {
-	if a == nil || a.agent == nil {
-		return nil
-	}
-	return a.agent.SteeringMessages()
-}
-
-func (a *App) SteeringUserMessages() []llm.UserMessage {
-	if a == nil || a.agent == nil {
-		return nil
-	}
-	return a.agent.SteeringUserMessages()
-}
-
-func (a *App) SteeringRevision() uint64 {
-	if a == nil || a.agent == nil {
-		return 0
-	}
-	return a.agent.SteeringRevision()
-}
-
-func (a *App) FollowUpMessages() []string {
-	if a == nil || a.agent == nil {
-		return nil
-	}
-	return a.agent.FollowUpMessages()
-}
-
-func (a *App) FollowUpUserMessages() []llm.UserMessage {
-	if a == nil || a.agent == nil {
-		return nil
-	}
-	return a.agent.FollowUpUserMessages()
-}
-
-func (a *App) FollowUpRevision() uint64 {
-	if a == nil || a.agent == nil {
-		return 0
-	}
-	return a.agent.FollowUpRevision()
-}
+func (a *App) CurrentThinkingLevel() llm.ThinkingLevel { return a.agent.Config().ThinkingLevel }
 
 // AutoCompactionEnabled 表示当前模型是否启用了上下文压缩
 func (a *App) AutoCompactionEnabled() bool {
@@ -686,7 +696,7 @@ func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
 	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
 		return err
 	}
-	a.agent.AgentConfig.ThinkingLevel = level
+	a.agent.SetThinkingLevel(level)
 	return nil
 }
 
@@ -704,17 +714,13 @@ func (a *App) setModel(providerID, modelID string) error {
 }
 
 func (a *App) applyModel(providerID, modelID string, persist bool) error {
-	spec, err := a.cfg.lookupProvider(providerID)
+	resolved, err := a.cfg.Resolve(providerID, modelID)
 	if err != nil {
-		return err
-	}
-	providerID = spec.id
-	models, streamFn := spec.new(spec.apiKey, spec.baseURL)
-	model, err := findModel(spec.id, models, modelID)
-	if err != nil {
+		// 自定义 provider 的模型目录可能没登记在流函数里，退回已注册的模型快照
 		for _, candidate := range a.AvailableModels() {
 			if candidate.Provider == providerID && candidate.ID == modelID {
-				model, err = candidate, nil
+				resolved = provider.Resolved{ProviderID: providerID, Model: candidate, Stream: a.agent.Stream()}
+				err = nil
 				break
 			}
 		}
@@ -722,15 +728,16 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 			return err
 		}
 	}
+	providerID, model, streamFn := resolved.ProviderID, resolved.Model, resolved.Stream
 	if persist {
 		if err := a.session.AppendModelChange(providerID, modelID); err != nil {
 			return err
 		}
 	}
-	a.agent.AgentConfig.Model = model
+	a.agent.SetModel(model)
 	a.coordinator.setModel(model)
-	a.agent.StreamFn = streamFn
-	for _, candidate := range a.agent.AgentContext.Tools {
+	_ = a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: streamFn})
+	for _, candidate := range a.agent.Context().Tools {
 		if read, ok := candidate.(*tool.Read); ok {
 			read.SupportsImages = model.SupportsImages
 		}

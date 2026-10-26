@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
 const findDefaultLimit = 1000
@@ -137,7 +138,7 @@ func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOpt
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
-	configureShellProcess(command)
+	shell.ConfigureProcess(command)
 	if err := command.Start(); err != nil {
 		return findResult{}, err
 	}
@@ -151,14 +152,14 @@ func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOpt
 		if len(result.paths) >= options.limit {
 			result.limitReached = true
 			stoppedDueToLimit = true
-			killShellProcessTree(command)
+			shell.KillProcessTree(command)
 			break
 		}
 		result.paths = append(result.paths, path)
 	}
 	if err := scanner.Err(); err != nil {
 		if !stoppedDueToLimit {
-			killShellProcessTree(command)
+			shell.KillProcessTree(command)
 		}
 		_ = command.Wait()
 		return findResult{}, err

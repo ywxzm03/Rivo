@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -29,7 +30,7 @@ func TestCollectFileOperationsUsesPILists(t *testing.T) {
 }
 
 func TestSummaryWithFileListsCarriesPreviousDetails(t *testing.T) {
-	summary, lists := summaryWithFileLists("SUMMARY", &FileLists{ReadFiles: []string{"old.go"}}, []llm.Message{
+	summary, lists := summaryWithFileLists("SUMMARY", &ctxview.FileLists{ReadFiles: []string{"old.go"}}, []llm.Message{
 		llm.AssistantMessage{Content: []llm.Content{
 			llm.ToolCall{Name: "write", Arguments: map[string]any{"path": "old.go"}},
 			llm.ToolCall{Name: "read", Arguments: map[string]any{"path": "new.go"}},

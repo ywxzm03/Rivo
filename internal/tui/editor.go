@@ -8,7 +8,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 const timeDoublePress = 500 * time.Millisecond
@@ -90,6 +89,76 @@ func (m *Model) completionView() string {
 	return strings.Join(lines, "\n")
 }
 
+// handleCompletionKey 处理补全列表按键；handled=false 时继续走主按键路径
+func (m *Model) handleCompletionKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	items := m.completionItems()
+	if m.completionRows(len(items)) > 0 {
+		switch msg.String() {
+		case "up":
+			m.completion = max(0, m.completion-1)
+			return true, nil
+		case "down":
+			m.completion = min(len(items)-1, m.completion+1)
+			return true, nil
+		case "esc":
+			m.completionHidden = true
+			m.layout()
+			return true, nil
+		case "tab", "enter":
+			leading := m.editor.Value()[:len(m.editor.Value())-len(strings.TrimLeftFunc(m.editor.Value(), unicode.IsSpace))]
+			m.editor.SetValue(leading + "/" + items[min(m.completion, len(items)-1)].name + " ")
+			m.editor.CursorEnd()
+			m.resetPastes()
+			m.completionHidden = true
+			m.layout()
+			if msg.String() == "tab" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// handleTaskListKey 处理任务列表聚焦时的方向键与选择；handled=false 表示继续主按键路径
+func (m *Model) handleTaskListKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
+	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
+		switch msg.String() {
+		case "up":
+			wasFocused := m.taskSelector
+			if !wasFocused {
+				m.setTaskFocus(true)
+			}
+			// 主视图第一次 Up 只进入列表;child view 则以当前任务为锚点上移
+			if wasFocused || m.viewingTaskID != "" {
+				m.selectSubagent(-1)
+			}
+			return true, nil
+		case "down":
+			if !m.taskSelector {
+				m.setTaskFocus(true)
+			}
+			m.selectSubagent(1)
+			return true, nil
+		case "enter":
+			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
+				return true, nil
+			}
+			return true, m.enterSelectedSubagent()
+		case "tab":
+			// 列表聚焦时 Tab 仍然提交 follow-up,焦点保持不变
+			if m.taskSelector {
+				return true, m.submitFollowUp()
+			}
+		default:
+			// 打字即离开列表,字符继续落到输入框
+			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+				m.setTaskFocus(false)
+			}
+		}
+	}
+	return false, nil
+}
+
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.closing {
 		return nil
@@ -143,70 +212,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID})
 		}
 	}
-	if len(m.state.Subagents.Tasks) > 0 && (m.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
-		switch msg.String() {
-		case "up":
-			wasFocused := m.taskSelector
-			if !wasFocused {
-				m.setTaskFocus(true)
-			}
-			// 主视图第一次 Up 只进入列表;child view 则以当前任务为锚点上移
-			if wasFocused || m.viewingTaskID != "" {
-				m.selectSubagent(-1)
-			}
-			return nil
-		case "down":
-			if !m.taskSelector {
-				m.setTaskFocus(true)
-			}
-			m.selectSubagent(1)
-			return nil
-		case "enter":
-			if m.viewingTaskID != "" && m.selectedTaskID == m.viewingTaskID {
-				return nil
-			}
-			return m.enterSelectedSubagent()
-		case "tab":
-			// 列表聚焦时 Tab 仍然提交 follow-up,焦点保持不变
-			if m.taskSelector {
-				return m.submitFollowUp()
-			}
-		default:
-			// 打字即离开列表,字符继续落到输入框
-			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				m.setTaskFocus(false)
-			}
-		}
+	if handled, cmd := m.handleTaskListKey(msg); handled {
+		return cmd
 	}
 	// 终端 bracketed paste 整段到达，只有粘贴走折叠路径
 	if msg.Paste {
 		m.handlePaste(string(msg.Runes))
 		return nil
 	}
-	items := m.completionItems()
-	if m.completionRows(len(items)) > 0 {
-		switch msg.String() {
-		case "up":
-			m.completion = max(0, m.completion-1)
-			return nil
-		case "down":
-			m.completion = min(len(items)-1, m.completion+1)
-			return nil
-		case "esc":
-			m.completionHidden = true
-			m.layout()
-			return nil
-		case "tab", "enter":
-			leading := m.editor.Value()[:len(m.editor.Value())-len(strings.TrimLeftFunc(m.editor.Value(), unicode.IsSpace))]
-			m.editor.SetValue(leading + "/" + items[min(m.completion, len(items)-1)].name + " ")
-			m.editor.CursorEnd()
-			m.resetPastes()
-			m.completionHidden = true
-			m.layout()
-			if msg.String() == "tab" {
-				return nil
-			}
-		}
+	if handled, cmd := m.handleCompletionKey(msg); handled {
+		return cmd
 	}
 	switch msg.String() {
 	case "ctrl+v":
@@ -272,7 +287,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				break
 			}
 		}
-		return m.dispatch("thinking", levels[index])
+		return m.dispatch(RequestThinking, levels[index])
 	case "pgup", "pgdown", "ctrl+home", "ctrl+end":
 		if msg.String() == "ctrl+home" {
 			m.viewport.GotoTop()
@@ -351,8 +366,8 @@ func (m *Model) browseHistory(direction int) {
 	}
 	if m.historyPos == len(m.history) {
 		m.draft = m.editor.Value()
-		if message, ok := m.buildUserMessage(); ok {
-			copy := cloneUserMessage(message)
+		if message, ok := m.buildPayload(); ok {
+			copy := clonePayload(message)
 			m.draftMessage = &copy
 		} else {
 			m.draftMessage = nil
@@ -361,9 +376,9 @@ func (m *Model) browseHistory(direction int) {
 	m.historyPos = max(0, min(len(m.history), m.historyPos+direction))
 	m.resetPastes()
 	if m.historyPos < len(m.historyMessages) {
-		m.editor.SetValue(m.editorTextForMessage(m.historyMessages[m.historyPos]))
+		m.editor.SetValue(m.editorTextForPayload(m.historyMessages[m.historyPos]))
 	} else if m.draftMessage != nil {
-		m.editor.SetValue(m.editorTextForMessage(*m.draftMessage))
+		m.editor.SetValue(m.editorTextForPayload(*m.draftMessage))
 	} else {
 		m.editor.SetValue(m.draft)
 	}
@@ -372,43 +387,65 @@ func (m *Model) browseHistory(direction int) {
 	m.layout()
 }
 
+// recordSubmission 把一次提交记入历史并清空编辑器
+func (m *Model) recordSubmission(input string, message ComposerPayload) {
+	m.history = append(m.history, input)
+	m.historyMessages = append(m.historyMessages, message)
+	m.historyPos = len(m.history)
+	m.draft = ""
+	m.draftMessage = nil
+	m.editor.Reset()
+	m.resetPastes()
+	m.completionHidden = true
+	m.layout()
+}
+
 func (m *Model) submit() tea.Cmd { return m.submitWithQueue(false) }
 
 func (m *Model) submitFollowUp() tea.Cmd { return m.submitWithQueue(true) }
+
+// submitToSubagent 把输入交给当前正在查看的子任务：
+// 运行中的任务进队列，终态任务只能 continue
+func (m *Model) submitToSubagent(message ComposerPayload, followUp bool) tea.Cmd {
+	if m.viewingTaskID == "" {
+		return nil
+	}
+	if m.handlers.SubagentRequest == nil {
+		return nil
+	}
+	messageCopy := clonePayload(message)
+	task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
+	if !ok {
+		m.notice("Subagent task is no longer available")
+		return nil
+	}
+	// 与主 agent 一致:Enter 进 steering,Alt+Enter 进 follow-up;
+	// 终态任务只能 continue
+	kind := "continue"
+	if task.Status == "running" {
+		kind = "queue"
+		if followUp {
+			kind = "followup"
+		}
+	}
+	m.editor.Reset()
+	m.resetPastes()
+	m.layout()
+	return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID, Message: &messageCopy})
+}
 
 func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 	input := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if input == "" {
 		return nil
 	}
-	message, hasMessage := m.buildUserMessage()
-	hasImages := messageHasImages(message)
+	message, hasMessage := m.buildPayload()
+	hasImages := payloadHasImages(message)
 	if !hasMessage {
 		return nil
 	}
 	if m.viewingTaskID != "" {
-		if m.handlers.SubagentRequest == nil {
-			return nil
-		}
-		messageCopy := cloneUserMessage(message)
-		task, ok := findSubagentTask(m.state.Subagents.Tasks, m.viewingTaskID)
-		if !ok {
-			m.notice("Subagent task is no longer available")
-			return nil
-		}
-		// 与主 agent 一致:Enter 进 steering,Alt+Enter 进 follow-up;
-		// 终态任务只能 continue
-		kind := "continue"
-		if task.Status == "running" {
-			kind = "queue"
-			if followUp {
-				kind = "followup"
-			}
-		}
-		m.editor.Reset()
-		m.resetPastes()
-		m.layout()
-		return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID, Message: &messageCopy})
+		return m.submitToSubagent(message, followUp)
 	}
 	if hasImages && !m.currentModel().SupportsImages {
 		m.notice("The current model does not support image input.")
@@ -448,15 +485,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 			} else if m.handlers.Request == nil && m.handlers.EnqueueSteering == nil && m.handlers.EnqueueSteeringMessage == nil {
 				return nil
 			}
-			m.history = append(m.history, input)
-			m.historyMessages = append(m.historyMessages, message)
-			m.historyPos = len(m.history)
-			m.draft = ""
-			m.draftMessage = nil
-			m.editor.Reset()
-			m.resetPastes()
-			m.completionHidden = true
-			m.layout()
+			m.recordSubmission(input, message)
 			if followUp {
 				if hasImages {
 					return m.dispatchFollowUpMessage(input, &message)
@@ -484,21 +513,13 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 		m.layout()
 		return nil
 	}
-	m.history = append(m.history, input)
-	m.historyMessages = append(m.historyMessages, message)
-	m.historyPos = len(m.history)
-	m.draft = ""
-	m.draftMessage = nil
-	m.editor.Reset()
-	m.resetPastes()
-	m.completionHidden = true
-	m.layout()
+	m.recordSubmission(input, message)
 	if !strings.HasPrefix(input, "/") {
 		m.viewport.GotoBottom()
 		if hasImages {
-			return m.dispatchMessage("run", input, &message)
+			return m.dispatchMessage(RequestRun, input, &message)
 		}
-		return m.dispatch("run", input)
+		return m.dispatch(RequestRun, input)
 	}
 	name, arg := input, ""
 	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
@@ -506,7 +527,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 	}
 	if strings.HasPrefix(name, "/skill:") {
 		m.viewport.GotoBottom()
-		return m.dispatch("run", input)
+		return m.dispatch(RequestRun, input)
 	}
 	switch name {
 	case "/exit":
@@ -520,7 +541,7 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 				}
 			}
 			if len(matches) == 1 {
-				return m.dispatch("model", matches[0].Key())
+				return m.dispatch(RequestModel, matches[0].Key())
 			}
 		}
 		return m.openSelector("model", arg)
@@ -532,14 +553,14 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 		}
 		for _, level := range m.currentModel().Levels {
 			if arg == level {
-				return m.dispatch("thinking", level)
+				return m.dispatch(RequestThinking, level)
 			}
 		}
 		m.notice("Unknown effort level. Available: " + strings.Join(m.currentModel().Levels, ", "))
 	case "/resume":
 		return m.openSelector("resume", arg)
 	case "/compact":
-		return m.dispatch("compact", arg)
+		return m.dispatch(RequestCompact, arg)
 	case "/clear-follow-up":
 		if arg != "" {
 			m.notice("Usage: /clear-follow-up")
@@ -563,13 +584,13 @@ func (m *Model) submitWithQueue(followUp bool) tea.Cmd {
 			m.notice("Usage: /rename <new Name>")
 			return nil
 		}
-		return m.dispatch("rename", arg)
+		return m.dispatch(RequestRename, arg)
 	case "/new", "/reload", "/clear", "/delete":
 		if arg != "" {
 			m.notice("Usage: " + name)
 			return nil
 		}
-		return m.dispatch(strings.TrimPrefix(name, "/"), "")
+		return m.dispatch(RequestKind(strings.TrimPrefix(name, "/")), "")
 	default:
 		m.notice("Unknown command: " + name)
 	}
@@ -584,14 +605,14 @@ func isQueueControlCommand(input string) bool {
 	return name == "/clear-follow-up"
 }
 
-func (m *Model) stageCompactionMessage(input string, message llm.UserMessage, followUp bool) tea.Cmd {
+func (m *Model) stageCompactionMessage(input string, message ComposerPayload, followUp bool) tea.Cmd {
 	kind := queuedSteering
 	if followUp {
 		kind = queuedFollowUp
 	}
-	m.compactionQueuedMessages = append(m.compactionQueuedMessages, compactionQueuedMessage{message: cloneUserMessage(message), kind: kind})
+	m.compactionQueuedMessages = append(m.compactionQueuedMessages, compactionQueuedMessage{message: clonePayload(message), kind: kind})
 	m.history = append(m.history, input)
-	m.historyMessages = append(m.historyMessages, cloneUserMessage(message))
+	m.historyMessages = append(m.historyMessages, clonePayload(message))
 	m.historyPos = len(m.history)
 	m.draft = ""
 	m.draftMessage = nil

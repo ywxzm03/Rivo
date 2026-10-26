@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // 大粘贴折叠阈值
@@ -49,12 +48,12 @@ func (m *Model) handlePaste(text string) {
 	m.layout()
 }
 
-func (m *Model) handleImage(image llm.ImageContent) {
+func (m *Model) handleImage(image ImagePart) {
 	if image.Data == "" || image.MIMEType == "" {
 		return
 	}
 	if m.images == nil {
-		m.images = make(map[int]llm.ImageContent)
+		m.images = make(map[int]ImagePart)
 	}
 	reserved := imageMarkerIDs(m.editor.Value())
 	id := m.nextImageID(reserved)
@@ -69,70 +68,56 @@ func imageMarker(id int) string {
 	return "[Image #" + strconv.Itoa(id) + "]"
 }
 
-// buildUserMessage 展开文本粘贴标记，并按图片占位符位置组装用户消息
-func (m *Model) buildUserMessage() (llm.UserMessage, bool) {
+// buildPayload 展开文本粘贴标记，并按图片占位符位置组装待发送内容
+func (m *Model) buildPayload() (ComposerPayload, bool) {
 	value := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if value == "" {
-		return llm.UserMessage{}, false
+		return ComposerPayload{}, false
 	}
-	var content []llm.Content
+	var text strings.Builder
+	var images []ImagePart
 	last := 0
 	used := make(map[int]bool)
 	for _, match := range imageMarkerRegexp.FindAllStringSubmatchIndex(value, -1) {
 		if match[0] > last {
-			content = append(content, llm.TextContent{Text: value[last:match[0]]})
+			text.WriteString(value[last:match[0]])
 		}
 		id, err := strconv.Atoi(value[match[2]:match[3]])
 		image, ok := m.images[id]
 		if err != nil || !ok || used[id] {
-			content = append(content, llm.TextContent{Text: value[match[0]:match[1]]})
+			text.WriteString(value[match[0]:match[1]])
 		} else {
-			content = append(content, image)
+			images = append(images, image)
 			used[id] = true
 		}
 		last = match[1]
 	}
 	if last < len(value) {
-		content = append(content, llm.TextContent{Text: value[last:]})
+		text.WriteString(value[last:])
 	}
-	if len(content) == 0 {
-		return llm.UserMessage{}, false
+	payload := ComposerPayload{Text: text.String(), Images: images}
+	if payload.Text == "" && len(payload.Images) == 0 {
+		return ComposerPayload{}, false
 	}
-	return llm.UserMessage{Content: content}, true
+	return payload, true
 }
 
-func messageHasImages(message llm.UserMessage) bool {
-	for _, content := range message.Content {
-		if _, ok := content.(llm.ImageContent); ok {
-			return true
-		}
-	}
-	return false
+func payloadHasImages(payload ComposerPayload) bool {
+	return len(payload.Images) > 0
 }
 
-func (m *Model) editorTextForMessage(message llm.UserMessage) string {
-	reserved := make(map[int]bool)
-	for _, content := range message.Content {
-		text, ok := content.(llm.TextContent)
-		if ok {
-			for id := range imageMarkerIDs(text.Text) {
-				reserved[id] = true
-			}
-		}
-	}
+// editorTextForPayload 把待发送内容还原成编辑器文本，图片重新占位
+func (m *Model) editorTextForPayload(payload ComposerPayload) string {
+	reserved := imageMarkerIDs(payload.Text)
 	var b strings.Builder
-	for _, content := range message.Content {
-		switch content := content.(type) {
-		case llm.TextContent:
-			b.WriteString(content.Text)
-		case llm.ImageContent:
-			if m.images == nil {
-				m.images = make(map[int]llm.ImageContent)
-			}
-			id := m.nextImageID(reserved)
-			m.images[id] = content
-			b.WriteString(imageMarker(id))
+	b.WriteString(payload.Text)
+	for _, image := range payload.Images {
+		if m.images == nil {
+			m.images = make(map[int]ImagePart)
 		}
+		id := m.nextImageID(reserved)
+		m.images[id] = image
+		b.WriteString(imageMarker(id))
 	}
 	return b.String()
 }
@@ -158,11 +143,11 @@ func (m *Model) nextImageID(reserved map[int]bool) int {
 	}
 }
 
-func (m *Model) restoreEditorMessage(message *llm.UserMessage, fallback string) {
+func (m *Model) restoreEditorPayload(payload *ComposerPayload, fallback string) {
 	m.resetPastes()
 	value := fallback
-	if message != nil {
-		value = m.editorTextForMessage(*message)
+	if payload != nil {
+		value = m.editorTextForPayload(*payload)
 	}
 	m.editor.SetValue(value)
 	m.editor.CursorEnd()
