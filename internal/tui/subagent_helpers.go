@@ -51,19 +51,19 @@ func cloneToolGroup(group *ToolGroupView) *ToolGroupView {
 
 // upsertMainMessage 更新子任务视图期间缓存的主 transcript
 func (m *Model) upsertMainMessage(message Message) {
-	for index := range m.mainMessages {
-		if m.mainMessages[index].ID == message.ID {
-			m.mainMessages[index] = message
+	for index := range m.panel.mainMessages {
+		if m.panel.mainMessages[index].ID == message.ID {
+			m.panel.mainMessages[index] = message
 			return
 		}
 	}
-	m.mainMessages = append(m.mainMessages, message)
+	m.panel.mainMessages = append(m.panel.mainMessages, message)
 }
 
 func (m *Model) replaceMainMessage(previousID string, message Message) {
-	for index := range m.mainMessages {
-		if m.mainMessages[index].ID == previousID {
-			m.mainMessages[index] = message
+	for index := range m.panel.mainMessages {
+		if m.panel.mainMessages[index].ID == previousID {
+			m.panel.mainMessages[index] = message
 			return
 		}
 	}
@@ -74,8 +74,8 @@ func (m *Model) replaceMainTail(tail MessageTail) {
 	start := 0
 	if tail.AfterID != "" {
 		start = -1
-		for index := range m.mainMessages {
-			if m.mainMessages[index].ID == tail.AfterID {
+		for index := range m.panel.mainMessages {
+			if m.panel.mainMessages[index].ID == tail.AfterID {
 				start = index + 1
 				break
 			}
@@ -84,5 +84,5 @@ func (m *Model) replaceMainTail(tail MessageTail) {
 			return
 		}
 	}
-	m.mainMessages = append(m.mainMessages[:start:start], cloneMessages(tail.Messages)...)
+	m.panel.mainMessages = append(m.panel.mainMessages[:start:start], cloneMessages(tail.Messages)...)
 }

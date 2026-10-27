@@ -126,8 +126,8 @@ func TestOperationDoneStartsSubagentRefreshForRunningTasks(t *testing.T) {
 	m.Update(teaWindow(100, 16))
 	running := Snapshot{Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running"}}}}
 	_, cmd := m.Update(OperationDoneMsg{Snapshot: &running})
-	if cmd == nil || !m.subagentRefreshRunning {
-		t.Fatalf("refresh state = %v, cmd nil=%v", m.subagentRefreshRunning, cmd == nil)
+	if cmd == nil || !m.panel.refreshRunning {
+		t.Fatalf("refresh state = %v, cmd nil=%v", m.panel.refreshRunning, cmd == nil)
 	}
 }
 
@@ -140,8 +140,8 @@ func TestRunStartsSubagentRefreshAndShowsRowsWhileBusy(t *testing.T) {
 		SubagentSnapshot: func() tea.Cmd { snapshots++; return nil },
 	})
 	m.Update(teaWindow(120, 24))
-	if cmd := m.dispatch("run", "start subagents"); cmd == nil || !m.subagentRefreshRunning {
-		t.Fatalf("run did not start subagent refresh: cmd=%v running=%v", cmd != nil, m.subagentRefreshRunning)
+	if cmd := m.dispatch("run", "start subagents"); cmd == nil || !m.panel.refreshRunning {
+		t.Fatalf("run did not start subagent refresh: cmd=%v running=%v", cmd != nil, m.panel.refreshRunning)
 	}
 	m.applySubagentSnapshot(SubagentSnapshot{Revision: 1, Tasks: []SubagentTaskView{
 		{ID: "a1", AgentType: "work", Status: "running", Description: "gin-demo"},

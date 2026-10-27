@@ -89,14 +89,14 @@ func TestCoordinatorNotificationDoesNotOwnPersistence(t *testing.T) {
 
 func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
-	coord.compacting = true
+	coord.compaction.compacting = true
 	if err := coord.EnqueueSteering("during compact"); !errors.Is(err, ErrSteeringDuringCompaction) {
 		t.Fatalf("EnqueueSteering() error = %v, want compaction error", err)
 	}
 	if len(runner.appended) != 0 {
 		t.Fatal("steering reached runner during compaction")
 	}
-	coord.compacting = false
+	coord.compaction.compacting = false
 	if err := coord.EnqueueSteering("after compact"); err != nil {
 		t.Fatal(err)
 	}
@@ -105,8 +105,8 @@ func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	}
 }
 
-func TestCoordinatorRejectsImagesForLegacyRunner(t *testing.T) {
-	coord, _, _ := newTestCoordinator(t, t.TempDir(), nil)
+func TestCoordinatorKeepsImagesForStructuredSteering(t *testing.T) {
+	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
 	message := llm.UserMessage{Content: []llm.Content{
 		llm.TextContent{Text: "describe"},
 		llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
@@ -114,8 +114,16 @@ func TestCoordinatorRejectsImagesForLegacyRunner(t *testing.T) {
 	if _, err := coord.RunMessage(context.Background(), message); err == nil {
 		t.Fatal("RunMessage accepted image input through a text-only runner")
 	}
-	if err := coord.EnqueueSteeringMessage(message); err == nil {
-		t.Fatal("EnqueueSteeringMessage accepted image input through a text-only runner")
+	// 结构化入口保留图片：runner 必须原样收到带图的用户消息
+	if err := coord.EnqueueSteeringMessage(message); err != nil {
+		t.Fatalf("EnqueueSteeringMessage() error = %v, want image steering accepted", err)
+	}
+	if len(runner.appended) != 1 {
+		t.Fatalf("runner appended = %d, want 1", len(runner.appended))
+	}
+	got, ok := runner.appended[0].(llm.UserMessage)
+	if !ok || len(got.Content) != 2 {
+		t.Fatalf("steered message = %+v, want text+image", runner.appended[0])
 	}
 }
 
@@ -216,6 +224,16 @@ func (f *fakeRunner) Steer(input string) error {
 
 func (f *fakeRunner) FollowUp(input string) error {
 	f.appended = append(f.appended, textMsg(input))
+	return nil
+}
+
+func (f *fakeRunner) SteerMessage(message llm.UserMessage) error {
+	f.appended = append(f.appended, message)
+	return nil
+}
+
+func (f *fakeRunner) FollowUpMessage(message llm.UserMessage) error {
+	f.appended = append(f.appended, message)
 	return nil
 }
 
@@ -746,7 +764,7 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 	runner := &fakeRunner{coord: coord}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 模拟真实 Agent：溢出收场时先通知编排层
-		coord.pendingRecovery = true
+		coord.compaction.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "boom"}}, StopReason: llm.StopReasonError}
 		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
@@ -778,7 +796,7 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 	}
 	// WillRetry 不得报告不会发生的重试
 	coord.next = rec.handle
-	coord.pendingRecovery = true
+	coord.compaction.pendingRecovery = true
 	if err := coord.Handle(llm.AgentEndEvent{}); err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +831,7 @@ func TestCoordinatorRecoveryFailureSurfacesError(t *testing.T) {
 	}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 可恢复的长度截断：正常返回无错误，恢复失败的原因必须透出
-		coord.pendingRecovery = true
+		coord.compaction.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "truncated"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}
 		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)

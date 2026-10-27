@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
-	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/prompt"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -20,6 +18,8 @@ type Runner interface {
 	Run(ctx context.Context, input string) (*llm.AssistantMessage, error)
 	Continue(ctx context.Context) (*llm.AssistantMessage, error)
 	Steer(input string) error
+	SteerMessage(llm.UserMessage) error
+	FollowUpMessage(llm.UserMessage) error
 }
 
 type queuedRunner interface {
@@ -52,19 +52,15 @@ type Coordinator struct {
 	Agent Runner
 	// Compactor 为 nil 时禁用压缩
 	Compactor *compaction.Compactor
+	// compaction 承载压缩编排与溢出恢复状态，Compactor 变更后需同步
+	compaction *compactionController
 
 	model llm.Model
-	// pendingRecovery 记录正在收场的运行是否以可恢复的溢出结束
-	pendingRecovery bool
-	// recovered 限制每次 Run 最多做一次溢出恢复
-	recovered bool
 	// promptSections 是当前基线分节，请求前与重放结果 diff
 	promptSections prompt.Sections
 	// mu 只保护基线分节；runMu 串行化编排
-	mu         sync.Mutex
-	runMu      sync.Mutex
-	stateMu    sync.Mutex
-	compacting bool
+	mu    sync.Mutex
+	runMu sync.Mutex
 	// transientMessages 提供只在单次请求内出现的附件,例如子任务完成通知
 	transientMessages func() []llm.Message
 	// transientAck 在请求成功提交后确认这批附件已被消费
@@ -73,7 +69,9 @@ type Coordinator struct {
 }
 
 func NewCoordinator(m *session.SessionManager, next llm.AgentEventSink) *Coordinator {
-	return &Coordinator{m: m, next: next}
+	c := &Coordinator{m: m, next: next}
+	c.compaction = newCompactionController(m, c.emit, func() *compaction.Compactor { return c.Compactor })
+	return c
 }
 
 // setModel 同步当前运行模型
@@ -82,7 +80,7 @@ func (c *Coordinator) setModel(model llm.Model) {
 }
 
 func (c *Coordinator) resetRecovery() {
-	c.pendingRecovery, c.recovered = false, false
+	c.compaction.resetRecovery()
 }
 
 func (c *Coordinator) EnqueueSteering(input string) error {
@@ -91,21 +89,13 @@ func (c *Coordinator) EnqueueSteering(input string) error {
 
 // EnqueueSteeringMessage 在压缩状态锁内接受一条 steering，压缩开始后拒绝新输入
 func (c *Coordinator) EnqueueSteeringMessage(input llm.UserMessage) error {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if c.compacting {
+	if c.compaction.isCompacting() {
 		return ErrSteeringDuringCompaction
 	}
 	if c.Agent == nil {
 		return errors.New("app: steering runner is unavailable")
 	}
-	if runner, ok := c.Agent.(interface{ SteerMessage(llm.UserMessage) error }); ok {
-		return runner.SteerMessage(input)
-	}
-	if userMessageHasImages(input) {
-		return errors.New("app: runner does not support structured image steering")
-	}
-	return c.Agent.Steer(userMessageText(input))
+	return c.Agent.SteerMessage(input)
 }
 
 func (c *Coordinator) EnqueueFollowUp(input string) error {
@@ -114,24 +104,13 @@ func (c *Coordinator) EnqueueFollowUp(input string) error {
 
 // EnqueueFollowUpMessage 在压缩状态锁内接受一条 follow-up
 func (c *Coordinator) EnqueueFollowUpMessage(input llm.UserMessage) error {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if c.compacting {
+	if c.compaction.isCompacting() {
 		return ErrFollowUpDuringCompaction
 	}
 	if c.Agent == nil {
 		return errors.New("app: follow-up runner is unavailable")
 	}
-	if runner, ok := c.Agent.(interface{ FollowUpMessage(llm.UserMessage) error }); ok {
-		return runner.FollowUpMessage(input)
-	}
-	if userMessageHasImages(input) {
-		return errors.New("app: runner does not support structured image follow-up")
-	}
-	if runner, ok := c.Agent.(interface{ FollowUp(string) error }); ok {
-		return runner.FollowUp(userMessageText(input))
-	}
-	return errors.New("app: follow-up runner is unavailable")
+	return c.Agent.FollowUpMessage(input)
 }
 
 // SetPromptSections 设置基线分节；加锁与 preparePrompt 的读取互斥，避免并发路径下数据竞争
@@ -198,8 +177,8 @@ func (c *Coordinator) Handle(event llm.AgentEvent) error {
 				overflow = overflow || (message.StopReason == llm.StopReasonLength && c.model.MaxTokens > 0 && message.Usage.OutputTokens < c.model.MaxTokens)
 			}
 		}
-		c.pendingRecovery = overflow
-		end.WillRetry = overflow && !c.recovered && c.Compactor != nil
+		c.compaction.pendingRecovery = overflow
+		end.WillRetry = overflow && c.compaction.needsRecovery()
 		event = end
 	}
 	return c.emit(event)
@@ -293,18 +272,8 @@ func (c *Coordinator) RunMessage(ctx context.Context, input llm.UserMessage) (*l
 	if userMessageHasImages(input) {
 		return nil, errors.New("app: runner does not support structured image input")
 	}
-	reply, runErr := c.Agent.Run(ctx, userMessageText(input))
+	reply, runErr := c.Agent.Run(ctx, llm.TextOf(input.Content))
 	return c.finishRun(ctx, reply, runErr)
-}
-
-func userMessageText(message llm.UserMessage) string {
-	var parts []string
-	for _, content := range message.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // Continue 续接当前会话并完成一次溢出恢复
@@ -340,35 +309,35 @@ func (c *Coordinator) ContinueFollowUp(ctx context.Context) (*llm.AssistantMessa
 
 // finishRun 在操作结束前完成溢出恢复；持久化失败优先透出
 func (c *Coordinator) finishRun(ctx context.Context, reply *llm.AssistantMessage, runErr error) (*llm.AssistantMessage, error) {
-	if !c.pendingRecovery || c.recovered || c.Compactor == nil {
+	if !c.compaction.needsRecovery() {
 		return reply, runErr
 	}
-	c.recovered = true
+	c.compaction.recovered = true
 	// 2.省略失败尝试：磁盘上保留、投影上排除；失败原因不吞掉
-	if oerr := c.omitLastAttempt(); oerr != nil {
+	if oerr := c.compaction.omitLastAttempt(); oerr != nil {
 		return reply, errors.Join(runErr, oerr)
 	}
 	// 3.压缩成功才重试该轮；失败按原始错误收场
-	if cerr := c.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
+	if cerr := c.compaction.compact(ctx, CompactionReasonOverflow, ""); cerr != nil {
 		var commitErr *session.CommitError
 		if runErr == nil || errors.As(cerr, &commitErr) {
 			runErr = cerr
 		}
 		return reply, runErr
 	}
-	c.pendingRecovery = false
+	c.compaction.pendingRecovery = false
 	return c.Agent.Continue(ctx)
 }
 
 // retryOverflowRecovery 在省略标记补写成功后继续完成同一轮溢出恢复
 func (c *Coordinator) retryOverflowRecovery(ctx context.Context, resume bool) (*llm.AssistantMessage, error) {
-	if !c.pendingRecovery || c.Compactor == nil {
+	if !c.compaction.pendingRecovery || c.compaction.compactor() == nil {
 		return nil, nil
 	}
-	if err := c.compact(ctx, CompactionReasonOverflow, ""); err != nil {
+	if err := c.compaction.compact(ctx, CompactionReasonOverflow, ""); err != nil {
 		return nil, err
 	}
-	c.pendingRecovery = false
+	c.compaction.pendingRecovery = false
 	if resume {
 		return c.Agent.Continue(ctx)
 	}
@@ -379,98 +348,19 @@ func (c *Coordinator) retryOverflowRecovery(ctx context.Context, resume bool) (*
 func (c *Coordinator) Compact(ctx context.Context, instructions string) error {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
-	return c.compact(ctx, CompactionReasonManual, instructions)
+	return c.compaction.compact(ctx, CompactionReasonManual, instructions)
 }
 
 // CompactIfNeeded 在会话投影上评估静默溢出与阈值，提交成功才发布压缩点
 func (c *Coordinator) CompactIfNeeded(ctx context.Context) (bool, error) {
-	if c.Compactor == nil {
+	reason, needed := c.compaction.shouldCompact(c.m.BuildContext())
+	if !needed {
 		return false, nil
 	}
-	proj := c.m.BuildContext()
-	messages := proj.Messages()
-	window := c.Compactor.Config.ContextWindow
-	if window <= 0 {
-		return false, nil
+	if err := c.compaction.compact(ctx, reason, ""); err != nil {
+		return false, err
 	}
-	// 静默溢出优先：响应成功但最后一条 assistant 的 usage 已超窗
-	if !proj.UsageStale {
-		if msg := lastAssistant(messages); msg != nil && msg.Usage.InputTokens > window {
-			if err := c.compact(ctx, CompactionReasonOverflow, ""); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-	}
-	if compaction.ShouldCompact(contextTokens(proj), window, c.Compactor.Config.ReserveTokens) {
-		if err := c.compact(ctx, CompactionReasonAuto, ""); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
-// compact 先计算候选摘要，落盘成功后才发布新投影；失败时会话与内存保持一致
-func (c *Coordinator) compact(ctx context.Context, reason, instructions string) error {
-	if c.Compactor == nil {
-		return errors.New("session: context compaction not enabled")
-	}
-	c.stateMu.Lock()
-	c.compacting = true
-	c.stateMu.Unlock()
-	defer func() {
-		c.stateMu.Lock()
-		c.compacting = false
-		c.stateMu.Unlock()
-	}()
-	proj := c.m.BuildContext()
-	tokensBefore := contextTokens(proj)
-	if err := c.emit(llm.CompactionStartEvent{Reason: reason, TokensBefore: tokensBefore}); err != nil {
-		return err
-	}
-	result, err := c.Compactor.Compact(ctx, proj, instructions)
-	if err != nil {
-		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
-		return err
-	}
-	var usage *llm.Usage
-	if result.Usage.InputTokens != 0 || result.Usage.OutputTokens != 0 {
-		usage = &result.Usage
-	}
-	if err := c.m.AppendCompactionWithDetails(result.Summary, result.FirstKeptSourceID, tokensBefore, llm.CurrentSystemMessage(proj.Messages()), usage, &result.FileLists); err != nil {
-		_ = c.emit(llm.CompactionEndEvent{Reason: reason, TokensBefore: tokensBefore, Error: err.Error()})
-		return err
-	}
-	// 落盘成功后重建投影并提交内存；此后通知失败不影响状态
-	rebuilt := c.m.BuildContext()
-	// 结束事件表示 compaction 边界已关闭：先解除 compacting，TUI 才能按原序转发暂存输入
-	c.setCompacting(false)
-	_ = c.emit(llm.CompactionEndEvent{
-		Reason:           reason,
-		Summary:          result.Summary,
-		KeptMessageCount: result.KeptMessageCount,
-		TokensBefore:     tokensBefore,
-		TokensAfter:      compaction.EstimateContextTokens(rebuilt.Messages()),
-		Usage:            result.Usage,
-	})
-	return nil
-}
-
-// setCompacting 更新压缩状态，供入队边界与结束事件共享同一临界区
-func (c *Coordinator) setCompacting(value bool) {
-	c.stateMu.Lock()
-	c.compacting = value
-	c.stateMu.Unlock()
-}
-
-// omitLastAttempt 为最后落盘的失败尝试追加 context_edit 省略
-func (c *Coordinator) omitLastAttempt() error {
-	target := c.m.LastEntryID()
-	if target == "" {
-		return errors.New("session: no failed attempt to omit")
-	}
-	return c.m.AppendContextEdit(target, nil)
+	return true, nil
 }
 
 func (c *Coordinator) emit(event llm.AgentEvent) error {
@@ -478,22 +368,4 @@ func (c *Coordinator) emit(event llm.AgentEvent) error {
 		return nil
 	}
 	return c.next(event)
-}
-
-// contextTokens 按陈旧标记选择 token 估算方式：陈旧时尾部 usage 反映压缩前的大上下文，
-// 改用纯消息体估算，防止压缩刚结束就重复触发
-func contextTokens(proj ctxview.ContextView) int {
-	if proj.UsageStale {
-		return compaction.EstimateContextTokens(proj.Messages())
-	}
-	return compaction.ContextTokens(proj.Messages())
-}
-
-func lastAssistant(messages []llm.Message) *llm.AssistantMessage {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if msg, ok := messages[i].(llm.AssistantMessage); ok {
-			return &msg
-		}
-	}
-	return nil
 }

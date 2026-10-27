@@ -7,6 +7,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 // edit 的结构化详情单独投影，结果正文里不再混入 JSON
@@ -15,13 +16,13 @@ func TestToolDetailsProjectedSeparately(t *testing.T) {
 	runtime.toolStartLocked(llm.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "edit", Arguments: map[string]any{"path": "a.go"}})
 	runtime.toolEndLocked(llm.ToolExecutionEndEvent{ToolCallID: "call-1", ToolName: "edit", Result: llm.ToolResult{
 		Content: []llm.Content{llm.TextContent{Text: "Successfully replaced 1 block(s) in a.go."}},
-		Details: map[string]any{"Patch": "@@ -1 +1 @@\n-a\n+b", "Diff": "-1 a\n+1 b"},
+		Details: tool.EditDetails{Patch: "@@ -1 +1 @@\n-a\n+b", Diff: "-1 a\n+1 b"},
 	}})
 	call := runtime.messages[0].ToolGroup.Calls[0]
 	if call.Result != "Successfully replaced 1 block(s) in a.go." {
 		t.Fatalf("result = %q, want text only", call.Result)
 	}
-	if !strings.Contains(call.Details, `"Patch"`) {
+	if !strings.Contains(call.Details, `"patch"`) {
 		t.Fatalf("details = %q, want patch JSON", call.Details)
 	}
 }
@@ -33,14 +34,14 @@ func TestToolDetailsProjectedFromSessionReplay(t *testing.T) {
 		SourceID: "entry-1",
 		Messages: []llm.Message{
 			llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "call-1", Name: "edit", Arguments: map[string]any{"path": "a.go"}}}},
-			llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "edit", Content: []llm.Content{llm.TextContent{Text: "ok"}}, Details: map[string]any{"Patch": "@@ -1 +1 @@\n-a\n+b"}},
+			llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "edit", Content: []llm.Content{llm.TextContent{Text: "ok"}}, Details: tool.EditDetails{Patch: "@@ -1 +1 @@\n-a\n+b"}},
 		},
 	}}}
 	messages := runtime.projectContext(view)
 	if len(messages) != 1 || messages[0].ToolGroup == nil || len(messages[0].ToolGroup.Calls) != 1 {
 		t.Fatalf("projected = %+v", messages)
 	}
-	if details := messages[0].ToolGroup.Calls[0].Details; !strings.Contains(details, "Patch") {
+	if details := messages[0].ToolGroup.Calls[0].Details; !strings.Contains(details, "patch") {
 		t.Fatalf("replayed details = %q", details)
 	}
 }

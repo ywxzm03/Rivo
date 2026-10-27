@@ -27,11 +27,11 @@ func TestRenameCommandRequiresNameAndKeepsSpaces(t *testing.T) {
 
 func TestNewSessionResetsUIOnlyAfterSuccess(t *testing.T) {
 	m := testModel(120, 30)
-	m.history, m.historyPos, m.draft = []string{"old input"}, 1, "old draft"
-	m.showThinking, m.showAllTools = true, true
+	m.composer.history, m.composer.historyPos, m.composer.draft = []string{"old input"}, 1, "old draft"
+	m.transcript.showThinking, m.transcript.showAllTools = true, true
 	m.state.Messages = []Message{{ID: "old", Role: "user", Text: "old conversation"}}
 	m.Update(OperationDoneMsg{Notice: "New session started", Snapshot: &Snapshot{Thinking: "high"}, ResetSessionUI: true})
-	if len(m.history) != 0 || m.draft != "" || m.editor.Value() != "" || m.showThinking || m.showAllTools || m.state.Thinking != "high" {
+	if len(m.composer.history) != 0 || m.composer.draft != "" || m.editor.Value() != "" || m.transcript.showThinking || m.transcript.showAllTools || m.state.Thinking != "high" {
 		t.Fatal("new session did not restore initial UI state")
 	}
 	if len(m.state.Messages) != 1 || m.state.Messages[0].Text != "New session started" {
@@ -69,15 +69,15 @@ func TestClearAndDeleteCommands(t *testing.T) {
 	var requests []Request
 	m.handlers.Request = func(r Request) tea.Cmd { requests = append(requests, r); return nil }
 	m.state.Messages = []Message{{ID: "old", Role: "user", Text: "old context"}}
-	m.history = []string{"previous"}
-	m.historyPos = len(m.history)
+	m.composer.history = []string{"previous"}
+	m.composer.historyPos = len(m.composer.history)
 	m.editor.SetValue("/clear")
 	m.submit()
 	if len(requests) != 1 || requests[0].Kind != "clear" {
 		t.Fatalf("clear request = %+v", requests)
 	}
 	m.Update(OperationDoneMsg{ID: m.operationID, Snapshot: &Snapshot{}, ResetTranscript: true})
-	if len(m.state.Messages) != 0 || len(m.history) != 2 || m.editor.Value() != "" {
+	if len(m.state.Messages) != 0 || len(m.composer.history) != 2 || m.editor.Value() != "" {
 		t.Fatal("clear did not only reset the transcript")
 	}
 

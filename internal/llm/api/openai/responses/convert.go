@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
@@ -348,29 +349,9 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "reasoning":
-			reasoning := item.AsReasoning()
-			var thinking string
-			for i, part := range reasoning.Summary {
-				if i > 0 {
-					thinking += "\n\n"
-				}
-				thinking += part.Text
-			}
-			if thinking == "" {
-				for i, part := range reasoning.Content {
-					if i > 0 {
-						thinking += "\n\n"
-					}
-					thinking += part.Text
-				}
-			}
-			signature := reasoning.RawJSON()
-			if signature == "" {
-				data, err := json.Marshal(reasoning)
-				if err != nil {
-					return nil, nil, fmt.Errorf("openai: marshal reasoning item: %w", err)
-				}
-				signature = string(data)
+			thinking, signature, err := reasoningThinking(item)
+			if err != nil {
+				return nil, nil, err
 			}
 			msg.Content = append(msg.Content, llm.ThinkingContent{
 				Thinking:          thinking,
@@ -445,4 +426,35 @@ func toolCallFromItem(item responses.ResponseOutputItemUnion) (llm.ToolCall, err
 		}
 	}
 	return llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args}, nil
+}
+
+// reasoningThinking 从 reasoning item 提取思考文本与签名。
+// Summary 为空时退回 Content；签名优先用原始 JSON，缺失时重新序列化
+func reasoningThinking(item responses.ResponseOutputItemUnion) (thinking, signature string, err error) {
+	reasoning := item.AsReasoning()
+	thinking = joinReasoningParts(reasoning.Summary, func(part responses.ResponseReasoningItemSummary) string { return part.Text })
+	if thinking == "" {
+		thinking = joinReasoningParts(reasoning.Content, func(part responses.ResponseReasoningItemContent) string { return part.Text })
+	}
+	signature = reasoning.RawJSON()
+	if signature == "" {
+		data, marshalErr := json.Marshal(reasoning)
+		if marshalErr != nil {
+			return "", "", fmt.Errorf("openai: marshal reasoning item: %w", marshalErr)
+		}
+		signature = string(data)
+	}
+	return thinking, signature, nil
+}
+
+// joinReasoningParts 用空行连接各段文本；Summary 与 Content 元素类型不同，用泛型加取值函数统一
+func joinReasoningParts[T any](parts []T, text func(T) string) string {
+	var builder strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString(text(part))
+	}
+	return builder.String()
 }

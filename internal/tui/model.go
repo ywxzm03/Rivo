@@ -166,17 +166,11 @@ type Request struct {
 type Handlers struct {
 	Request func(Request) tea.Cmd
 	// Status 查询模型、用量与会话文件，不启动模型 operation
-	Status func() tea.Cmd
-	Cancel func()
-	// EnqueueSteering 同步接受一条 steering，避免撤回与异步入队竞态
-	EnqueueSteering        func(string) error
-	EnqueueSteeringMessage func(ComposerPayload) error
-	// RestoreSteering 原子取出后台尚未消费的 steering，供撤回到编辑器
-	RestoreSteering         func() []string
+	Status                  func() tea.Cmd
+	Cancel                  func()
+	EnqueueSteeringMessage  func(ComposerPayload) error
 	RestoreSteeringMessages func() []ComposerPayload
-	// EnqueueFollowUp 同步接受一条 follow-up
-	EnqueueFollowUp        func(string) error
-	EnqueueFollowUpMessage func(ComposerPayload) error
+	EnqueueFollowUpMessage  func(ComposerPayload) error
 	// RestoreFollowUpMessages 原子取出后台尚未消费的 follow-up
 	RestoreFollowUpMessages func() []ComposerPayload
 	ClearFollowUp           func() []ComposerPayload
@@ -202,24 +196,10 @@ type SessionStatusMsg struct {
 	Available                   bool
 	Err                         error
 }
-type SteeringResultMsg struct {
-	ID       uint64
-	Value    string
-	Message  *ComposerPayload
-	Revision uint64
-	Err      error
-}
 type SteeringStateMsg struct {
 	Messages []string
 	Inputs   []ComposerPayload
 	Revision uint64
-}
-type FollowUpResultMsg struct {
-	ID       uint64
-	Value    string
-	Message  *ComposerPayload
-	Revision uint64
-	Err      error
 }
 type QueueStateMsg struct {
 	Steering         []string
@@ -285,26 +265,15 @@ type Model struct {
 	operationID  uint64
 	state        Snapshot
 	handlers     Handlers
-	// 子任务视图状态:viewingTaskID 非空时 transcript 显示该任务
-	mainMessages             []Message
-	viewingTaskID            string
-	selectedTaskID           string
-	mainSelected             bool
-	taskSelector             bool
-	subagentRefreshRunning   bool
-	spinnerRunning           bool
-	width, height            int
-	editor                   textarea.Model
-	viewport                 viewport.Model
-	spinner                  spinner.Model
-	selector                 *selector
-	completion               int
-	completionHidden         bool
-	history                  []string
-	historyMessages          []ComposerPayload
-	historyPos               int
-	draft                    string
-	draftMessage             *ComposerPayload
+	// panel 承载子任务视图与选择器状态
+	panel          subagentPanel
+	spinnerRunning bool
+	width, height  int
+	editor         textarea.Model
+	viewport       viewport.Model
+	spinner        spinner.Model
+	// composer 承载输入框的补全、历史、草稿与粘贴注册表
+	composer                 composer
 	busy, closing            bool
 	initialPrompt            string
 	operationIsRun           bool
@@ -322,36 +291,17 @@ type Model struct {
 	lastCtrlC    time.Time
 	flushPending bool
 	cache        map[string]cachedMessage
-	// expandedGroups / expandedCalls / expandedThoughts 记录单击展开的组、调用与思考块
-	expandedGroups   map[string]bool
-	expandedCalls    map[string]bool
-	expandedThoughts map[string]bool
-	// lastToolHits 是最近一次渲染的点击命中区间，用于把单击映射回调用
-	lastToolHits     []toolHit
-	steeringRevision uint64
-	followUpRestored bool
-	followUpRevision uint64
-	// lastMessageHits 由 renderMessage 写入，refreshTranscript 换算成屏幕行
-	lastMessageHits  []toolHit
-	markdown         markdownRenderer
-	clock            func() time.Time
-	selectionAnchor  screenPoint
-	selectionFocus   screenPoint
-	selecting        bool
-	lastClick        screenPoint
-	lastClickAt      time.Time
-	mousePosition    screenPoint
-	mousePositionSet bool
-	mouseFragment    string
-	copyNoticeSeq    uint64
-	copyNotice       bool
-	statusNoticeSeq  uint64
-	pastes           map[int]string
-	pasteCounter     int
-	images           map[int]ImagePart
-	imageCounter     int
-	cursorRow        atomic.Int64
-	cursorColumn     atomic.Int64
+	markdown     markdownRenderer
+	clock        func() time.Time
+	// sel 承载鼠标选择与复制提示状态
+	sel selection
+	// transcript 承载渲染缓存、展开状态与点击命中区间
+	transcript transcriptView
+	// queues 承载 steering / follow-up 队列镜像
+	queues          queueMirror
+	statusNoticeSeq uint64
+	cursorRow       atomic.Int64
+	cursorColumn    atomic.Int64
 }
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
@@ -382,8 +332,12 @@ func newModel(state Snapshot, handlers Handlers, initialPrompt string) *Model {
 	ed.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	ed.Focus()
 	m := &Model{handlers: handlers, editor: ed, initialPrompt: initialPrompt, viewport: viewport.New(0, 0),
-		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), cache: make(map[string]cachedMessage), images: make(map[int]ImagePart), clock: time.Now,
-		expandedGroups: make(map[string]bool), expandedCalls: make(map[string]bool), expandedThoughts: make(map[string]bool)}
+		spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)), clock: time.Now}
+	m.composer.images = make(map[int]ImagePart)
+	m.transcript.cache = make(map[string]cachedMessage)
+	m.transcript.expandedGroups = make(map[string]bool)
+	m.transcript.expandedCalls = make(map[string]bool)
+	m.transcript.expandedThoughts = make(map[string]bool)
 	m.applySnapshot(state)
 	return m
 }
@@ -439,7 +393,7 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.Snapshot != nil {
 		if msg.RetainMessages {
 			preserveSteering := m.steeringRestored
-			preserveFollowUp := m.followUpRestored
+			preserveFollowUp := m.queues.followUpRestored
 			m.applyMetadata(*msg.Snapshot)
 			if preserveSteering {
 				m.state.Steering = nil
@@ -454,27 +408,27 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.steeringRestored = false
-	m.followUpRestored = false
+	m.queues.followUpRestored = false
 	if msg.ResetTranscript {
 		m.viewport.GotoBottom()
 		m.cache = make(map[string]cachedMessage)
-		m.lastMessageHits = nil
+		m.transcript.messageHits = nil
 	}
 	if msg.Tail != nil {
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			m.replaceMainTail(*msg.Tail)
 		} else {
 			m.replaceTail(*msg.Tail)
 		}
 	}
 	for _, change := range msg.Changes {
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			m.upsertMainMessage(change)
 		} else {
 			m.upsertMessage(change)
 		}
 	}
-	if msg.RestoreEditor && m.viewingTaskID == "" {
+	if msg.RestoreEditor && m.panel.viewingTaskID == "" {
 		m.resetPastes()
 		editorValue := msg.EditorValue
 		if msg.EditorMessage != nil {
@@ -482,7 +436,7 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 		}
 		m.editor.SetValue(editorValue)
 		m.editor.CursorEnd()
-		m.completion, m.completionHidden = 0, true
+		m.composer.completion, m.composer.completionHidden = 0, true
 	}
 	if msg.Err != nil {
 		m.notice("Error: " + msg.Err.Error())
@@ -494,64 +448,14 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 	return m, m.startSubagentRefresh()
 }
 
-// handleQueueResult 处理单条 steering/follow-up 入队结果：失败退回编辑器，成功合并投影
-func (m *Model) handleQueueResult(id uint64, err error, message *ComposerPayload, value string, revision uint64, steering bool) (tea.Model, tea.Cmd) {
-	if id != 0 && id != m.operationID {
-		return m, nil
-	}
-	if err != nil {
-		if message != nil && strings.TrimSpace(m.editor.Value()) == "" {
-			m.restoreEditorPayload(message, value)
-		} else if strings.TrimSpace(m.editor.Value()) == "" {
-			m.editor.SetValue(value)
-			m.editor.CursorEnd()
-		}
-		m.completion, m.completionHidden = 0, true
-		m.notice("Error: " + err.Error())
-		m.layout()
-		return m, nil
-	}
-	if !m.busy {
-		m.layout()
-		return m, nil
-	}
-	current := &m.followUpRevision
-	if steering {
-		m.steeringRestored = false
-		current = &m.steeringRevision
-	} else {
-		m.followUpRestored = false
-	}
-	if revision == 0 || revision > *current {
-		if revision > *current {
-			*current = revision
-		}
-		payload := message
-		if payload == nil {
-			value := textPayload(value)
-			payload = &value
-		}
-		if steering {
-			m.appendSteeringState(value, payload, true)
-		} else {
-			m.appendFollowUpState(value, payload, true)
-		}
-	}
-	if !m.canceling && !m.compacting {
-		m.status = "Working"
-	}
-	m.layout()
-	return m, nil
-}
-
 // handleQueueState 应用队列状态快照，撤回过的队列优先于后台推送
 func (m *Model) handleQueueState(msg QueueStateMsg) (tea.Model, tea.Cmd) {
-	if !m.steeringRestored && msg.SteeringRevision >= m.steeringRevision {
-		m.steeringRevision = msg.SteeringRevision
+	if !m.steeringRestored && msg.SteeringRevision >= m.queues.steeringRevision {
+		m.queues.steeringRevision = msg.SteeringRevision
 		m.setSteeringState(msg.Steering, msg.SteeringInputs)
 	}
-	if !m.followUpRestored && msg.FollowUpRevision >= m.followUpRevision {
-		m.followUpRevision = msg.FollowUpRevision
+	if !m.queues.followUpRestored && msg.FollowUpRevision >= m.queues.followUpRevision {
+		m.queues.followUpRevision = msg.FollowUpRevision
 		m.setFollowUpState(msg.FollowUp, msg.FollowUpInputs)
 	}
 	m.layout()
@@ -560,14 +464,14 @@ func (m *Model) handleQueueState(msg QueueStateMsg) (tea.Model, tea.Cmd) {
 
 // handleSteeringState 应用只含 steering 的状态推送，旧版本一律丢弃
 func (m *Model) handleSteeringState(msg SteeringStateMsg) (tea.Model, tea.Cmd) {
-	if msg.Revision == 0 && m.steeringRevision > 0 {
+	if msg.Revision == 0 && m.queues.steeringRevision > 0 {
 		return m, nil
 	}
-	if msg.Revision < m.steeringRevision {
+	if msg.Revision < m.queues.steeringRevision {
 		return m, nil
 	}
 	m.steeringRestored = false
-	m.steeringRevision = msg.Revision
+	m.queues.steeringRevision = msg.Revision
 	m.setSteeringState(msg.Messages, msg.Inputs)
 	m.layout()
 	return m, nil
@@ -601,7 +505,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m, m.handleMouse(msg)
 	case MessageMsg:
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			// 主 Agent 的流式消息属于 main transcript;child 视图只缓存
 			m.upsertMainMessage(Message(msg))
 			return m, nil
@@ -612,7 +516,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(time.Second/60, func(time.Time) tea.Msg { return flushMsg{} })
 		}
 	case MessageCommittedMsg:
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			m.replaceMainMessage(msg.PreviousID, msg.Message)
 			return m, nil
 		}
@@ -655,10 +559,6 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.upsertMessage(Message{ID: fmt.Sprintf("status/%d", seq), Role: "status", Text: formatStatus(msg)})
 			m.refreshTranscript()
 		}
-	case SteeringResultMsg:
-		return m.handleQueueResult(msg.ID, msg.Err, msg.Message, msg.Value, msg.Revision, true)
-	case FollowUpResultMsg:
-		return m.handleQueueResult(msg.ID, msg.Err, msg.Message, msg.Value, msg.Revision, false)
 	case QueueStateMsg:
 		return m.handleQueueState(msg)
 	case SteeringStateMsg:
@@ -692,7 +592,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applySubagentSnapshot(msg.Snapshot)
 		}
 		if msg.Err != nil {
-			if msg.RestoreMessage != nil && m.viewingTaskID != "" {
+			if msg.RestoreMessage != nil && m.panel.viewingTaskID != "" {
 				m.restoreEditorPayload(msg.RestoreMessage, "")
 			}
 			m.notice("Subagent view unavailable: " + msg.Err.Error())
@@ -704,12 +604,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.startSubagentRefresh()
 		}
 	case subagentRefreshMsg:
-		m.subagentRefreshRunning = false
+		m.panel.refreshRunning = false
 		if m.handlers.SubagentSnapshot == nil || !m.needsSubagentRefresh() {
 			return m, nil
 		}
 		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链
-		m.subagentRefreshRunning = true
+		m.panel.refreshRunning = true
 		return m, tea.Batch(m.handlers.SubagentSnapshot(), m.startSpinner(), subagentRefreshTick())
 	case spinner.TickMsg:
 		if m.busy || hasRunningSubagent(m.state.Subagents.Tasks) {
@@ -738,21 +638,21 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice("Clipboard copy failed: " + msg.err.Error())
 			break
 		}
-		m.copyNoticeSeq++
-		sequence := m.copyNoticeSeq
-		m.copyNotice = true
+		m.sel.noticeSeq++
+		sequence := m.sel.noticeSeq
+		m.sel.notice = true
 		return m, tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return clearCopyNoticeMsg(sequence) })
 	case clearCopyNoticeMsg:
-		if uint64(msg) == m.copyNoticeSeq {
-			m.copyNotice = false
+		if uint64(msg) == m.sel.noticeSeq {
+			m.sel.notice = false
 		}
 	default:
-		if m.selector != nil {
-			before := m.selector.input.Value()
+		if m.composer.selector != nil {
+			before := m.composer.selector.input.Value()
 			var cmd tea.Cmd
-			m.selector.input, cmd = m.selector.input.Update(msg)
-			if before != m.selector.input.Value() {
-				m.selector.filter()
+			m.composer.selector.input, cmd = m.composer.selector.input.Update(msg)
+			if before != m.composer.selector.input.Value() {
+				m.composer.selector.filter()
 				m.layout()
 			}
 			return m, cmd
@@ -761,7 +661,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.editor, cmd = m.editor.Update(msg)
 		if before != m.editor.Value() {
-			m.completion, m.completionHidden = 0, false
+			m.composer.completion, m.composer.completionHidden = 0, false
 			m.layout()
 		}
 		return m, cmd
@@ -770,12 +670,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) applySnapshot(s Snapshot) {
-	viewingTaskID := m.viewingTaskID
+	viewingTaskID := m.panel.viewingTaskID
 	m.applyMetadata(s)
 	m.steeringRestored = false
 	// 子任务视图里 transcript 属于 child;主 transcript 先缓存起来,
 	// 退出视图时再恢复
-	m.mainMessages = cloneMessages(s.Messages)
+	m.panel.mainMessages = cloneMessages(s.Messages)
 	if viewingTaskID != "" {
 		if task, ok := findSubagentTask(s.Subagents.Tasks, viewingTaskID); ok {
 			m.state.Messages = cloneMessages(task.Messages)
@@ -872,13 +772,13 @@ func (m *Model) dispatchSteeringMessage(value string, message *ComposerPayload) 
 	if message != nil && m.handlers.EnqueueSteeringMessage != nil {
 		if err := m.handlers.EnqueueSteeringMessage(*message); err != nil {
 			m.restoreEditorPayload(message, value)
-			m.completion, m.completionHidden = 0, true
+			m.composer.completion, m.composer.completionHidden = 0, true
 			m.notice("Error: " + err.Error())
 			m.layout()
 			return nil
 		}
 		m.steeringRestored = false
-		m.steeringRevision++
+		m.queues.steeringRevision++
 		m.appendSteeringState(value, message, false)
 		if !m.canceling && !m.compacting {
 			m.status = "Working"
@@ -886,33 +786,7 @@ func (m *Model) dispatchSteeringMessage(value string, message *ComposerPayload) 
 		m.layout()
 		return nil
 	}
-	if m.handlers.EnqueueSteering != nil {
-		if message != nil && payloadHasImages(*message) {
-			m.restoreEditorPayload(message, value)
-			m.notice("Structured image steering is unavailable.")
-			m.layout()
-			return nil
-		}
-		if err := m.handlers.EnqueueSteering(value); err != nil {
-			m.restoreEditorPayload(message, value)
-			m.completion, m.completionHidden = 0, true
-			m.notice("Error: " + err.Error())
-			m.layout()
-			return nil
-		}
-		m.steeringRestored = false
-		m.steeringRevision++
-		m.appendSteeringState(value, message, false)
-		if !m.canceling && !m.compacting {
-			m.status = "Working"
-		}
-		m.layout()
-		return nil
-	}
-	if m.handlers.Request == nil {
-		return nil
-	}
-	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: RequestSteer, Value: value, Payload: message})
+	return nil
 }
 
 func (m *Model) dispatchFollowUp(value string) tea.Cmd {
@@ -927,13 +801,13 @@ func (m *Model) dispatchFollowUpMessage(value string, message *ComposerPayload) 
 	if message != nil && m.handlers.EnqueueFollowUpMessage != nil {
 		if err := m.handlers.EnqueueFollowUpMessage(*message); err != nil {
 			m.restoreEditorPayload(message, value)
-			m.completion, m.completionHidden = 0, true
+			m.composer.completion, m.composer.completionHidden = 0, true
 			m.notice("Error: " + err.Error())
 			m.layout()
 			return nil
 		}
-		m.followUpRestored = false
-		m.followUpRevision++
+		m.queues.followUpRestored = false
+		m.queues.followUpRevision++
 		m.appendFollowUpState(value, message, false)
 		if !m.canceling && !m.compacting {
 			m.status = "Working"
@@ -941,33 +815,7 @@ func (m *Model) dispatchFollowUpMessage(value string, message *ComposerPayload) 
 		m.layout()
 		return nil
 	}
-	if m.handlers.EnqueueFollowUp != nil {
-		if message != nil && payloadHasImages(*message) {
-			m.restoreEditorPayload(message, value)
-			m.notice("Structured image follow-up is unavailable.")
-			m.layout()
-			return nil
-		}
-		if err := m.handlers.EnqueueFollowUp(value); err != nil {
-			m.restoreEditorPayload(message, value)
-			m.completion, m.completionHidden = 0, true
-			m.notice("Error: " + err.Error())
-			m.layout()
-			return nil
-		}
-		m.followUpRestored = false
-		m.followUpRevision++
-		m.appendFollowUpState(value, message, false)
-		if !m.canceling && !m.compacting {
-			m.status = "Working"
-		}
-		m.layout()
-		return nil
-	}
-	if m.handlers.Request == nil {
-		return nil
-	}
-	return m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: RequestFollowUp, Value: value, Payload: message})
+	return nil
 }
 
 func textPayload(value string) ComposerPayload {
@@ -977,27 +825,15 @@ func textPayload(value string) ComposerPayload {
 func (m *Model) enqueueCompactionMessage(item compactionQueuedMessage) error {
 	message := item.message
 	if item.kind == queuedSteering {
-		if m.handlers.EnqueueSteeringMessage != nil {
-			return m.handlers.EnqueueSteeringMessage(message)
+		if m.handlers.EnqueueSteeringMessage == nil {
+			return fmt.Errorf("steering queue is unavailable")
 		}
-		if payloadHasImages(message) {
-			return fmt.Errorf("structured image steering is unavailable")
-		}
-		if m.handlers.EnqueueSteering != nil {
-			return m.handlers.EnqueueSteering(payloadText(message))
-		}
-		return fmt.Errorf("steering queue is unavailable")
+		return m.handlers.EnqueueSteeringMessage(message)
 	}
-	if m.handlers.EnqueueFollowUpMessage != nil {
-		return m.handlers.EnqueueFollowUpMessage(message)
+	if m.handlers.EnqueueFollowUpMessage == nil {
+		return fmt.Errorf("follow-up queue is unavailable")
 	}
-	if payloadHasImages(message) {
-		return fmt.Errorf("structured image follow-up is unavailable")
-	}
-	if m.handlers.EnqueueFollowUp != nil {
-		return m.handlers.EnqueueFollowUp(payloadText(message))
-	}
-	return fmt.Errorf("follow-up queue is unavailable")
+	return m.handlers.EnqueueFollowUpMessage(message)
 }
 
 func payloadText(payload ComposerPayload) string {
@@ -1035,11 +871,11 @@ func (m *Model) flushCompactionQueuedMessages() {
 		message := item.message
 		if item.kind == queuedSteering {
 			m.steeringRestored = false
-			m.steeringRevision++
+			m.queues.steeringRevision++
 			m.appendSteeringState(value, &message, false)
 		} else {
-			m.followUpRestored = false
-			m.followUpRevision++
+			m.queues.followUpRestored = false
+			m.queues.followUpRevision++
 			m.appendFollowUpState(value, &message, false)
 		}
 	}
@@ -1072,7 +908,7 @@ func (m *Model) restoreCompactionMessages(queued []compactionQueuedMessage) {
 	m.compactionQueuedMessages = nil
 	m.editor.SetValue(strings.Join(parts, "\n\n"))
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 	m.layout()
 }
 
@@ -1095,21 +931,21 @@ func (m *Model) appendSteeringState(value string, message *ComposerPayload, dedu
 	}
 	m.state.Steering = append(m.state.Steering, value)
 	m.state.SteeringInputs = append(m.state.SteeringInputs, clonePayload(*message))
-	m.state.SteeringRevision = m.steeringRevision
+	m.state.SteeringRevision = m.queues.steeringRevision
 }
 
 func (m *Model) setSteeringState(messages []string, inputs []ComposerPayload) {
 	m.state.Steering = append([]string(nil), messages...)
 	if len(inputs) == len(messages) {
 		m.state.SteeringInputs = clonePayloads(inputs)
-		m.state.SteeringRevision = m.steeringRevision
+		m.state.SteeringRevision = m.queues.steeringRevision
 		return
 	}
 	m.state.SteeringInputs = make([]ComposerPayload, len(messages))
 	for i, message := range messages {
 		m.state.SteeringInputs[i] = textPayload(message)
 	}
-	m.state.SteeringRevision = m.steeringRevision
+	m.state.SteeringRevision = m.queues.steeringRevision
 }
 
 func (m *Model) appendFollowUpState(value string, message *ComposerPayload, deduplicate bool) {
@@ -1131,34 +967,30 @@ func (m *Model) appendFollowUpState(value string, message *ComposerPayload, dedu
 	}
 	m.state.FollowUp = append(m.state.FollowUp, value)
 	m.state.FollowUpInputs = append(m.state.FollowUpInputs, clonePayload(*message))
-	m.state.FollowUpRevision = m.followUpRevision
+	m.state.FollowUpRevision = m.queues.followUpRevision
 }
 
 func (m *Model) setFollowUpState(messages []string, inputs []ComposerPayload) {
 	m.state.FollowUp = append([]string(nil), messages...)
 	if len(inputs) == len(messages) {
 		m.state.FollowUpInputs = clonePayloads(inputs)
-		m.state.FollowUpRevision = m.followUpRevision
+		m.state.FollowUpRevision = m.queues.followUpRevision
 		return
 	}
 	m.state.FollowUpInputs = make([]ComposerPayload, len(messages))
 	for i, message := range messages {
 		m.state.FollowUpInputs[i] = textPayload(message)
 	}
-	m.state.FollowUpRevision = m.followUpRevision
+	m.state.FollowUpRevision = m.queues.followUpRevision
 }
 
 // restoreQueuedSteering 把 steering 按顺序放回编辑器，并原子清空后台队列
 func (m *Model) restoreQueuedSteering() int {
 	if m.handlers.RestoreSteeringMessages != nil || len(m.state.SteeringInputs) > 0 {
 		var queued []ComposerPayload
-		backendQueue := m.handlers.RestoreSteeringMessages != nil || m.handlers.RestoreSteering != nil
+		backendQueue := m.handlers.RestoreSteeringMessages != nil
 		if m.handlers.RestoreSteeringMessages != nil {
 			queued = m.handlers.RestoreSteeringMessages()
-		} else if m.handlers.RestoreSteering != nil {
-			for _, value := range m.handlers.RestoreSteering() {
-				queued = append(queued, textPayload(value))
-			}
 		} else {
 			queued = clonePayloads(m.state.SteeringInputs)
 		}
@@ -1178,8 +1010,8 @@ func (m *Model) restoreQueuedSteering() int {
 		}
 		m.state.Steering = nil
 		m.state.SteeringInputs = nil
-		m.steeringRevision++
-		m.state.SteeringRevision = m.steeringRevision
+		m.queues.steeringRevision++
+		m.state.SteeringRevision = m.queues.steeringRevision
 		m.steeringRestored = true
 		current := m.editor.Value()
 		var currentMessage *ComposerPayload
@@ -1201,23 +1033,18 @@ func (m *Model) restoreQueuedSteering() int {
 		}
 		m.editor.SetValue(queuedText)
 		m.editor.CursorEnd()
-		m.completion, m.completionHidden = 0, true
+		m.composer.completion, m.composer.completionHidden = 0, true
 		m.layout()
 		return len(queued)
 	}
-	var queued []string
-	if m.handlers.RestoreSteering != nil {
-		queued = m.handlers.RestoreSteering()
-	} else {
-		queued = append([]string(nil), m.state.Steering...)
-	}
+	queued := append([]string(nil), m.state.Steering...)
 	m.state.Steering = nil
 	if len(queued) == 0 {
 		m.layout()
 		return 0
 	}
-	m.steeringRevision++
-	m.state.SteeringRevision = m.steeringRevision
+	m.queues.steeringRevision++
+	m.state.SteeringRevision = m.queues.steeringRevision
 	m.steeringRestored = true
 	queuedText := strings.Join(queued, "\n\n")
 	current := m.editor.Value()
@@ -1226,7 +1053,7 @@ func (m *Model) restoreQueuedSteering() int {
 	}
 	m.editor.SetValue(queuedText)
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 	m.resetPastes()
 	m.layout()
 	return len(queued)
@@ -1255,9 +1082,9 @@ func (m *Model) restoreQueuedFollowUp() int {
 	}
 	m.state.FollowUp = nil
 	m.state.FollowUpInputs = nil
-	m.followUpRevision++
-	m.state.FollowUpRevision = m.followUpRevision
-	m.followUpRestored = true
+	m.queues.followUpRevision++
+	m.state.FollowUpRevision = m.queues.followUpRevision
+	m.queues.followUpRestored = true
 	current := m.editor.Value()
 	var currentMessage *ComposerPayload
 	if message, ok := m.buildPayload(); ok {
@@ -1278,7 +1105,7 @@ func (m *Model) restoreQueuedFollowUp() int {
 	}
 	m.editor.SetValue(strings.Join(parts, "\n\n"))
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 	m.layout()
 	return len(queued)
 }
@@ -1287,10 +1114,6 @@ func (m *Model) restoreQueuedMessages() int {
 	var steering []ComposerPayload
 	if m.handlers.RestoreSteeringMessages != nil {
 		steering = m.handlers.RestoreSteeringMessages()
-	} else if m.handlers.RestoreSteering != nil {
-		for _, value := range m.handlers.RestoreSteering() {
-			steering = append(steering, textPayload(value))
-		}
 	} else if len(m.state.SteeringInputs) == len(m.state.Steering) {
 		steering = clonePayloads(m.state.SteeringInputs)
 	}
@@ -1304,12 +1127,12 @@ func (m *Model) restoreQueuedMessages() int {
 	m.state.SteeringInputs = nil
 	m.state.FollowUp = nil
 	m.state.FollowUpInputs = nil
-	m.steeringRevision++
-	m.followUpRevision++
-	m.state.SteeringRevision = m.steeringRevision
-	m.state.FollowUpRevision = m.followUpRevision
+	m.queues.steeringRevision++
+	m.queues.followUpRevision++
+	m.state.SteeringRevision = m.queues.steeringRevision
+	m.state.FollowUpRevision = m.queues.followUpRevision
 	m.steeringRestored = true
-	m.followUpRestored = true
+	m.queues.followUpRestored = true
 	current := m.editor.Value()
 	var currentMessage *ComposerPayload
 	if message, ok := m.buildPayload(); ok {
@@ -1336,7 +1159,7 @@ func (m *Model) restoreQueuedMessages() int {
 	}
 	m.editor.SetValue(strings.Join(parts, "\n\n"))
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 	m.layout()
 	return len(steering) + len(followUp)
 }
@@ -1351,9 +1174,9 @@ func (m *Model) clearQueuedFollowUp() int {
 	count += len(m.takeCompactionMessages(queuedFollowUp))
 	m.state.FollowUp = nil
 	m.state.FollowUpInputs = nil
-	m.followUpRevision++
-	m.state.FollowUpRevision = m.followUpRevision
-	m.followUpRestored = true
+	m.queues.followUpRevision++
+	m.state.FollowUpRevision = m.queues.followUpRevision
+	m.queues.followUpRestored = true
 	m.layout()
 	return count
 }
@@ -1368,27 +1191,27 @@ func (m *Model) resetSessionUI() {
 	m.editor.Reset()
 	m.compactionQueuedMessages = nil
 	m.resetPastes()
-	m.history, m.draft, m.draftMessage = nil, "", nil
-	m.historyMessages = nil
-	m.historyPos, m.completion = 0, 0
-	m.completionHidden = true
-	m.selector = nil
+	m.composer.history, m.composer.draft, m.composer.draftMessage = nil, "", nil
+	m.composer.historyMessages = nil
+	m.composer.historyPos, m.composer.completion = 0, 0
+	m.composer.completionHidden = true
+	m.composer.selector = nil
 	m.editor.Focus()
-	m.showThinking, m.showAllTools, m.hideTools = false, false, false
+	m.transcript.showThinking, m.transcript.showAllTools, m.transcript.hideTools = false, false, false
 	m.clearSelection()
 	m.cache = make(map[string]cachedMessage)
-	m.lastMessageHits = nil
-	m.steeringRevision = 0
+	m.transcript.messageHits = nil
+	m.queues.steeringRevision = 0
 	m.state.Steering = nil
 	m.state.SteeringInputs = nil
 	m.state.SteeringRevision = 0
-	m.followUpRestored = false
-	m.followUpRevision = 0
+	m.queues.followUpRestored = false
+	m.queues.followUpRevision = 0
 	m.state.FollowUp = nil
 	m.state.FollowUpInputs = nil
 	m.state.FollowUpRevision = 0
-	m.copyNoticeSeq++
-	m.copyNotice = false
+	m.sel.noticeSeq++
+	m.sel.notice = false
 	m.lastCtrlC = time.Time{}
 	m.viewport.GotoTop()
 }
@@ -1399,22 +1222,24 @@ func (m *Model) refreshTranscript() {
 		return
 	}
 	follow := m.viewport.AtBottom()
-	var blocks []string
 	// 展开状态对所有消息相同，每帧只算一次，避免逐消息重复分配与排序
 	expanded := m.expandSignature()
+	var blocks []string
 	// 逐消息渲染，并把消息内相对行号的命中区间换算成屏幕行
 	var screenHits []toolHit
 	blockOffset := 0
+	changed := len(m.state.Messages) != m.transcript.count
 	for _, message := range m.state.Messages {
-		cached := m.cache[message.ID]
+		cached, ok := m.cache[message.ID]
 		animate := false
 		if m.busy && message.ToolGroup != nil {
 			animate = groupRunning(message.ToolGroup.Calls)
 		}
-		if animate || cached.revision != message.Revision || cached.width != m.width || cached.showThinking != m.showThinking || cached.allTools != m.showAllTools || cached.hidden != m.hideTools || cached.expanded != expanded {
-			m.lastMessageHits = nil
+		if animate || !ok || cached.revision != message.Revision || cached.width != m.width || cached.showThinking != m.transcript.showThinking || cached.allTools != m.transcript.showAllTools || cached.hidden != m.transcript.hideTools || cached.expanded != expanded {
+			changed = true
+			m.transcript.messageHits = nil
 			view := m.renderMessage(message)
-			cached = cachedMessage{revision: message.Revision, width: m.width, showThinking: m.showThinking, allTools: m.showAllTools, hidden: m.hideTools, expanded: expanded, view: view, lines: strings.Count(view, "\n") + 1, hits: m.lastMessageHits}
+			cached = cachedMessage{revision: message.Revision, width: m.width, showThinking: m.transcript.showThinking, allTools: m.transcript.showAllTools, hidden: m.transcript.hideTools, expanded: expanded, view: view, lines: strings.Count(view, "\n") + 1, hits: m.transcript.messageHits}
 			m.cache[message.ID] = cached
 		}
 		for _, hit := range cached.hits {
@@ -1424,9 +1249,15 @@ func (m *Model) refreshTranscript() {
 		// 消息之间用一个空行分隔，下一块的起点因此比本块末行多一行
 		blockOffset += cached.lines + 1
 	}
-	m.lastToolHits = screenHits
+	m.transcript.hits = screenHits
 	m.trimRenderCache()
-	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
+	// 没有消息重绘且宽度不变时，拼好的内容与上一帧相同，跳过 Join 与 SetContent
+	// （流式期间 spinner 每帧触发刷新，这部分是主要开销）
+	if changed || m.transcript.width != m.width {
+		m.transcript.width = m.width
+		m.viewport.SetContent(strings.Join(blocks, "\n\n"))
+	}
+	m.transcript.count = len(m.state.Messages)
 	if follow {
 		m.viewport.GotoBottom()
 	}
@@ -1470,10 +1301,10 @@ func (m *Model) applyMetadata(s Snapshot) {
 	messages := m.state.Messages
 	steering := append([]string(nil), m.state.Steering...)
 	steeringInputs := clonePayloads(m.state.SteeringInputs)
-	steeringRevision := m.steeringRevision
+	steeringRevision := m.queues.steeringRevision
 	followUp := append([]string(nil), m.state.FollowUp...)
 	followUpInputs := clonePayloads(m.state.FollowUpInputs)
-	followUpRevision := m.followUpRevision
+	followUpRevision := m.queues.followUpRevision
 	m.state = s
 	m.state.Messages = messages
 	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
@@ -1485,25 +1316,25 @@ func (m *Model) applyMetadata(s Snapshot) {
 		m.state.Steering = append([]string(nil), s.Steering...)
 		m.state.SteeringInputs = clonePayloads(s.SteeringInputs)
 		m.state.SteeringRevision = s.SteeringRevision
-		m.steeringRevision = s.SteeringRevision
+		m.queues.steeringRevision = s.SteeringRevision
 	} else {
 		m.state.Steering = steering
 		m.state.SteeringInputs = steeringInputs
 		m.state.SteeringRevision = steeringRevision
-		m.steeringRevision = steeringRevision
+		m.queues.steeringRevision = steeringRevision
 	}
 	if followUpRevision == 0 || s.FollowUpRevision >= followUpRevision {
 		m.state.FollowUp = append([]string(nil), s.FollowUp...)
 		m.state.FollowUpInputs = clonePayloads(s.FollowUpInputs)
 		m.state.FollowUpRevision = s.FollowUpRevision
-		m.followUpRevision = s.FollowUpRevision
+		m.queues.followUpRevision = s.FollowUpRevision
 	} else {
 		m.state.FollowUp = followUp
 		m.state.FollowUpInputs = followUpInputs
 		m.state.FollowUpRevision = followUpRevision
-		m.followUpRevision = followUpRevision
+		m.queues.followUpRevision = followUpRevision
 	}
-	m.completion = 0
+	m.composer.completion = 0
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}

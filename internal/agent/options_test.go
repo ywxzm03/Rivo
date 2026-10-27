@@ -53,9 +53,7 @@ func TestReconfigureReplacesModelAndStream(t *testing.T) {
 	streamFn := func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		return nil, nil
 	}
-	if err := a.Reconfigure(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "new"}}, Stream: streamFn}); err != nil {
-		t.Fatalf("Reconfigure() error = %v", err)
-	}
+	a.Reconfigure(llm.AgentConfig{Model: llm.Model{ID: "new"}}, streamFn)
 	if a.Config().Model.ID != "new" {
 		t.Errorf("Config().Model.ID = %q, want new", a.Config().Model.ID)
 	}

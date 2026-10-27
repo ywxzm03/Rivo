@@ -13,8 +13,8 @@ import (
 func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) error {
 	// 1.思考等级：CLI 显式指定优先于 pattern 后缀与 settings 默认
 	if thinking != "" {
-		if !knownThinkingLevel(thinking) {
-			return fmt.Errorf("unknown effort level %q (supported: off, minimal, low, medium, high, xhigh, max)", thinking)
+		if !llm.ValidThinkingLevel(llm.ThinkingLevel(thinking)) {
+			return fmt.Errorf("unknown effort level %q (supported: %s)", thinking, strings.Join(llm.ThinkingLevelNames(), ", "))
 		}
 		cfg.ThinkingLevel = llm.ThinkingLevel(thinking)
 	}
@@ -28,7 +28,7 @@ func ApplyOverrides(cfg *Config, providerName, modelPattern, thinking string) er
 	pattern := modelPattern
 	if i := strings.LastIndex(pattern, ":"); i >= 0 {
 		suffix := pattern[i+1:]
-		if knownThinkingLevel(suffix) {
+		if llm.ValidThinkingLevel(llm.ThinkingLevel(suffix)) {
 			pattern = pattern[:i]
 			if thinking == "" {
 				cfg.ThinkingLevel = llm.ThinkingLevel(suffix)

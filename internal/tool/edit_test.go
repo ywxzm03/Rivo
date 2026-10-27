@@ -83,7 +83,6 @@ func TestEditSupportsPiInputForms(t *testing.T) {
 		{name: "single object", edits: map[string]any{"oldText": "a", "newText": "b"}},
 		{name: "JSON array", edits: `[{"oldText":"a","newText":"b"}]`},
 		{name: "JSON object", edits: `{"oldText":"a","newText":"b"}`},
-		{name: "legacy fields", extra: map[string]any{"oldText": "a", "newText": "b"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -193,12 +192,12 @@ func TestResolveEditPathPiForms(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a b.txt")
 	for _, input := range []string{"@" + path, "file://" + path, strings.ReplaceAll(path, " ", "\u00a0")} {
-		got, err := resolveEditPath(input)
+		got, err := resolveEditPathFrom(input, "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != path {
-			t.Errorf("resolveEditPath(%q) = %q, want %q", input, got, path)
+			t.Errorf("resolveEditPathFrom(%q) = %q, want %q", input, got, path)
 		}
 	}
 }

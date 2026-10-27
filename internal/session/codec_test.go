@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 func TestMessageRoundtrip(t *testing.T) {
@@ -31,7 +32,7 @@ func TestMessageRoundtrip(t *testing.T) {
 		ToolCallID: "call_1",
 		ToolName:   "read",
 		Content:    []llm.Content{llm.TextContent{Text: "file content"}},
-		Details:    map[string]any{"lines": "1-10"},
+		Details:    tool.EditDetails{Patch: "1-10"},
 		IsError:    true,
 		Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3, Cost: &llm.Cost{Total: 0.05}},
 	}
@@ -103,12 +104,12 @@ func contentEqual(a, b []llm.Content) bool {
 }
 
 func TestToolResultDetailsRawJSONRoundtrip(t *testing.T) {
-	details := map[string]any{"lines": "1-10", "count": float64(3)}
+	firstLine := 3
 	msg := llm.ToolResultMessage{
 		ToolCallID: "call_1",
-		ToolName:   "read",
+		ToolName:   "edit",
 		Content:    []llm.Content{llm.TextContent{Text: "x"}},
-		Details:    details,
+		Details:    tool.EditDetails{Diff: "-a\n+b", Patch: "1-10", FirstChangedLine: &firstLine},
 	}
 	raw, err := encodeMessage(msg)
 	if err != nil {
@@ -119,16 +120,12 @@ func TestToolResultDetailsRawJSONRoundtrip(t *testing.T) {
 		t.Fatalf("decodeMessage() error = %v", err)
 	}
 	result := got.(llm.ToolResultMessage)
-	detailsRaw, ok := result.Details.(json.RawMessage)
+	back, ok := result.Details.(tool.EditDetails)
 	if !ok {
-		t.Fatalf("Details type = %T, want json.RawMessage", result.Details)
+		t.Fatalf("Details type = %T, want tool.EditDetails", result.Details)
 	}
-	var back map[string]any
-	if err := json.Unmarshal(detailsRaw, &back); err != nil {
-		t.Fatalf("details json invalid: %v", err)
-	}
-	if back["lines"] != "1-10" || back["count"] != float64(3) {
-		t.Errorf("details roundtrip mismatch: %v", back)
+	if back.Patch != "1-10" || back.Diff != "-a\n+b" || back.FirstChangedLine == nil || *back.FirstChangedLine != 3 {
+		t.Errorf("details roundtrip mismatch: %+v", back)
 	}
 }
 

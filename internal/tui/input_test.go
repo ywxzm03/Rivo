@@ -178,11 +178,11 @@ func TestInputReaderRoutesShiftLeftToDequeue(t *testing.T) {
 	model.busy = true
 	restored := 0
 	queued := 0
-	model.handlers.RestoreSteering = func() []string {
+	model.handlers.RestoreSteeringMessages = func() []ComposerPayload {
 		restored++
-		return []string{"queued"}
+		return []ComposerPayload{textPayload("queued")}
 	}
-	model.handlers.EnqueueSteering = func(string) error {
+	model.handlers.EnqueueSteeringMessage = func(ComposerPayload) error {
 		queued++
 		return nil
 	}

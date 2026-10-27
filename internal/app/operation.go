@@ -180,7 +180,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		result.Replayed = true
-		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.pendingRecovery {
+		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.compaction.pendingRecovery {
 			resume := previous != nil && equalOperationRequest(*previous, request) && request.Kind == OperationRun
 			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
 			if result.Err != nil || resume {
@@ -253,7 +253,11 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	case OperationCompact:
 		result.Err = a.coordinator.Compact(ctx, request.Value)
 	case OperationModel:
-		provider, model, _ := strings.Cut(request.Value, "/")
+		provider, model, ok := strings.Cut(request.Value, "/")
+		if !ok {
+			result.Err = fmt.Errorf("app: model switch value %q must be provider/model", request.Value)
+			break
+		}
 		result.Err = a.setModel(provider, model)
 	case OperationThinking:
 		result.Err = a.setThinkingLevel(llm.ThinkingLevel(request.Value))
@@ -466,7 +470,7 @@ func (a *App) restoreBranchSettings() error {
 				return fmt.Errorf("unknown provider %q", provider)
 			}
 		}
-		if err := a.applyModel(provider, model, false); err != nil {
+		if err := a.switchModel(provider, model); err != nil {
 			return err
 		}
 	}
@@ -484,7 +488,7 @@ func (a *App) restoreBranchSettings() error {
 func (a *App) restoreCommittedSettings() error {
 	view := a.session.BuildContext()
 	if view.Provider != "" && view.Model != "" {
-		if err := a.applyModel(view.Provider, view.Model, false); err != nil {
+		if err := a.switchModel(view.Provider, view.Model); err != nil {
 			return err
 		}
 	}

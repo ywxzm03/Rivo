@@ -35,3 +35,52 @@ const (
 	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
 	ReasoningEffortMax    ReasoningEffort = "max"
 )
+
+// Clone 深拷贝模型的指针与 map 字段，避免多个持有者共享同一份可变状态
+func (m Model) Clone() Model {
+	if m.Cost != nil {
+		cost := *m.Cost
+		m.Cost = &cost
+	}
+	if m.ThinkingLevelMap != nil {
+		mapping := make(map[ThinkingLevel]*ReasoningEffort, len(m.ThinkingLevelMap))
+		for level, effort := range m.ThinkingLevelMap {
+			if effort == nil {
+				mapping[level] = nil
+				continue
+			}
+			value := *effort
+			mapping[level] = &value
+		}
+		m.ThinkingLevelMap = mapping
+	}
+	m.SamplingParams = cloneParams(m.SamplingParams)
+	return m
+}
+
+// cloneParams 深拷贝采样参数，嵌套 map 与 slice 也要隔离
+func cloneParams(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(params))
+	for key, value := range params {
+		cloned[key] = cloneValue(value)
+	}
+	return cloned
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneParams(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, item := range typed {
+			cloned[i] = cloneValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
+}

@@ -146,6 +146,10 @@ func (r *steeringWithdrawRunner) Continue(context.Context) (*llm.AssistantMessag
 
 func (r *steeringWithdrawRunner) Steer(string) error { return nil }
 
+func (r *steeringWithdrawRunner) SteerMessage(llm.UserMessage) error { return nil }
+
+func (r *steeringWithdrawRunner) FollowUpMessage(llm.UserMessage) error { return nil }
+
 func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
 	r.calls++
 	r.withdraw()
@@ -223,6 +227,10 @@ func (r *orderRecordingRunner) Continue(context.Context) (*llm.AssistantMessage,
 }
 
 func (r *orderRecordingRunner) Steer(string) error { return nil }
+
+func (r *orderRecordingRunner) SteerMessage(llm.UserMessage) error { return nil }
+
+func (r *orderRecordingRunner) FollowUpMessage(llm.UserMessage) error { return nil }
 
 func (r *orderRecordingRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
 	r.calls = append(r.calls, "steering")
@@ -543,7 +551,7 @@ func TestImagePendingIsRejectedBeforeReplayOnTextOnlyModel(t *testing.T) {
 
 func TestApplyModelSynchronizesCoordinatorModel(t *testing.T) {
 	a := operationApp(t, nil, nil)
-	if err := a.applyModel(deepseek.ProviderID, "deepseek-v4-pro", false); err != nil {
+	if err := a.switchModel(deepseek.ProviderID, "deepseek-v4-pro"); err != nil {
 		t.Fatal(err)
 	}
 	if a.coordinator.model.ID != "deepseek-v4-pro" {

@@ -89,7 +89,7 @@ func (m *Model) CursorPosition() (row, column int) {
 
 func (m *Model) updateCursorPosition() {
 	// 焦点在任务列表时输入框不可编辑,光标隐藏,否则会与选择高亮同时出现
-	if m.width <= 0 || m.height <= 0 || m.selector != nil || m.taskSelector {
+	if m.width <= 0 || m.height <= 0 || m.composer.selector != nil || m.panel.taskSelector {
 		m.cursorRow.Store(0)
 		m.cursorColumn.Store(0)
 		return

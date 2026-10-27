@@ -83,8 +83,18 @@ func (r *runner) RunBackground(ctx context.Context, args map[string]any) (llm.To
 		return llm.ToolResult{}, err
 	}
 	go waitBackgroundBash(commandCtx, r.store, id, token, process, cmd)
-	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("Started background task %s", id)}}, Details: map[string]any{"task_id": id, "output_file": path}}, nil
+	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("Started background task %s", id)}}, Details: BackgroundOutput{TaskID: id, OutputFile: path}}, nil
 }
+
+// BackgroundOutput 是后台 bash 启动结果的结构化详情
+type BackgroundOutput struct {
+	TaskID     string `json:"task_id"`
+	OutputFile string `json:"output_file"`
+}
+
+func (BackgroundOutput) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[BackgroundOutput]("output_file") }
 
 type backgroundProcess struct {
 	cmd     *exec.Cmd

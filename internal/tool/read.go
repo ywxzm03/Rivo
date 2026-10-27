@@ -8,6 +8,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/imageutil"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 const noVisionNote = "[Current model does not support images. The image will be omitted from this request.]"
@@ -58,16 +59,24 @@ func (r *Read) Parameters() map[string]any {
 }
 
 // Execute 读取文件：图片返回文字说明加图片附件，文本按行截断并附上续读提示
+// readParams 是 read 工具的参数形状
+type readParams struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
+}
+
 func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
-	path, _ := args["path"].(string)
-	if path == "" {
+	params, err := toolargs.Decode[readParams](args)
+	if err != nil {
+		return llm.ToolResult{}, err
+	}
+	if params.Path == "" {
 		return llm.ToolResult{}, fmt.Errorf("read: missing required parameter: path")
 	}
-	offset, _ := argInt(args, "offset")
-	limit, hasLimit := argInt(args, "limit")
-	if limit <= 0 {
-		hasLimit = false
-	}
+	path := params.Path
+	offset := params.Offset
+	limit, hasLimit := params.Limit, params.Limit > 0
 
 	// 1.解析路径后整读
 	absPath, err := resolvePathFrom(path, r.WorkingDir)

@@ -19,10 +19,10 @@ func childTools(parent []llm.Tool, fork bool, childSession *session.SessionManag
 		// 1.写类工具必须换实例,否则子 agent 的改动会进入父会话的 undo 快照
 		switch tool.(type) {
 		case *toolpkg.Write:
-			tools = append(tools, &toolpkg.Write{History: childSession.FileHistory()})
+			tools = append(tools, &toolpkg.Write{History: toolpkg.Tracker(childSession.FileHistory())})
 			continue
 		case *toolpkg.Edit:
-			tools = append(tools, &toolpkg.Edit{History: childSession.FileHistory()})
+			tools = append(tools, &toolpkg.Edit{History: toolpkg.Tracker(childSession.FileHistory())})
 			continue
 		case *toolpkg.Bash:
 			tools = append(tools, &toolpkg.Bash{Background: backgroundbash.New(taskStore)})

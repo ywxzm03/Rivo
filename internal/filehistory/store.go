@@ -893,14 +893,6 @@ func ensureRestoreParent(path, expected string, create bool) error {
 	return validateRestoreParent(path, expected)
 }
 
-func (s *Store) restoreFile(path string, backup Backup) (bool, error) {
-	plan, err := s.prepareRestore(path, backup)
-	if err != nil {
-		return false, err
-	}
-	return s.applyRestore(plan)
-}
-
 func (s *Store) backupDir() string { return filepath.Join(s.root, "file-history", s.sessionID) }
 
 func backupName(path string, version int) string {

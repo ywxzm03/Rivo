@@ -33,18 +33,18 @@ func (m *Model) handlePaste(text string) {
 	lines := strings.Count(text, "\n") + 1
 	runes := len([]rune(text))
 	if lines > pasteMaxLines || runes > pasteMaxChars {
-		m.pasteCounter++
-		id := m.pasteCounter
-		if m.pastes == nil {
-			m.pastes = make(map[int]string)
+		m.composer.pasteCounter++
+		id := m.composer.pasteCounter
+		if m.composer.pastes == nil {
+			m.composer.pastes = make(map[int]string)
 		}
-		m.pastes[id] = text
+		m.composer.pastes[id] = text
 		m.editor.InsertString(pasteMarker(id, text))
 	} else {
 		m.editor.InsertString(text)
 	}
 	m.clearSelection()
-	m.completion, m.completionHidden = 0, false
+	m.composer.completion, m.composer.completionHidden = 0, false
 	m.layout()
 }
 
@@ -52,15 +52,15 @@ func (m *Model) handleImage(image ImagePart) {
 	if image.Data == "" || image.MIMEType == "" {
 		return
 	}
-	if m.images == nil {
-		m.images = make(map[int]ImagePart)
+	if m.composer.images == nil {
+		m.composer.images = make(map[int]ImagePart)
 	}
 	reserved := imageMarkerIDs(m.editor.Value())
 	id := m.nextImageID(reserved)
-	m.images[id] = image
+	m.composer.images[id] = image
 	m.editor.InsertString(imageMarker(id))
 	m.clearSelection()
-	m.completion, m.completionHidden = 0, false
+	m.composer.completion, m.composer.completionHidden = 0, false
 	m.layout()
 }
 
@@ -83,7 +83,7 @@ func (m *Model) buildPayload() (ComposerPayload, bool) {
 			text.WriteString(value[last:match[0]])
 		}
 		id, err := strconv.Atoi(value[match[2]:match[3]])
-		image, ok := m.images[id]
+		image, ok := m.composer.images[id]
 		if err != nil || !ok || used[id] {
 			text.WriteString(value[match[0]:match[1]])
 		} else {
@@ -112,11 +112,11 @@ func (m *Model) editorTextForPayload(payload ComposerPayload) string {
 	var b strings.Builder
 	b.WriteString(payload.Text)
 	for _, image := range payload.Images {
-		if m.images == nil {
-			m.images = make(map[int]ImagePart)
+		if m.composer.images == nil {
+			m.composer.images = make(map[int]ImagePart)
 		}
 		id := m.nextImageID(reserved)
-		m.images[id] = image
+		m.composer.images[id] = image
 		b.WriteString(imageMarker(id))
 	}
 	return b.String()
@@ -135,10 +135,10 @@ func imageMarkerIDs(text string) map[int]bool {
 
 func (m *Model) nextImageID(reserved map[int]bool) int {
 	for {
-		m.imageCounter++
-		if !reserved[m.imageCounter] {
-			reserved[m.imageCounter] = true
-			return m.imageCounter
+		m.composer.imageCounter++
+		if !reserved[m.composer.imageCounter] {
+			reserved[m.composer.imageCounter] = true
+			return m.composer.imageCounter
 		}
 	}
 }
@@ -151,7 +151,7 @@ func (m *Model) restoreEditorPayload(payload *ComposerPayload, fallback string) 
 	}
 	m.editor.SetValue(value)
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 }
 
 func pasteMarker(id int, text string) string {
@@ -178,7 +178,7 @@ func cleanPasteText(text string) string {
 
 // expandPasteMarkers 把标记替换回注册表内容，无对应 id 的字面文本原样保留
 func (m *Model) expandPasteMarkers(text string) string {
-	if len(m.pastes) == 0 || !strings.Contains(text, "[paste #") {
+	if len(m.composer.pastes) == 0 || !strings.Contains(text, "[paste #") {
 		return text
 	}
 	return pasteMarkerRegexp.ReplaceAllStringFunc(text, func(match string) string {
@@ -187,7 +187,7 @@ func (m *Model) expandPasteMarkers(text string) string {
 		if err != nil {
 			return match
 		}
-		if content, ok := m.pastes[id]; ok {
+		if content, ok := m.composer.pastes[id]; ok {
 			if match == pasteMarker(id, content) {
 				return content
 			}
@@ -197,10 +197,10 @@ func (m *Model) expandPasteMarkers(text string) string {
 }
 
 func (m *Model) resetPastes() {
-	m.pastes = nil
-	m.pasteCounter = 0
-	m.images = nil
-	m.imageCounter = 0
+	m.composer.pastes = nil
+	m.composer.pasteCounter = 0
+	m.composer.images = nil
+	m.composer.imageCounter = 0
 }
 
 // backspaceAtMarker 判断光标是否紧邻标记尾部，是则整块删除标记并移除注册项
@@ -228,7 +228,7 @@ func (m *Model) backspaceAtMarker() bool {
 	if err != nil {
 		return false
 	}
-	if _, ok := m.pastes[id]; !ok {
+	if _, ok := m.composer.pastes[id]; !ok {
 		return false
 	}
 	// 用 rune 数决定退格次数，避免多字节标记残留半个字符
@@ -238,7 +238,7 @@ func (m *Model) backspaceAtMarker() bool {
 		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 		_ = cmd
 	}
-	delete(m.pastes, id)
+	delete(m.composer.pastes, id)
 	return true
 }
 
@@ -261,7 +261,7 @@ func (m *Model) backspaceAtImageMarker() bool {
 	if err != nil {
 		return false
 	}
-	if _, ok := m.images[id]; !ok {
+	if _, ok := m.composer.images[id]; !ok {
 		return false
 	}
 	for i := 0; i < len([]rune(prefix[loc[0]:loc[1]])); i++ {
@@ -269,7 +269,7 @@ func (m *Model) backspaceAtImageMarker() bool {
 		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 		_ = cmd
 	}
-	delete(m.images, id)
+	delete(m.composer.images, id)
 	return true
 }
 

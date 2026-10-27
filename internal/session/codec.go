@@ -65,10 +65,14 @@ func parseFileWithRecords(data []byte) (*Header, []Entry, []filehistory.Record, 
 		if err != nil {
 			if errors.Is(err, errUnknownRole) {
 				var base EntryBase
-				_ = json.Unmarshal(line, &base)
+				if baseErr := json.Unmarshal(line, &base); baseErr != nil {
+					warnings = append(warnings, fmt.Sprintf("session: skipped unknown entry on line %d: %v", lineNumber+1, baseErr))
+					continue
+				}
 				entries = append(entries, &UnknownEntry{EntryBase: base})
 				continue
 			}
+			warnings = append(warnings, fmt.Sprintf("session: skipped invalid entry on line %d: %v", lineNumber+1, err))
 			continue
 		}
 		entries = append(entries, entry)
@@ -346,8 +350,8 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 			ResponseID   string          `json:"responseID,omitempty"`
 			StopReason   string          `json:"stopReason"`
 			ErrorMessage string          `json:"errorMessage,omitempty"`
-			Usage        Usage           `json:"usage"`
-		}{"assistant", content, string(m.API), m.Provider, m.Model, m.ResponseID, string(m.StopReason), m.ErrorMessage, usageWire(m.Usage)})
+			Usage        llm.Usage       `json:"usage"`
+		}{"assistant", content, string(m.API), m.Provider, m.Model, m.ResponseID, string(m.StopReason), m.ErrorMessage, cloneUsage(m.Usage)})
 	case llm.ToolResultMessage:
 		wire := struct {
 			Role       string          `json:"role"`
@@ -356,10 +360,10 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 			Content    json.RawMessage `json:"content"`
 			Details    json.RawMessage `json:"details,omitempty"`
 			IsError    bool            `json:"isError"`
-			Usage      *Usage          `json:"usage,omitempty"`
+			Usage      *llm.Usage      `json:"usage,omitempty"`
 		}{"toolResult", m.ToolCallID, m.ToolName, content, nil, m.IsError, nil}
 		if m.Usage != nil {
-			usage := usageWire(*m.Usage)
+			usage := cloneUsage(*m.Usage)
 			wire.Usage = &usage
 		}
 		if m.Details != nil {
@@ -404,7 +408,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			ResponseID   string          `json:"responseID"`
 			StopReason   string          `json:"stopReason"`
 			ErrorMessage string          `json:"errorMessage,omitempty"`
-			Usage        Usage           `json:"usage"`
+			Usage        llm.Usage       `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			return nil, err
@@ -421,16 +425,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			ResponseID:   wire.ResponseID,
 			StopReason:   llm.StopReason(wire.StopReason),
 			ErrorMessage: wire.ErrorMessage,
-			Usage: llm.Usage{
-				InputTokens:        wire.Usage.InputTokens,
-				OutputTokens:       wire.Usage.OutputTokens,
-				CacheReadTokens:    wire.Usage.CacheReadTokens,
-				CacheWriteTokens:   wire.Usage.CacheWriteTokens,
-				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
-				ReasoningTokens:    wire.Usage.ReasoningTokens,
-				TotalTokens:        wire.Usage.TotalTokens,
-				Cost:               cloneCost(wire.Usage.Cost),
-			},
+			Usage:        cloneUsage(wire.Usage),
 		}, nil
 	case "toolResult":
 		var wire struct {
@@ -439,7 +434,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			Content    json.RawMessage `json:"content"`
 			Details    json.RawMessage `json:"details"`
 			IsError    bool            `json:"isError"`
-			Usage      *Usage          `json:"usage"`
+			Usage      *llm.Usage      `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			return nil, err
@@ -455,20 +450,15 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			IsError:    wire.IsError,
 		}
 		if wire.Usage != nil {
-			usage := llm.Usage{
-				InputTokens:        wire.Usage.InputTokens,
-				OutputTokens:       wire.Usage.OutputTokens,
-				CacheReadTokens:    wire.Usage.CacheReadTokens,
-				CacheWriteTokens:   wire.Usage.CacheWriteTokens,
-				CacheWrite1HTokens: wire.Usage.CacheWrite1HTokens,
-				ReasoningTokens:    wire.Usage.ReasoningTokens,
-				TotalTokens:        wire.Usage.TotalTokens,
-				Cost:               cloneCost(wire.Usage.Cost),
-			}
+			usage := cloneUsage(*wire.Usage)
 			msg.Usage = &usage
 		}
 		if len(wire.Details) > 0 && !bytes.Equal(bytes.TrimSpace(wire.Details), []byte("null")) {
-			msg.Details = json.RawMessage(append([]byte(nil), wire.Details...))
+			details, err := llm.DecodeToolDetails(json.RawMessage(append([]byte(nil), wire.Details...)))
+			if err != nil {
+				return nil, err
+			}
+			msg.Details = details
 		}
 		return msg, nil
 	case "system":
@@ -497,15 +487,8 @@ func messageContent(m llm.Message) []llm.Content {
 	}
 }
 
-func usageWire(u llm.Usage) Usage {
-	return Usage{
-		InputTokens:        u.InputTokens,
-		OutputTokens:       u.OutputTokens,
-		CacheReadTokens:    u.CacheReadTokens,
-		CacheWriteTokens:   u.CacheWriteTokens,
-		CacheWrite1HTokens: u.CacheWrite1HTokens,
-		ReasoningTokens:    u.ReasoningTokens,
-		TotalTokens:        u.TotalTokens,
-		Cost:               cloneCost(u.Cost),
-	}
+// cloneUsage 复制一份 usage，避免写入方与读取方共享 Cost 指针
+func cloneUsage(u llm.Usage) llm.Usage {
+	u.Cost = cloneCost(u.Cost)
+	return u
 }

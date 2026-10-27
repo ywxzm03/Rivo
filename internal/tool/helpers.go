@@ -13,23 +13,6 @@ func textContents(text string) []llm.Content {
 	return []llm.Content{llm.TextContent{Text: text}}
 }
 
-func argInt(args map[string]any, key string) (int, bool) {
-	v, ok := args[key]
-	if !ok {
-		return 0, false
-	}
-	f, ok := v.(float64)
-	if !ok {
-		return 0, false
-	}
-	return int(f), true
-}
-
-// resolvePath 把模型给的路径解析成绝对路径，支持 ~ 展开与相对 cwd
-func resolvePath(path string) (string, error) {
-	return resolvePathFrom(path, "")
-}
-
 func resolvePathFrom(path, cwd string) (string, error) {
 	// 1.~ 与 ~/ 展开成用户主目录
 	if path == "~" || strings.HasPrefix(path, "~/") {

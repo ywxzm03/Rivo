@@ -97,7 +97,7 @@ func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
 			}
 		}
 	}
-	m.selector = s
+	m.composer.selector = s
 	m.editor.Blur()
 	m.layout()
 	return s.input.Focus()
@@ -115,7 +115,7 @@ func (m *Model) openTreeRestoreSelector(target string) tea.Cmd {
 	s.input.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	s.input.PromptStyle = s.input.TextStyle
 	s.filter()
-	m.selector = s
+	m.composer.selector = s
 	m.editor.Blur()
 	m.layout()
 	return s.input.Focus()
@@ -307,10 +307,10 @@ func (s *selector) view(width, budget int) string {
 }
 
 func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
-	s := m.selector
+	s := m.composer.selector
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.selector = nil
+		m.composer.selector = nil
 		m.lastCtrlC = time.Time{}
 		m.layout()
 		return m.editor.Focus()
@@ -350,7 +350,7 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 		if s.kind == RequestTree {
 			return m.openTreeRestoreSelector(item.value)
 		}
-		m.selector = nil
+		m.composer.selector = nil
 		m.layout()
 		if s.kind == RequestTreeRestore {
 			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, RestoreKind(item.value)))
@@ -377,7 +377,7 @@ func (m *Model) dispatchTreeRestore(target string, mode RestoreKind) tea.Cmd {
 }
 
 func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
-	s := m.selector
+	s := m.composer.selector
 	before := s.input.Value()
 	var cmd tea.Cmd
 	s.input, cmd = s.input.Update(msg)

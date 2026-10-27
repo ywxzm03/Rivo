@@ -15,11 +15,11 @@ func TestSelectionFallsBackToMainWhenTaskEvicted(t *testing.T) {
 	m.Update(teaWindow(100, 16))
 	m.setTaskFocus(true)
 	m.selectSubagent(1)
-	if m.mainSelected || m.selectedTaskID == "" {
-		t.Fatalf("selection did not move to a task: main=%v id=%q", m.mainSelected, m.selectedTaskID)
+	if m.panel.mainSelected || m.panel.selectedTaskID == "" {
+		t.Fatalf("selection did not move to a task: main=%v id=%q", m.panel.mainSelected, m.panel.selectedTaskID)
 	}
 	// 被选中的任务消失
-	selected := m.selectedTaskID
+	selected := m.panel.selectedTaskID
 	var remaining []SubagentTaskView
 	for _, task := range tasks {
 		if task.ID != selected {
@@ -27,7 +27,7 @@ func TestSelectionFallsBackToMainWhenTaskEvicted(t *testing.T) {
 		}
 	}
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: remaining})
-	if !m.mainSelected || m.selectedTaskID != "" {
-		t.Fatalf("selection did not fall back to main: main=%v id=%q", m.mainSelected, m.selectedTaskID)
+	if !m.panel.mainSelected || m.panel.selectedTaskID != "" {
+		t.Fatalf("selection did not fall back to main: main=%v id=%q", m.panel.mainSelected, m.panel.selectedTaskID)
 	}
 }

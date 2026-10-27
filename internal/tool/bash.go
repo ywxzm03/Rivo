@@ -80,25 +80,25 @@ func (o *shellOutputAccumulator) result() (llm.ToolResult, error) {
 	content := sanitizeShellOutput(data)
 	truncation := truncateShellTail(content)
 	text := truncation.Content
-	details := map[string]any(nil)
+	var details llm.ToolDetails
 	if truncation.Truncated {
 		fullOutputPath, err := writeShellFullOutput(content)
 		if err != nil {
 			return llm.ToolResult{}, err
 		}
-		details = map[string]any{
-			"truncation": map[string]any{
-				"truncated":       true,
-				"truncatedBy":     truncation.TruncatedBy,
-				"totalLines":      truncation.TotalLines,
-				"totalBytes":      truncation.TotalBytes,
-				"outputLines":     truncation.OutputLines,
-				"outputBytes":     truncation.OutputBytes,
-				"lastLinePartial": truncation.LastLinePartial,
-				"maxLines":        defaultMaxLines,
-				"maxBytes":        defaultMaxBytes,
+		details = ShellDetails{
+			Truncation: &ShellTruncation{
+				Truncated:       true,
+				TruncatedBy:     truncation.TruncatedBy,
+				TotalLines:      truncation.TotalLines,
+				TotalBytes:      truncation.TotalBytes,
+				OutputLines:     truncation.OutputLines,
+				OutputBytes:     truncation.OutputBytes,
+				LastLinePartial: truncation.LastLinePartial,
+				MaxLines:        defaultMaxLines,
+				MaxBytes:        defaultMaxBytes,
 			},
-			"fullOutputPath": fullOutputPath,
+			FullOutputPath: fullOutputPath,
 		}
 		text += shellTruncationNote(truncation, fullOutputPath)
 	}
@@ -127,6 +127,29 @@ func sanitizeShellOutput(data []byte) string {
 		builder.WriteRune(r)
 	}
 	return builder.String()
+}
+
+// ShellDetails 是 bash 输出的结构化详情，只在输出被截断时填充
+type ShellDetails struct {
+	Truncation     *ShellTruncation `json:"truncation,omitempty"`
+	FullOutputPath string           `json:"fullOutputPath,omitempty"`
+}
+
+func (ShellDetails) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[ShellDetails]("truncation") }
+
+// ShellTruncation 描述尾部截断的规模
+type ShellTruncation struct {
+	Truncated       bool   `json:"truncated"`
+	TruncatedBy     string `json:"truncatedBy"`
+	TotalLines      int    `json:"totalLines"`
+	TotalBytes      int    `json:"totalBytes"`
+	OutputLines     int    `json:"outputLines"`
+	OutputBytes     int    `json:"outputBytes"`
+	LastLinePartial bool   `json:"lastLinePartial"`
+	MaxLines        int    `json:"maxLines"`
+	MaxBytes        int    `json:"maxBytes"`
 }
 
 type shellTruncation struct {

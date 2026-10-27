@@ -91,38 +91,6 @@ func (r *Runtime) SetProgram(program *tea.Program) {
 	r.mu.Unlock()
 }
 
-// enqueueRequest 处理只入队的请求：steering 与 follow-up 共用同一条路径，
-// 只有队列种类、错误值与结果消息类型不同
-func (r *Runtime) enqueueRequest(req tui.Request, activeApp *app.App, message *llm.UserMessage, editorMessage *tui.ComposerPayload) tea.Cmd {
-	steering := req.Kind == tui.RequestSteer
-	kind, unavailable := agent.QueueFollowUp, app.ErrFollowUpUnavailable
-	if steering {
-		kind, unavailable = agent.QueueSteering, app.ErrSteeringUnavailable
-	}
-	var err error
-	var revision uint64
-	if activeApp == nil {
-		err = unavailable
-	} else {
-		if message != nil {
-			err = activeApp.Enqueue(kind, agent.PayloadFromMessage(*message))
-		} else if steering {
-			err = activeApp.EnqueueSteering(req.Value)
-		} else {
-			err = activeApp.EnqueueFollowUp(req.Value)
-		}
-		if err == nil {
-			revision = activeApp.QueueRevision(kind)
-		}
-	}
-	return func() tea.Msg {
-		if steering {
-			return tui.SteeringResultMsg{ID: req.ID, Value: req.Value, Message: editorMessage, Revision: revision, Err: err}
-		}
-		return tui.FollowUpResultMsg{ID: req.ID, Value: req.Value, Message: editorMessage, Revision: revision, Err: err}
-	}
-}
-
 // runOperation 启动 operation 并把结果投影成 TUI 消息
 func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string, message *llm.UserMessage, editorMessage *tui.ComposerPayload, previous operationSnapshot) tea.Cmd {
 	op, err := activeApp.Start(context.Background(), app.OperationRequest{Kind: operationKind(req.Kind), Value: value, Message: message, RestoreMode: restoreMode(req.RestoreMode)})
@@ -150,24 +118,9 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 			r.mu.Unlock()
 			return tui.OperationDoneMsg{ID: req.ID, Quit: true}
 		}
-		reset := result.Next != nil || r.resetNeeded || result.Replayed || (req.Kind == tui.RequestTree && result.ContextRewound)
-		if req.Kind == tui.RequestClear && result.Err == nil {
-			reset = true
-		}
+		reset := r.shouldResetLocked(req, result)
 		if result.Next != nil {
-			r.app = result.Next
-			r.namespace = result.Next.SessionID()
-			// 新会话是另一个 App,后台 run 的结束兜底必须重新挂上
-			r.attachBackgroundHookLocked(result.Next)
-			r.messages = nil
-			r.pendingSkillInput = nil
-			if req.Kind == tui.RequestNew {
-				r.operationEntries = nil
-				r.sequence, r.userMessages, r.assistantTurn = 0, 0, 0
-				r.userID = ""
-				r.toolStarted = nil
-				r.turnStarted, r.turnRetrying = time.Time{}, false
-			}
+			r.switchAppLocked(req, result.Next)
 		}
 		if reset {
 			r.replaceMessagesLocked(r.app.ContextView())
@@ -178,32 +131,7 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 		}
 		var tail *tui.MessageTail
 		if req.Kind == tui.RequestRun && !reset {
-			// 完成时只重放本次操作，保留历史重放的 thinking/工具分组显示规则
-			old := r.messages[r.operationStart:]
-			projected := r.projectContext(ctxview.ContextView{Entries: r.operationEntries})
-			projected = preserveDisplayMetadata(projected, old)
-			if partial := r.partialAssistantLocked(); partial != nil {
-				found := false
-				for _, message := range projected {
-					if message.ID == partial.ID {
-						found = true
-						break
-					}
-				}
-				if !found {
-					projected = append(projected, *partial)
-				}
-			}
-			for _, message := range old {
-				delete(r.messageIndex, message.ID)
-			}
-			r.messages = r.messages[:r.operationStart]
-			r.lastAssistantIndex, r.hasToolGroup = r.operationLastAssistant, r.operationHadToolGroup
-			for _, message := range projected {
-				r.upsertLocked(message)
-			}
-			r.activeToolAnchorID, r.currentAssistantID = "", ""
-			tail = &tui.MessageTail{AfterID: req.AfterID, Messages: projected}
+			tail = r.replayOperationLocked(req)
 		}
 		var changes []tui.Message
 		if index := r.messageIndexLocked(r.activeToolAnchorID); index >= 0 {
@@ -223,38 +151,7 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
-		var notice string
-		switch req.Kind {
-		case tui.RequestRename:
-			if result.Err == nil && snapshot.SessionName != previous.Name {
-				notice = "Thread name changed to " + snapshot.SessionName
-			}
-		case tui.RequestModel:
-			if result.Err == nil && snapshot.CurrentModel.Key() != previous.Model {
-				notice = "Model changed to " + snapshot.CurrentModel.ID
-			}
-		case tui.RequestThinking:
-			if result.Err == nil && snapshot.Thinking != previous.Thinking {
-				notice = "Thinking changed to " + snapshot.Thinking
-			}
-		case tui.RequestNew:
-			if result.Err == nil {
-				notice = "New session started"
-			}
-		case tui.RequestReload:
-			if result.Err == nil {
-				notice = "Reloaded context files and skills"
-			}
-		case tui.RequestTree:
-			if result.FileRestore != nil {
-				summary := fileRestoreSummary(result.FileRestore)
-				if result.Err != nil {
-					result.Err = fmt.Errorf("%w (%s)", result.Err, summary)
-				} else {
-					notice = "Restored code: " + strings.TrimPrefix(summary, "code restore: ")
-				}
-			}
-		}
+		notice := operationNotice(req.Kind, &result, snapshot, previous)
 		restoreEditor := result.RestoreEditor
 		editorValue := result.EditorText
 		editorMessage := payloadFromMessage(result.EditorMessage)
@@ -270,6 +167,103 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 	}
 }
 
+// shouldResetLocked 判断本次操作结束后是否需要整体重放投影
+func (r *Runtime) shouldResetLocked(req tui.Request, result app.OperationResult) bool {
+	reset := result.Next != nil || r.resetNeeded || result.Replayed || (req.Kind == tui.RequestTree && result.ContextRewound)
+	if req.Kind == tui.RequestClear && result.Err == nil {
+		return true
+	}
+	return reset
+}
+
+// switchAppLocked 切换到新 App 并重置属于旧会话的投影状态
+func (r *Runtime) switchAppLocked(req tui.Request, next *app.App) {
+	// 旧 App 的后台循环与 store 钩子必须显式收尾，否则每次换会话都会泄漏
+	if previous := r.app; previous != nil && previous != next {
+		previous.Close()
+	}
+	r.app = next
+	r.namespace = next.SessionID()
+	// 新会话是另一个 App,后台 run 的结束兜底必须重新挂上
+	r.attachBackgroundHookLocked(next)
+	r.messages = nil
+	r.pendingSkillInput = nil
+	if req.Kind != tui.RequestNew {
+		return
+	}
+	r.operationEntries = nil
+	r.sequence, r.userMessages, r.assistantTurn = 0, 0, 0
+	r.userID = ""
+	r.toolStarted = nil
+	r.turnStarted, r.turnRetrying = time.Time{}, false
+}
+
+// replayOperationLocked 只重放本次操作的消息，保留历史重放的显示规则
+func (r *Runtime) replayOperationLocked(req tui.Request) *tui.MessageTail {
+	old := r.messages[r.operationStart:]
+	projected := r.projectContext(ctxview.ContextView{Entries: r.operationEntries})
+	projected = preserveDisplayMetadata(projected, old)
+	if partial := r.partialAssistantLocked(); partial != nil {
+		found := false
+		for _, message := range projected {
+			if message.ID == partial.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			projected = append(projected, *partial)
+		}
+	}
+	for _, message := range old {
+		delete(r.messageIndex, message.ID)
+	}
+	r.messages = r.messages[:r.operationStart]
+	r.lastAssistantIndex, r.hasToolGroup = r.operationLastAssistant, r.operationHadToolGroup
+	for _, message := range projected {
+		r.upsertLocked(message)
+	}
+	r.activeToolAnchorID, r.currentAssistantID = "", ""
+	return &tui.MessageTail{AfterID: req.AfterID, Messages: projected}
+}
+
+// operationNotice 生成操作完成后的状态提示
+func operationNotice(kind tui.RequestKind, result *app.OperationResult, snapshot tui.Snapshot, previous operationSnapshot) string {
+	switch kind {
+	case tui.RequestRename:
+		if result.Err == nil && snapshot.SessionName != previous.Name {
+			return "Thread name changed to " + snapshot.SessionName
+		}
+	case tui.RequestModel:
+		if result.Err == nil && snapshot.CurrentModel.Key() != previous.Model {
+			return "Model changed to " + snapshot.CurrentModel.ID
+		}
+	case tui.RequestThinking:
+		if result.Err == nil && snapshot.Thinking != previous.Thinking {
+			return "Thinking changed to " + snapshot.Thinking
+		}
+	case tui.RequestNew:
+		if result.Err == nil {
+			return "New session started"
+		}
+	case tui.RequestReload:
+		if result.Err == nil {
+			return "Reloaded context files and skills"
+		}
+	case tui.RequestTree:
+		if result.FileRestore == nil {
+			return ""
+		}
+		summary := fileRestoreSummary(result.FileRestore)
+		if result.Err != nil {
+			result.Err = fmt.Errorf("%w (%s)", result.Err, summary)
+			return ""
+		}
+		return "Restored code: " + strings.TrimPrefix(summary, "code restore: ")
+	}
+	return ""
+}
+
 func (r *Runtime) request(req tui.Request) tea.Cmd {
 	r.mu.Lock()
 	activeApp := r.app
@@ -279,9 +273,6 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 	message := payloadMessage(req.Payload)
 	editorMessage := payloadFromMessage(message)
 
-	if req.Kind == tui.RequestSteer || req.Kind == tui.RequestFollowUp {
-		return r.enqueueRequest(req, activeApp, message, editorMessage)
-	}
 	value := req.Value
 	if req.Kind == tui.RequestRun {
 		var err error
@@ -392,244 +383,6 @@ func (r *Runtime) projectMessageEnd(event llm.MessageEndEvent) (*tui.Message, st
 	return message, previousID
 }
 
-func (r *Runtime) handleEvent(event llm.AgentEvent) error {
-	r.mu.Lock()
-	var notifications []tea.Msg
-	var message *tui.Message
-	var previousID string
-	var status string
-	queueChanged := false
-	previousToolAnchor := r.activeToolAnchorID
-	switch event := event.(type) {
-	case llm.AgentStartEvent:
-		if r.turnStarted.IsZero() || !r.turnRetrying {
-			r.turnStarted = time.Now()
-		}
-		r.turnRetrying = false
-		// 用户请求驱动的 run 已由 TUI 自己置忙碌态;这里只补后台 run
-		if !r.externalRunSeen && !r.operationActive {
-			r.externalRunSeen = true
-			notifications = append(notifications, tui.BackgroundRunMsg{Running: true})
-		}
-	case llm.TurnStartEvent:
-		if r.turnStarted.IsZero() {
-			r.turnStarted = time.Now()
-		}
-	case llm.MessageStartEvent:
-		switch current := event.Message.(type) {
-		case llm.UserMessage:
-			r.sealToolGroupLocked()
-			r.userMessages++
-			if r.userMessages > 1 {
-				queueChanged = true
-				r.userID = fmt.Sprintf("%s/live/%d/user/%d", r.namespace, r.sequence, r.userMessages)
-			}
-			converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
-			if ok {
-				message = &converted
-			}
-		case llm.AssistantMessage:
-			r.assistantTurn++
-			r.currentAssistantID = fmt.Sprintf("%s/live/%d/assistant/%d", r.namespace, r.sequence, r.assistantTurn)
-			converted, ok := r.liveAssistantLocked(current, r.currentAssistantID, nil)
-			if ok {
-				message = &converted
-			}
-		}
-	case llm.MessageUpdateEvent:
-		if assistant, ok := event.Message.(llm.AssistantMessage); ok {
-			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, event.AssistantMessageEvent)
-			if ok {
-				message = &converted
-			}
-		}
-	case llm.MessageEndEvent:
-		if projected, renamed := r.projectMessageEnd(event); projected != nil {
-			message, previousID = projected, renamed
-		}
-	case llm.TurnEndEvent:
-		// 工具循环保持一个紧凑分组，直到出现可见文本或 agent_end
-	case llm.AgentEndEvent:
-		if !event.WillRetry && r.externalRunSeen {
-			r.externalRunSeen = false
-			notifications = append(notifications, tui.BackgroundRunMsg{Running: false})
-		}
-		if event.WillRetry {
-			r.sealToolGroupLocked()
-			r.turnRetrying = true
-		} else {
-			r.sealToolGroupLocked()
-			if index := r.addDividerLocked(); index >= 0 {
-				notifications = append(notifications, tui.MessageMsg(r.messages[index]))
-			}
-			r.turnStarted = time.Time{}
-			r.turnRetrying = false
-		}
-	case llm.ToolExecutionStartEvent:
-		converted := r.toolStartLocked(event)
-		message = &converted
-	case llm.ToolExecutionUpdateEvent:
-		converted := r.toolUpdateLocked(event)
-		message = &converted
-	case llm.ToolExecutionEndEvent:
-		converted := r.toolEndLocked(event)
-		message = &converted
-	case llm.WarningEvent:
-		r.warningSeq++
-		message = &tui.Message{
-			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
-			Role: "notice",
-			Text: "Warning: " + event.Message,
-		}
-	case llm.CompactionStartEvent:
-		status = "Compacting context…"
-	case llm.CompactionEndEvent:
-		if event.Error == "" {
-			status = "Working"
-			r.resetNeeded = true
-			r.compactionNoticeSeq++
-			notice := tui.Message{
-				ID:   fmt.Sprintf("%s/compaction/%d", r.namespace, r.compactionNoticeSeq),
-				Role: "summary",
-				Text: fmt.Sprintf("Context compacted (%s): %d -> %d tokens", event.Reason, event.TokensBefore, event.TokensAfter),
-			}
-			r.compactionNotice = &notice
-		} else {
-			status = "Compaction failed"
-			r.compactionNotice = nil
-		}
-	}
-	if message != nil {
-		r.upsertLocked(*message)
-		if previousID != "" {
-			notifications = append(notifications, tui.MessageCommittedMsg{PreviousID: previousID, Message: r.messages[r.messageIndexLocked(message.ID)]})
-		} else {
-			notifications = append(notifications, tui.MessageMsg(r.messages[r.messageIndexLocked(message.ID)]))
-		}
-	}
-	if previousToolAnchor != "" && r.activeToolAnchorID == "" {
-		if index := r.messageIndexLocked(previousToolAnchor); index >= 0 {
-			notifications = append(notifications, tui.MessageMsg(r.messages[index]))
-		}
-	}
-	if status != "" {
-		notifications = append(notifications, tui.StatusMsg(status))
-	}
-	if queueChanged && r.app != nil {
-		notifications = append(notifications, tui.QueueStateMsg{
-			Steering: r.app.QueueMessages(agent.QueueSteering), SteeringInputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueSteering)), SteeringRevision: r.app.QueueRevision(agent.QueueSteering),
-			FollowUp: r.app.QueueMessages(agent.QueueFollowUp), FollowUpInputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueFollowUp)), FollowUpRevision: r.app.QueueRevision(agent.QueueFollowUp),
-		})
-		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.QueueMessages(agent.QueueSteering), Inputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueSteering)), Revision: r.app.QueueRevision(agent.QueueSteering)})
-	}
-	send := r.send
-	r.mu.Unlock()
-	// 通知可能阻塞，发送时不持有投影或取消所需的锁
-	if send != nil {
-		for _, message := range notifications {
-			send(message)
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) upsertLocked(message tui.Message) {
-	index := r.messageIndexLocked(message.ID)
-	if message.ToolGroup != nil {
-		r.hasToolGroup = true
-	}
-	if message.Role == "assistant" && message.Text != "" {
-		if index < 0 {
-			r.lastAssistantIndex = len(r.messages)
-		} else {
-			r.lastAssistantIndex = index
-		}
-	}
-	if index >= 0 {
-		message.Revision = r.messages[index].Revision + 1
-		r.messages[index] = message
-		return
-	}
-	if message.Revision == 0 {
-		message.Revision = 1
-	}
-	r.messageIndex[message.ID] = len(r.messages)
-	r.messages = append(r.messages, message)
-}
-
-func (r *Runtime) sourceID(source, part string) string {
-	return r.namespace + "/entry/" + source + "/" + part
-}
-
-func (r *Runtime) renameMessageLocked(oldID, newID string) {
-	if index := r.messageIndexLocked(oldID); index >= 0 {
-		delete(r.messageIndex, oldID)
-		r.messageIndex[newID] = index
-		r.messages[index].ID = newID
-	}
-	if r.userID == oldID {
-		r.userID = newID
-	}
-	if r.currentAssistantID == oldID {
-		r.currentAssistantID = newID
-	}
-	if r.activeToolAnchorID == oldID {
-		r.activeToolAnchorID = newID
-	}
-}
-
-func (r *Runtime) replaceMessagesLocked(view ctxview.ContextView) {
-	messages := preserveDisplayMetadata(r.projectContext(view), r.messages)
-	r.messages = messages
-	r.messageIndex = nil
-	r.activeToolAnchorID, r.currentAssistantID = "", ""
-}
-
-func (r *Runtime) resetProjectionLocked() {
-	r.lastAssistantIndex = 0
-	r.hasToolGroup = false
-	r.operationLastAssistant, r.operationHadToolGroup = 0, false
-	r.operationStart = 0
-	r.operationEntries = nil
-	r.userID = ""
-	r.assistantTurn = 0
-	r.currentAssistantID, r.activeToolAnchorID = "", ""
-	r.toolStarted = nil
-	r.turnStarted, r.turnRetrying = time.Time{}, false
-	r.compactionNotice = nil
-}
-
-func (r *Runtime) partialAssistantLocked() *tui.Message {
-	for i := len(r.messages) - 1; i >= 0; i-- {
-		message := r.messages[i]
-		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.ToolGroup != nil || message.Aborted) {
-			copy := message
-			return &copy
-		}
-		if message.Role == "user" {
-			break
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) hasMessageLocked(message tui.Message) bool {
-	return r.messageIndexLocked(message.ID) >= 0
-}
-
-func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Message, bool) {
-	converted := tui.Message{ID: id}
-	switch message := message.(type) {
-	case llm.UserMessage:
-		converted.Role, converted.Text = "user", textContent(message.Content)
-		converted.Images = imageViews(message.Content)
-		converted.Skill = skillInvocation(converted.Text)
-	default:
-		return tui.Message{}, false
-	}
-	return converted, converted.Text != "" || len(converted.Images) > 0
-}
-
 func imageViews(contents []llm.Content) []tui.ImageView {
 	var images []tui.ImageView
 	for _, content := range contents {
@@ -638,16 +391,6 @@ func imageViews(contents []llm.Content) []tui.ImageView {
 		}
 	}
 	return images
-}
-
-func textContent(contents []llm.Content) string {
-	var parts []string
-	for _, content := range contents {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 func userMessageEditorText(message llm.UserMessage) string {
@@ -789,16 +532,6 @@ func (r *Runtime) Attach(a *app.App) {
 	}
 }
 
-func (r *Runtime) RestoreSteering() []string {
-	r.mu.Lock()
-	activeApp := r.app
-	r.mu.Unlock()
-	if activeApp == nil {
-		return nil
-	}
-	return queueTexts(activeApp, agent.QueueSteering)
-}
-
 func (r *Runtime) RestoreSteeringMessages() []tui.ComposerPayload {
 	r.mu.Lock()
 	activeApp := r.app
@@ -807,16 +540,6 @@ func (r *Runtime) RestoreSteeringMessages() []tui.ComposerPayload {
 		return nil
 	}
 	return payloadsFromMessages(queueUserMessagesFrom(activeApp, agent.QueueSteering))
-}
-
-func (r *Runtime) EnqueueSteering(value string) error {
-	r.mu.Lock()
-	activeApp := r.app
-	r.mu.Unlock()
-	if activeApp == nil {
-		return app.ErrSteeringUnavailable
-	}
-	return activeApp.EnqueueSteering(value)
 }
 
 func (r *Runtime) EnqueueSteeringMessage(value tui.ComposerPayload) error {
@@ -851,16 +574,6 @@ func (r *Runtime) ClearFollowUp() []tui.ComposerPayload {
 		return nil
 	}
 	return payloadsFromMessages(queueUserMessagesFrom(activeApp, agent.QueueFollowUp))
-}
-
-func (r *Runtime) EnqueueFollowUp(value string) error {
-	r.mu.Lock()
-	activeApp := r.app
-	r.mu.Unlock()
-	if activeApp == nil {
-		return app.ErrFollowUpUnavailable
-	}
-	return activeApp.EnqueueFollowUp(value)
 }
 
 func (r *Runtime) EnqueueFollowUpMessage(value tui.ComposerPayload) error {

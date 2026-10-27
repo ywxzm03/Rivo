@@ -10,8 +10,6 @@ import (
 type requestSpec struct {
 	// operation 是领域层的操作类型
 	operation app.OperationKind
-	// queueOnly 表示只入队、不启动 operation
-	queueOnly bool
 }
 
 var requestSpecs = map[tui.RequestKind]requestSpec{
@@ -26,8 +24,6 @@ var requestSpecs = map[tui.RequestKind]requestSpec{
 	tui.RequestTree:     {operation: app.OperationTree},
 	tui.RequestClear:    {operation: app.OperationClear},
 	tui.RequestDelete:   {operation: app.OperationDelete},
-	tui.RequestSteer:    {queueOnly: true},
-	tui.RequestFollowUp: {queueOnly: true},
 }
 
 // operationKind 把 TUI 请求类型映射成领域操作类型

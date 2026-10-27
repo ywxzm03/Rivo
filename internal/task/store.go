@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/session"
 )
 
 // defaultGracePeriod 是终态任务在根投影中保留的默认时长,
 // 让 TUI 面板有机会展示结束状态后再自动驱逐
 const defaultGracePeriod = 30 * time.Second
+
+// nextTaskSeq 是进程级任务序号，保证同一进程内不同 Store 生成的 ID 不重复
+var nextTaskSeq atomic.Uint64
 
 // Store 是任务状态、lifecycle runtime 句柄和通知的唯一所有者
 type Store struct {
@@ -22,12 +25,14 @@ type Store struct {
 	tasks         map[string]State
 	runtimes      map[string]Runtime
 	notifications []Notification
-	nextID        uint64
 	nextToken     uint64
 	viewingTaskID string
 	// notify 是通知入队时的唤醒回调。主 agent 空闲时靠它启动消费通知的 run,
 	// 否则通知要等用户下次输入才投递
 	notify func()
+	// readTranscript 按字节偏移增量读取 sidechain transcript。
+	// 由上层注入,避免任务层反向依赖会话持久化层
+	readTranscript func(path string, offset int64) ([]llm.Message, int64, error)
 
 	// GracePeriod 是终态任务的驱逐宽限期，零值表示用 defaultGracePeriod。
 	// 测试注入毫秒级宽限期，避免真等 30 秒
@@ -100,11 +105,11 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	}
 	id := spec.ID
 	if id == "" {
-		s.nextID++
 		// task ID 同时也是 sidechain transcript 的文件名。加入进程时间分量,
 		// 新起的 Rivo 进程就不会重开旧的 agent-1.jsonl 并在首次启动时
-		// 因 O_EXCL 失败。
-		id = fmt.Sprintf("%s-%d-%d", spec.Type, time.Now().UnixNano(), s.nextID)
+		// 因 O_EXCL 失败。序号取进程级计数器,同一进程内多个 Store
+		// (每次 /new 都新建一个)才不会在同一纳秒撞出相同 ID
+		id = fmt.Sprintf("%s-%d-%d", spec.Type, time.Now().UnixNano(), nextTaskSeq.Add(1))
 	} else if existing, exists := s.tasks[id]; exists {
 		if existing.Base().Status == StatusRunning {
 			return "", 0, fmt.Errorf("subagent: task %s is already running", id)
@@ -130,7 +135,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 		spec.AgentState.AgentID = id
 		spec.AgentState.Prompt = spec.Prompt
 		spec.AgentState.AgentType = spec.AgentType
-		spec.AgentState.Model = cloneModel(spec.Model)
+		spec.AgentState.Model = cloneModelPtr(spec.Model)
 		spec.AgentState.Thinking = spec.Thinking
 		spec.AgentState.WorktreePath = spec.WorktreePath
 		spec.AgentState.Worktree = spec.Worktree
@@ -213,6 +218,13 @@ func (s *Store) ViewingTaskID() string {
 	return s.viewingTaskID
 }
 
+// SetTranscriptReader 注入 sidechain transcript 的读取实现
+func (s *Store) SetTranscriptReader(read func(path string, offset int64) ([]llm.Message, int64, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readTranscript = read
+}
+
 // ReadTaskMessages 从任务的 sidechain transcript 按字节偏移增量读取消息,
 // 返回消息和新的偏移。transcript 常驻磁盘,内存里不保留完整副本;
 // 调用方缓存已投影的前缀,只消费新增部分。
@@ -229,7 +241,10 @@ func (s *Store) ReadTaskMessages(id string, offset int64) ([]llm.Message, int64,
 	if path == "" {
 		return nil, offset, nil
 	}
-	messages, next, err := session.ReadMessages(path, offset)
+	if s.readTranscript == nil {
+		return nil, offset, errors.New("subagent: transcript reader is not configured")
+	}
+	messages, next, err := s.readTranscript(path, offset)
 	if errors.Is(err, os.ErrNotExist) {
 		// transcript 在首条消息落盘前还不存在,按空增量处理
 		return nil, offset, nil
@@ -743,7 +758,7 @@ func (s *Store) RegisterContinuation(id string, runtime Runtime, prompt string) 
 		AgentID:      old.AgentID,
 		Prompt:       prompt,
 		AgentType:    old.AgentType,
-		Model:        cloneModel(old.Model),
+		Model:        cloneModelPtr(old.Model),
 		Thinking:     old.Thinking,
 		WorktreePath: old.WorktreePath,
 		Worktree:     old.Worktree,
@@ -768,31 +783,6 @@ func CloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
 }
 
 // cloneModel 深拷贝模型配置,隔离可变 map 与指针字段
-func cloneModel(model *llm.Model) *llm.Model {
-	if model == nil {
-		return nil
-	}
-	copy := *model
-	if model.Cost != nil {
-		cost := *model.Cost
-		copy.Cost = &cost
-	}
-	if model.ThinkingLevelMap != nil {
-		copy.ThinkingLevelMap = make(map[llm.ThinkingLevel]*llm.ReasoningEffort, len(model.ThinkingLevelMap))
-		for level, effort := range model.ThinkingLevelMap {
-			if effort == nil {
-				copy.ThinkingLevelMap[level] = nil
-				continue
-			}
-			value := *effort
-			copy.ThinkingLevelMap[level] = &value
-		}
-	}
-	if model.SamplingParams != nil {
-		copy.SamplingParams = cloneAnyMap(model.SamplingParams)
-	}
-	return &copy
-}
 
 func (s *Store) beginBashKill(id string) (*BashState, BashProcess, uint64, error) {
 	s.mu.Lock()
@@ -890,33 +880,6 @@ func (s *Store) DiscardReserved(id string) bool {
 	return true
 }
 
-// cloneAnyMap 递归复制 map[string]any,隔离 provider 参数里的嵌套容器
-func cloneAnyMap(source map[string]any) map[string]any {
-	if source == nil {
-		return nil
-	}
-	result := make(map[string]any, len(source))
-	for key, value := range source {
-		result[key] = cloneAnyValue(value)
-	}
-	return result
-}
-
-func cloneAnyValue(value any) any {
-	switch value := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(value)
-	case []any:
-		cloned := make([]any, len(value))
-		for i, item := range value {
-			cloned[i] = cloneAnyValue(item)
-		}
-		return cloned
-	default:
-		return value
-	}
-}
-
 // cloneDeadline 隔离驱逐截止时间指针
 func cloneDeadline(deadline *time.Time) *time.Time {
 	if deadline == nil {
@@ -963,7 +926,7 @@ func cloneTaskState(task State) State {
 			result.Usage = cloneUsage(state.Result.Usage)
 			copy.Result = &result
 		}
-		copy.Model = cloneModel(state.Model)
+		copy.Model = cloneModelPtr(state.Model)
 		if state.Progress != nil {
 			progress := *state.Progress
 			progress.RecentActivities = append([]ToolActivity(nil), state.Progress.RecentActivities...)
@@ -977,4 +940,13 @@ func cloneTaskState(task State) State {
 	default:
 		return task
 	}
+}
+
+// cloneModelPtr 复制模型指针，nil 原样返回
+func cloneModelPtr(model *llm.Model) *llm.Model {
+	if model == nil {
+		return nil
+	}
+	cloned := model.Clone()
+	return &cloned
 }

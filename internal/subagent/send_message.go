@@ -16,6 +16,10 @@ type SendMessageResult struct {
 	Message string `json:"message"`
 }
 
+func (SendMessageResult) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[SendMessageResult]("taskId") }
+
 // SendMessage 把输入投递给任务。运行中的任务把消息排入其下一轮工具调用;
 // 终态任务按 continuation 恢复;store 中已缺失的任务则从 sidechain transcript 重建。
 func (m *Manager) SendMessage(ctx context.Context, taskID, message string) (SendMessageResult, error) {

@@ -306,7 +306,7 @@ func (m *Manager) failAgent(taskID string, token uint64, runtime *AgentRuntime, 
 }
 
 func (m *Manager) cleanupWorktree(taskID string, token uint64, runtime *AgentRuntime) {
-	if runtime == nil || runtime.WorktreeCleanup == nil {
+	if runtime.WorktreeCleanup == nil {
 		return
 	}
 	if runtime.WorktreeCleanup() {
@@ -315,9 +315,6 @@ func (m *Manager) cleanupWorktree(taskID string, token uint64, runtime *AgentRun
 }
 
 func latestAssistant(runtime *agent.Agent) *llm.AssistantMessage {
-	if runtime == nil {
-		return nil
-	}
 	for i := len(runtime.Context().Messages) - 1; i >= 0; i-- {
 		if message, ok := runtime.Context().Messages[i].(llm.AssistantMessage); ok {
 			copy := message

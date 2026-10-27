@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,18 +73,58 @@ func TestRecordAgentMessagesTracksCommittedCountOnly(t *testing.T) {
 }
 
 func TestFreshStoresDoNotReuseTaskIDs(t *testing.T) {
-	first := NewStore()
-	second := NewStore()
-	id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
-	if err != nil {
-		t.Fatal(err)
+	// 单轮几乎撞不上：两个 Store 的实例内计数器都从 1 开始，
+	// 只有同一纳秒注册才会碰撞，所以必须多轮才有意义
+	seen := make(map[string]struct{}, 500)
+	for i := 0; i < 500; i++ {
+		first, second := NewStore(), NewStore()
+		id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id2, _, err := second.Register(RegisterSpec{Type: TypeAgent, Description: "second", AgentType: "Explore"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id1 == id2 {
+			t.Fatalf("fresh stores reused task ID %q on iteration %d", id1, i)
+		}
+		seen[id1] = struct{}{}
+		seen[id2] = struct{}{}
 	}
-	id2, _, err := second.Register(RegisterSpec{Type: TypeAgent, Description: "second", AgentType: "Explore"})
-	if err != nil {
-		t.Fatal(err)
+	if len(seen) != 1000 {
+		t.Fatalf("generated %d unique IDs, want 1000", len(seen))
 	}
-	if id1 == id2 {
-		t.Fatalf("fresh stores reused task ID %q", id1)
+}
+
+// 并发注册到不同 Store 时 ID 同样不能重复
+func TestConcurrentStoresDoNotReuseTaskIDs(t *testing.T) {
+	const workers = 8
+	ids := make(chan string, workers*20)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store := NewStore()
+			for j := 0; j < 20; j++ {
+				id, _, err := store.Register(RegisterSpec{Type: TypeBash, Description: "bg"})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				ids <- id
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	seen := make(map[string]struct{}, workers*20)
+	for id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate task ID %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 
@@ -193,6 +234,7 @@ func TestStoreReadTaskMessagesIsIncremental(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	id, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "view", AgentType: "Work", OutputFile: path})
 	if err != nil {
 		t.Fatal(err)

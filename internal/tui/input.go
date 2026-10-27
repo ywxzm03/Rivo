@@ -302,7 +302,7 @@ func (m *Model) filterMouseKey(msg tea.KeyMsg) (string, bool) {
 	if sgrMouse.FindString(value) == value {
 		return value, false
 	}
-	return filterMouseRunes(value, &m.mouseFragment)
+	return filterMouseRunes(value, &m.sel.fragment)
 }
 
 func rawMouseWheel(msg tea.KeyMsg) (int, bool) {

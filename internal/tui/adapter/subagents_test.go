@@ -17,6 +17,7 @@ func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := task.NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	if _, _, err := store.Register(task.RegisterSpec{ID: "agent-1", Type: task.TypeAgent, AgentType: "Work", OutputFile: path}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +52,7 @@ func TestProjectSubagentTasksSkipsUnviewedTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := task.NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	if _, _, err := store.Register(task.RegisterSpec{ID: "agent-1", Type: task.TypeAgent, AgentType: "Work", OutputFile: path}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +71,7 @@ func TestProjectSubagentTasksReProjectsPendingToolCall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
 	manager := session.NewAt("/project", path)
 	store := task.NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	if _, _, err := store.Register(task.RegisterSpec{ID: "agent-1", Type: task.TypeAgent, AgentType: "Work", OutputFile: path}); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +111,7 @@ func TestProjectSubagentTasksSealsTerminalTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := task.NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	id, token, err := store.Register(task.RegisterSpec{ID: "agent-1", Type: task.TypeAgent, AgentType: "Work", OutputFile: path})
 	if err != nil {
 		t.Fatal(err)

@@ -11,22 +11,43 @@ import (
 
 const ProviderID = "openai"
 
+// Config 描述一个走 OpenAI 协议的 provider；DeepSeek 等兼容厂商复用本实现
 type Config struct {
 	APIKey  string
 	BaseURL string
+	// ProviderID 决定错误前缀与默认模型归属，为空时用 ProviderID 常量
+	ProviderID string
+	// DefaultBaseURL 在 BaseURL 为空时生效
+	DefaultBaseURL string
+	// Models 为空时用内置 openai 模型列表
+	Models []llm.Model
 }
 
 type Provider struct {
+	id          string
 	responses   *responses.Client
 	completions *completions.Client
 	models      []llm.Model
 }
 
 func New(cfg Config) *Provider {
+	id := cfg.ProviderID
+	if id == "" {
+		id = ProviderID
+	}
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = cfg.DefaultBaseURL
+	}
+	models := cfg.Models
+	if models == nil {
+		models = builtinModels()
+	}
 	return &Provider{
-		responses:   responses.NewClient(cfg.APIKey, cfg.BaseURL),
-		completions: completions.NewClient(cfg.APIKey, cfg.BaseURL),
-		models:      builtinModels(),
+		id:          id,
+		responses:   responses.NewClient(cfg.APIKey, baseURL),
+		completions: completions.NewClient(cfg.APIKey, baseURL),
+		models:      models,
 	}
 }
 
@@ -39,6 +60,6 @@ func (p *Provider) Stream(ctx context.Context, model llm.Model, c llm.Context, o
 	case llm.APIOpenAICompletions:
 		return p.completions.Stream(ctx, model, c, opts)
 	default:
-		return nil, fmt.Errorf("openai: unsupported protocol %q", model.API)
+		return nil, fmt.Errorf("%s: unsupported protocol %q", p.id, model.API)
 	}
 }

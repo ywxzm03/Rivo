@@ -47,13 +47,13 @@ func TestStopAllClearsTaskPanel(t *testing.T) {
 	m.Update(teaWindow(100, 16))
 	m.setTaskFocus(true)
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: nil})
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("task focus survived an empty panel")
 	}
 	if rows := m.taskRows(); len(rows) != 0 {
 		t.Fatalf("task rows remain after stop-all: %v", rows)
 	}
-	if m.viewingTaskID != "" {
-		t.Fatalf("viewing task survived: %q", m.viewingTaskID)
+	if m.panel.viewingTaskID != "" {
+		t.Fatalf("viewing task survived: %q", m.panel.viewingTaskID)
 	}
 }

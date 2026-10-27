@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tool"
 )
 
 // fakeTool 是测试用的工具，记录每次收到的参数
@@ -694,7 +695,7 @@ func TestAgentToolErrorDoesNotPreventOtherParallelResults(t *testing.T) {
 		mode: llm.ToolExecutionParallel,
 		run: func(context.Context) (llm.ToolResult, error) {
 			started <- "failing"
-			return llm.ToolResult{Details: map[string]any{"reason": "test"}}, sentinel
+			return llm.ToolResult{Details: tool.EditDetails{Patch: "test"}}, sentinel
 		},
 	}
 	sibling := &controlledTool{
@@ -749,9 +750,9 @@ func TestAgentToolErrorDoesNotPreventOtherParallelResults(t *testing.T) {
 	if !failureResult.IsError || failureResult.ToolName != "failing" {
 		t.Fatalf("failure result = %+v, want failing isError result", failureResult)
 	}
-	details, ok := failureResult.Details.(map[string]any)
-	if !ok || details["reason"] != "test" {
-		t.Fatalf("failure details = %#v, want reason=test", failureResult.Details)
+	details, ok := failureResult.Details.(tool.EditDetails)
+	if !ok || details.Patch != "test" {
+		t.Fatalf("failure details = %#v, want patch=test", failureResult.Details)
 	}
 	failureText, _ := failureResult.Content[0].(llm.TextContent)
 	if !strings.Contains(failureText.Text, sentinel.Error()) {
@@ -1494,13 +1495,4 @@ func TestAgentSequentialEventFailureCompletesToolResults(t *testing.T) {
 	if len(a.Context().Messages) != len(calls) {
 		t.Fatalf("committed tool results = %d, want %d", len(a.Context().Messages), len(calls))
 	}
-}
-
-// testPayloadsAsMessages 把队列载荷转成领域消息，供断言使用
-func testPayloadsAsMessages(payloads []PendingPayload) []llm.UserMessage {
-	messages := make([]llm.UserMessage, 0, len(payloads))
-	for _, payload := range payloads {
-		messages = append(messages, payload.userMessage())
-	}
-	return messages
 }

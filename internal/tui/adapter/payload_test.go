@@ -12,10 +12,10 @@ import (
 
 // 队列载荷转领域消息必须保留文本与图片
 func TestPendingMessageKeepsTextAndImages(t *testing.T) {
-	message := pendingMessage(agent.PendingPayload{
+	message := agent.PendingPayload{
 		Text:   "look",
 		Images: []agent.ImagePart{{Data: "aGk=", MIMEType: "image/png"}},
-	})
+	}.UserMessage()
 	if len(message.Content) != 2 {
 		t.Fatalf("content = %d, want text and image", len(message.Content))
 	}
@@ -27,7 +27,7 @@ func TestPendingMessageKeepsTextAndImages(t *testing.T) {
 	}
 
 	// 只有图片时不产生空文本段
-	imageOnly := pendingMessage(agent.PendingPayload{Images: []agent.ImagePart{{Data: "aGk="}}})
+	imageOnly := agent.PendingPayload{Images: []agent.ImagePart{{Data: "aGk="}}}.UserMessage()
 	if len(imageOnly.Content) != 1 {
 		t.Fatalf("image-only content = %d, want 1", len(imageOnly.Content))
 	}

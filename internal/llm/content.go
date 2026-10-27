@@ -1,5 +1,7 @@
 package llm
 
+import "strings"
+
 type ContentType string
 
 const (
@@ -95,4 +97,50 @@ func cloneArgumentValue(value any) any {
 	default:
 		return value
 	}
+}
+
+// TextOf 把内容里的文本段拼成纯文本，段间用换行分隔
+func TextOf(contents []Content) string {
+	parts := make([]string, 0, len(contents))
+	for _, content := range contents {
+		if text, ok := content.(TextContent); ok {
+			parts = append(parts, text.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// DisplayText 把内容拼成单行展示文本，图片渲染为 [image: mime] 标签
+func DisplayText(contents []Content) string {
+	parts := make([]string, 0, len(contents))
+	for _, content := range contents {
+		switch content := content.(type) {
+		case TextContent:
+			parts = append(parts, content.Text)
+		case ImageContent:
+			parts = append(parts, imageLabel(content.MIMEType))
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// DisplayTextLines 与 DisplayText 相同，但段间用换行分隔
+func DisplayTextLines(contents []Content) string {
+	parts := make([]string, 0, len(contents))
+	for _, content := range contents {
+		switch content := content.(type) {
+		case TextContent:
+			parts = append(parts, content.Text)
+		case ImageContent:
+			parts = append(parts, imageLabel(content.MIMEType))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func imageLabel(mimeType string) string {
+	if mimeType == "" {
+		return "[image]"
+	}
+	return "[image: " + mimeType + "]"
 }

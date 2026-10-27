@@ -3,7 +3,6 @@ package session
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -100,28 +99,11 @@ func (m *SessionManager) RewindUser(entryID string) (RewindResult, error) {
 func treeMessageText(message llm.Message) string {
 	switch message := message.(type) {
 	case llm.UserMessage:
-		return treeContentText(message.Content)
+		return llm.DisplayTextLines(message.Content)
 	case llm.AssistantMessage:
-		return treeContentText(message.Content)
+		return llm.DisplayTextLines(message.Content)
 	case llm.ToolResultMessage:
-		return treeContentText(message.Content)
+		return llm.DisplayTextLines(message.Content)
 	}
 	return ""
-}
-
-func treeContentText(contents []llm.Content) string {
-	var parts []string
-	for _, content := range contents {
-		switch content := content.(type) {
-		case llm.TextContent:
-			parts = append(parts, content.Text)
-		case llm.ImageContent:
-			if content.MIMEType == "" {
-				parts = append(parts, "[image]")
-			} else {
-				parts = append(parts, "[image: "+content.MIMEType+"]")
-			}
-		}
-	}
-	return strings.Join(parts, "\n")
 }

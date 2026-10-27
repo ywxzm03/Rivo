@@ -59,7 +59,7 @@ func TestClearLeavesOtherQueueUntouched(t *testing.T) {
 	if err := a.Enqueue(QueueFollowUp, PendingPayload{Text: "follow"}); err != nil {
 		t.Fatal(err)
 	}
-	cleared := a.Clear(QueueFollowUp)
+	cleared := a.Take(QueueFollowUp)
 	if len(cleared) != 1 || cleared[0].Text != "follow" {
 		t.Fatalf("Clear(FollowUp) = %v, want the follow-up payload", cleared)
 	}

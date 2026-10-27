@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/jpeg"
 	"image/png"
 	"io/fs"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,31 +320,6 @@ func makePNG(t *testing.T, width, height int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-// makeJPEG 现场生成一张纯色 JPEG
-func makeJPEG(t *testing.T, width, height int) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height)), nil); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-// makeNoisePNG 生成一张随机噪点 PNG，它压不动，用来逼出逐轮缩小
-func makeNoisePNG(t *testing.T, width, height int) []byte {
-	t.Helper()
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	rng := rand.New(rand.NewSource(1))
-	for i := range img.Pix {
-		img.Pix[i] = uint8(rng.Intn(256))
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()

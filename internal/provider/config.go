@@ -77,7 +77,7 @@ func Load() (Config, error) {
 
 	// 2.默认思考等级：非法值警告后忽略
 	if settings.DefaultThinkingLevel != "" {
-		if !knownThinkingLevel(settings.DefaultThinkingLevel) {
+		if settings.DefaultThinkingLevel != "" && !llm.ValidThinkingLevel(llm.ThinkingLevel(settings.DefaultThinkingLevel)) {
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("config: unknown defaultThinkingLevel %q ignored", settings.DefaultThinkingLevel))
 		} else {
 			cfg.ThinkingLevel = llm.ThinkingLevel(settings.DefaultThinkingLevel)
@@ -121,16 +121,6 @@ func Load() (Config, error) {
 		message += "; config warnings: " + strings.Join(cfg.Warnings, "; ")
 	}
 	return Config{}, fmt.Errorf("%s", message)
-}
-
-func knownThinkingLevel(level string) bool {
-	switch llm.ThinkingLevel(level) {
-	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
-		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
-		return true
-	default:
-		return false
-	}
 }
 
 func (c Config) lookupProvider(id string) (providerSpec, error) {

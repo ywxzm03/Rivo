@@ -19,7 +19,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-const helpText = `Rivo - AI coding assistant
+var helpText = `Rivo - AI coding assistant
 
 Usage:
   Rivo [options] [prompt]
@@ -34,30 +34,12 @@ Options:
       --print, -p         Non-interactive mode: process prompt and exit
       --provider <name>   Provider for --model (requires --model)
       --model <pattern>   Model id, provider/model, or substring, with optional :level suffix
-      --effort <level>    Reasoning effort: off, minimal, low, medium, high, xhigh, max
+      --effort <level>    Reasoning effort: ` + strings.Join(llm.ThinkingLevelNames(), ", ") + `
 
 With a terminal, a positional prompt is submitted automatically in the TUI.
 Without a terminal, a positional prompt runs once and exits.
 With --print, the prompt comes from positional arguments or piped stdin.
 `
-
-func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
-	cfg, err := provider.Load()
-	if err != nil {
-		fmt.Fprintf(stderr, "Rivo: %v\n", err)
-		return 2
-	}
-	return repl(cfg, false, stdin, stdout, stderr)
-}
-
-// repl 组装 Agent 并进入交互模式，continueRecent 为 true 时恢复最近会话
-func repl(cfg provider.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	target := sessionTarget{kind: targetNew}
-	if continueRecent {
-		target.kind = targetRecent
-	}
-	return replTarget(cfg, target, stdin, stdout, stderr)
-}
 
 func replTarget(cfg provider.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {

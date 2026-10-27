@@ -23,18 +23,6 @@ func TestEveryOperationRequestMapsToDomainKind(t *testing.T) {
 	}
 }
 
-// 只入队的请求类型不能携带领域操作，否则会被误当成 operation 启动
-func TestQueueOnlyRequestsCarryNoOperation(t *testing.T) {
-	for _, kind := range []tui.RequestKind{tui.RequestSteer, tui.RequestFollowUp} {
-		if !requestSpecs[kind].queueOnly {
-			t.Errorf("%q must be queue-only", kind)
-		}
-		if requestSpecs[kind].operation != "" {
-			t.Errorf("%q carries operation %q, want none", kind, requestSpecs[kind].operation)
-		}
-	}
-}
-
 // 恢复方式必须映射到对应的领域模式，未知值退回 conversation 语义
 func TestRestoreModeMapping(t *testing.T) {
 	tests := []struct {
@@ -56,7 +44,7 @@ func TestRestoreModeMapping(t *testing.T) {
 // 编辑器载荷与领域消息必须能双向转换，图片按 base64 原样保留
 func TestPayloadRoundTrip(t *testing.T) {
 	payload := &tui.ComposerPayload{
-		Text:   "describe ",
+		Text:   "describe",
 		Images: []tui.ImagePart{{Data: "aGk=", MIMEType: "image/png"}},
 	}
 	message := payloadMessage(payload)

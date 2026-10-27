@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 type Edit struct {
@@ -26,10 +26,14 @@ type Edit struct {
 }
 
 type EditDetails struct {
-	Diff             string
-	Patch            string
-	FirstChangedLine *int
+	Diff             string `json:"diff"`
+	Patch            string `json:"patch"`
+	FirstChangedLine *int   `json:"firstChangedLine,omitempty"`
 }
+
+func (EditDetails) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[EditDetails]("patch") }
 
 type textEdit struct {
 	oldText string
@@ -125,8 +129,9 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	if err := ctx.Err(); err != nil {
 		return llm.ToolResult{}, err
 	}
-	// 3.记录已通过替换校验的文件，复用已读取内容避免备份竞态
-	trackFileEditContent(ctx, e.History, absPath, originalData, info.Mode().Perm())
+	// 3.记录已通过替换校验的文件，复用已读取内容避免备份竞态；
+	// 备份失败不阻断写入，但要让用户知道 undo 历史不完整
+	historyErr := trackFileEditContent(ctx, e.History, absPath, originalData, info.Mode().Perm())
 	// 4.恢复 BOM 与原行尾后写回，再生成 diff 详情
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)
@@ -145,19 +150,31 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 		return llm.ToolResult{}, err
 	}
 	diffText, patch, firstLine := editDiff(content, newContent, path)
+	message := fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path)
+	if historyErr != nil {
+		message += fmt.Sprintf(" (file history unavailable: %v)", historyErr)
+	}
 	return llm.ToolResult{
-		Content: textContents(fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), path)),
+		Content: textContents(message),
 		Details: EditDetails{Diff: diffText, Patch: patch, FirstChangedLine: firstLine},
 	}, nil
 }
 
 // parseEditArgs 兼容多种输入形式，并统一行尾格式
-func parseEditArgs(args map[string]any) (string, []textEdit, error) {
-	path, ok := args["path"].(string)
-	if !ok || path == "" {
+// editParams 只承接 edit 的标量参数，edits 是开放形态需单独解析
+type editParams struct {
+	Path string `json:"path"`
+}
+
+func parseEditArgs(values map[string]any) (string, []textEdit, error) {
+	path, err := toolargs.Decode[editParams](values)
+	if err != nil {
+		return "", nil, err
+	}
+	if path.Path == "" {
 		return "", nil, fmt.Errorf("edit: missing required parameter: path")
 	}
-	var raw any = args["edits"]
+	var raw any = values["edits"]
 	if encoded, ok := raw.(string); ok {
 		var parsed any
 		if err := json.Unmarshal([]byte(encoded), &parsed); err != nil {
@@ -169,12 +186,6 @@ func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 		raw = []any{object}
 	}
 	items, _ := raw.([]any)
-	if oldText, oldOK := args["oldText"].(string); oldOK {
-		newText, newOK := args["newText"].(string)
-		if newOK {
-			items = append(items, map[string]any{"oldText": oldText, "newText": newText})
-		}
-	}
 	if len(items) == 0 {
 		return "", nil, fmt.Errorf("edit: edits must contain at least one replacement")
 	}
@@ -191,15 +202,13 @@ func parseEditArgs(args map[string]any) (string, []textEdit, error) {
 		}
 		edits = append(edits, textEdit{oldText: normalizeLineEndings(oldText), newText: normalizeLineEndings(newText)})
 	}
-	return path, edits, nil
+	return path.Path, edits, nil
 }
 
 // resolveEditPath 处理路径前缀与空格变体
-func resolveEditPath(path string) (string, error) {
-	return resolveEditPathFrom(path, "")
-}
 
-func resolveEditPathFrom(path, cwd string) (string, error) {
+// normalizePathInput 归一化模型可能给出的路径变体：全角空格、@ 前缀、file:// URL
+func normalizePathInput(path string) (string, error) {
 	path = strings.Map(func(r rune) rune {
 		switch r {
 		case '\u00a0', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
@@ -211,39 +220,30 @@ func resolveEditPathFrom(path, cwd string) (string, error) {
 	if strings.HasPrefix(path, "@") {
 		path = path[1:]
 	}
-	if strings.HasPrefix(path, "file://") {
-		localPath := strings.TrimPrefix(path, "file://")
-		if runtime.GOOS == "windows" && len(localPath) >= 2 && isWindowsDrivePath(localPath) {
-			path = localPath
-		} else {
-			u, err := url.Parse(path)
-			if err != nil {
-				return "", err
-			}
-			if u.Host != "" && u.Host != "localhost" {
-				return "", fmt.Errorf("edit: file URL must refer to the local machine")
-			}
-			path = u.Path
-		}
+	if !strings.HasPrefix(path, "file://") {
+		return path, nil
 	}
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+	localPath := strings.TrimPrefix(path, "file://")
+	if runtime.GOOS == "windows" && len(localPath) >= 2 && isWindowsDrivePath(localPath) {
+		return localPath, nil
 	}
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path), nil
+	u, err := url.Parse(path)
+	if err != nil {
+		return "", err
 	}
-	if cwd == "" {
-		var err error
-		cwd, err = os.Getwd()
-		if err != nil {
-			return "", err
-		}
+	if u.Host != "" && u.Host != "localhost" {
+		return "", fmt.Errorf("edit: file URL must refer to the local machine")
 	}
-	return filepath.Clean(filepath.Join(cwd, path)), nil
+	return u.Path, nil
+}
+
+// resolveEditPathFrom 先归一化模型输入，再走通用的路径解析
+func resolveEditPathFrom(path, cwd string) (string, error) {
+	normalized, err := normalizePathInput(path)
+	if err != nil {
+		return "", err
+	}
+	return resolvePathFrom(normalized, cwd)
 }
 
 // isWindowsDrivePath 判定 path 是否以盘符开头；不足两个字符时直接判否，

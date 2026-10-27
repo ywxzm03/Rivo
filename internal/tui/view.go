@@ -54,9 +54,9 @@ func (m *Model) layout() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
 	dock := m.pendingRows() + m.editor.Height() + 2
-	if m.selector != nil {
-		m.selector.input.Width = max(1, m.width-3)
-		dock = m.selector.height(max(1, m.height-2))
+	if m.composer.selector != nil {
+		m.composer.selector.input.Width = max(1, m.width-3)
+		dock = m.composer.selector.height(max(1, m.height-2))
 	} else {
 		// 视口与输入框上边框之间保留一行空白，避免长消息贴边
 		dock += m.completionRows(len(m.completionItems())) + 1
@@ -107,7 +107,7 @@ func (m *Model) view() string {
 	}
 	lines := m.frameLines()
 	if m.hasSelection() {
-		paintSelection(lines, m.selectionAnchor, m.selectionFocus)
+		paintSelection(lines, m.sel.anchor, m.sel.focus)
 	}
 	if len(lines) < m.height {
 		lines = append(lines, make([]string, m.height-len(lines))...)
@@ -128,7 +128,7 @@ func (m *Model) view() string {
 
 // jumpPillBounds 返回主 transcript 离底时覆盖的 pill 区域
 func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
-	if m.closing || m.selector != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
+	if m.closing || m.composer.selector != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
 		return jumpPillBounds{}, false
 	}
 	if rows := m.completionRows(len(m.completionItems())); rows > 0 {
@@ -149,7 +149,7 @@ func (m *Model) jumpPillVisible() bool {
 
 func (m *Model) jumpPillHovered() bool {
 	bounds, ok := m.jumpPillBounds()
-	return ok && m.mousePositionSet && m.mousePosition.y == bounds.y && m.mousePosition.x >= bounds.left && m.mousePosition.x < bounds.right
+	return ok && m.sel.mouseSet && m.sel.mouse.y == bounds.y && m.sel.mouse.x >= bounds.left && m.sel.mouse.x < bounds.right
 }
 
 // paintJumpPill 在 transcript 最后一行覆盖到底提示
@@ -192,8 +192,8 @@ func (m *Model) frameLines() []string {
 		}
 		lines = append(lines, body...)
 	}
-	if m.selector != nil {
-		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
+	if m.composer.selector != nil {
+		lines = append(lines, splitFrameLines(m.composer.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
 		// 子任务视图显示该任务自己的队列;主视图显示主 agent 的
 		lines = append(lines, m.pendingLines()...)
@@ -216,12 +216,12 @@ func (m *Model) frameLines() []string {
 			label = m.status
 		}
 		// 子任务视图的输入框边框用蓝色,并在标签位置显示任务详情
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			label = m.subagentDetailHeader()
 			borderColor = blueColor
 		}
 		border := rule(m.width, label, borderColor, false)
-		if m.copyNotice {
+		if m.sel.notice {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
 			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
@@ -242,7 +242,7 @@ func (m *Model) frameLines() []string {
 // pendingRows 与 pendingLines 共用同一套布局计算,避免两处公式漂移
 // 导致多出或缺少一行
 func (m *Model) pendingRows() int {
-	if m.selector != nil {
+	if m.composer.selector != nil {
 		return 0
 	}
 	return len(m.pendingLines())

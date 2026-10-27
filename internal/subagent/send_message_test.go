@@ -153,9 +153,6 @@ func TestSendMessageRejectsEmptyInput(t *testing.T) {
 }
 
 func TestLatestAssistantWithoutMessages(t *testing.T) {
-	if got := latestAssistant(nil); got != nil {
-		t.Fatalf("latestAssistant(nil) = %#v, want nil", got)
-	}
 	runtime := agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil})
 	if got := latestAssistant(runtime); got != nil {
 		t.Fatalf("latestAssistant(empty) = %#v, want nil", got)

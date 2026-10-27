@@ -95,7 +95,7 @@ func TestJumpToBottomPillHiddenForCompletionAndSelector(t *testing.T) {
 		t.Fatal("completion UI should hide jump pill")
 	}
 	press(m, tea.KeyEsc)
-	if m.completionHidden == false {
+	if m.composer.completionHidden == false {
 		t.Fatal("Escape should dismiss completion when jump pill is hidden")
 	}
 

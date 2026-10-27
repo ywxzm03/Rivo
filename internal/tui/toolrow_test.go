@@ -485,14 +485,14 @@ func TestToolRowClickTogglesRows(t *testing.T) {
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
 
-	clickRow(m, m.lastToolHits[0].Start)
-	if !m.expandedGroups["g"] {
-		t.Fatalf("click did not expand the group: %+v", m.lastToolHits)
+	clickRow(m, m.transcript.hits[0].Start)
+	if !m.transcript.expandedGroups["g"] {
+		t.Fatalf("click did not expand the group: %+v", m.transcript.hits)
 	}
 	// 展开后摘要行仍在首行，再点一次收起
 	m.refreshTranscript()
-	clickRow(m, m.lastToolHits[0].Start)
-	if m.expandedGroups["g"] {
+	clickRow(m, m.transcript.hits[0].Start)
+	if m.transcript.expandedGroups["g"] {
 		t.Fatal("second click did not collapse the group")
 	}
 }
@@ -506,17 +506,17 @@ func TestToolRowClickExpandsThinking(t *testing.T) {
 	m.refreshTranscript()
 
 	var thinkingLine int = -1
-	for _, hit := range m.lastToolHits {
+	for _, hit := range m.transcript.hits {
 		if hit.Kind == "thinking" {
 			thinkingLine = hit.Start
 		}
 	}
 	if thinkingLine < 0 {
-		t.Fatalf("no thinking hit: %+v", m.lastToolHits)
+		t.Fatalf("no thinking hit: %+v", m.transcript.hits)
 	}
 	clickRow(m, thinkingLine)
-	if !m.expandedThoughts["g/r0"] {
-		t.Fatalf("click did not expand thinking: %+v", m.expandedThoughts)
+	if !m.transcript.expandedThoughts["g/r0"] {
+		t.Fatalf("click did not expand thinking: %+v", m.transcript.expandedThoughts)
 	}
 	view := ansi.Strip(m.renderMessage(m.state.Messages[0]))
 	if strings.Count(view, "reasoning line") != 30 {

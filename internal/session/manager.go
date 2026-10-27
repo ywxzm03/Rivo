@@ -181,7 +181,7 @@ func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usa
 		Kind:     kind,
 		Provider: provider,
 		Model:    model,
-		Usage:    usageWire(usage),
+		Usage:    cloneUsage(usage),
 		Note:     note,
 	})
 }
@@ -200,8 +200,8 @@ func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID s
 		SystemMessage:    systemMessage,
 	}
 	if usage != nil {
-		wire := usageWire(*usage)
-		e.Usage = &wire
+		cloned := cloneUsage(*usage)
+		e.Usage = &cloned
 	}
 	if firstKeptEntryID == "" {
 		e.ID = m.newEntryID()

@@ -58,32 +58,32 @@ func TestMapStopReason(t *testing.T) {
 func TestClassifyReason(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := classifyReason(canceled); got != llm.StopReasonAborted {
-		t.Errorf("classifyReason(canceled) = %q, want aborted", got)
+	if got := llm.StopReasonForError(canceled, nil); got != llm.StopReasonAborted {
+		t.Errorf("llm.StopReasonForError(canceled, nil) = %q, want aborted", got)
 	}
 
 	expired, cancel2 := context.WithTimeout(context.Background(), 0)
 	defer cancel2()
 	<-expired.Done()
-	if got := classifyReason(expired); got != llm.StopReasonAborted {
+	if got := llm.StopReasonForError(expired, nil); got != llm.StopReasonAborted {
 		t.Errorf("classifyReason(deadline) = %q, want aborted", got)
 	}
 
-	if got := classifyReason(context.Background()); got != llm.StopReasonError {
+	if got := llm.StopReasonForError(context.Background(), nil); got != llm.StopReasonError {
 		t.Errorf("classifyReason(live) = %q, want error", got)
 	}
 }
 
-// 空参数串返回空 map，坏 JSON 也不 panic
+// 空参数串是合法空对象，坏 JSON 必须报错而不是静默成空 map
 func TestDecodeArguments(t *testing.T) {
-	if got := decodeArguments(""); len(got) != 0 {
-		t.Errorf("decodeArguments(empty) = %v, want empty map", got)
+	if got, err := decodeArguments(""); err != nil || len(got) != 0 {
+		t.Errorf("decodeArguments(empty) = %v, %v; want empty map and no error", got, err)
 	}
-	if got := decodeArguments(`{"path":"a.go"}`); got["path"] != "a.go" {
-		t.Errorf("decodeArguments(json) = %v, want the parsed path", got)
+	if got, err := decodeArguments(`{"path":"a.go"}`); err != nil || got["path"] != "a.go" {
+		t.Errorf("decodeArguments(json) = %v, %v; want the parsed path", got, err)
 	}
-	if got := decodeArguments("not json"); len(got) != 0 {
-		t.Errorf("decodeArguments(bad json) = %v, want empty map", got)
+	if _, err := decodeArguments("not json"); err == nil {
+		t.Error("decodeArguments(bad json) returned no error")
 	}
 }
 

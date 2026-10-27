@@ -198,7 +198,7 @@ func modelFromConfig(providerID string, provider config.Provider, definition con
 		ContextWindow:    contextWindow,
 		MaxTokens:        maxTokens,
 		ThinkingLevelMap: thinkingLevelMap(definition.ThinkingLevelMap),
-		SamplingParams:   cloneParams(definition.SamplingParams),
+		SamplingParams:   copyParams(definition.SamplingParams),
 	}
 	if defaults != nil {
 		model.ReasoningEffort = defaults.ReasoningEffort
@@ -217,7 +217,7 @@ func applyModelOverrides(models []llm.Model, overrides map[string]config.ModelOv
 }
 
 func applyModelOverride(model llm.Model, override config.ModelOverride) llm.Model {
-	model = cloneModel(model)
+	model = model.Clone()
 	if override.Name != nil {
 		model.Name = *override.Name
 	}
@@ -283,38 +283,7 @@ func findModelIndex(models []llm.Model, id string) int {
 func cloneModels(models []llm.Model) []llm.Model {
 	cloned := make([]llm.Model, len(models))
 	for i, model := range models {
-		cloned[i] = cloneModel(model)
-	}
-	return cloned
-}
-
-func cloneModel(model llm.Model) llm.Model {
-	if model.Cost != nil {
-		cost := *model.Cost
-		model.Cost = &cost
-	}
-	if model.ThinkingLevelMap != nil {
-		mapping := make(map[llm.ThinkingLevel]*llm.ReasoningEffort, len(model.ThinkingLevelMap))
-		for level, effort := range model.ThinkingLevelMap {
-			if effort != nil {
-				copy := *effort
-				effort = &copy
-			}
-			mapping[level] = effort
-		}
-		model.ThinkingLevelMap = mapping
-	}
-	model.SamplingParams = cloneParams(model.SamplingParams)
-	return model
-}
-
-func cloneParams(params map[string]any) map[string]any {
-	if params == nil {
-		return nil
-	}
-	cloned := make(map[string]any, len(params))
-	for key, value := range params {
-		cloned[key] = value
+		cloned[i] = model.Clone()
 	}
 	return cloned
 }
@@ -353,4 +322,16 @@ func FindModel(providerID string, models []llm.Model, modelID string) (llm.Model
 		}
 	}
 	return llm.Model{}, fmt.Errorf("provider %q has no model %q", providerID, modelID)
+}
+
+// copyParams 浅拷贝采样参数 map，避免配置与运行时共享同一份可写映射
+func copyParams(params map[string]any) map[string]any {
+	if params == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(params))
+	for key, value := range params {
+		cloned[key] = value
+	}
+	return cloned
 }

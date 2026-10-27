@@ -117,7 +117,7 @@ func TestSkillInvocationExpandsForModelAndRestoresSavedBody(t *testing.T) {
 	var text string
 	for _, message := range messages {
 		if user, ok := message.(llm.UserMessage); ok {
-			text = textContent(user.Content)
+			text = llm.TextOf(user.Content)
 		}
 	}
 	parsed := skillInvocation(text)
@@ -299,10 +299,10 @@ func TestSkillCommitRetryReusesExpandedInputAfterFileChanges(t *testing.T) {
 	var users int
 	for _, message := range r.app.ContextView().Messages() {
 		if user, ok := message.(llm.UserMessage); ok {
-			if skillInvocation(textContent(user.Content)) != nil {
+			if skillInvocation(llm.TextOf(user.Content)) != nil {
 				users++
 			}
-			if skillInvocation(textContent(user.Content)) != nil && !strings.Contains(textContent(user.Content), "Original instructions") {
+			if skillInvocation(llm.TextOf(user.Content)) != nil && !strings.Contains(llm.TextOf(user.Content), "Original instructions") {
 				t.Fatal("retry replaced the original skill snapshot")
 			}
 		}

@@ -30,8 +30,8 @@ func TestOutputSlotsPreserveInterleavedContent(t *testing.T) {
 			t.Fatal("addOutputSlot returned false")
 		}
 	}
-	appendThinking(partial, 0, "plan")
-	appendText(partial, 1, "answer")
+	llm.AppendThinking(partial, 0, "plan")
+	llm.AppendText(partial, 1, "answer")
 	slots[outputSlotKey{outputIndex: 2}] = outputSlot{kind: llm.EventToolCallStart, contentIdx: 2, arguments: `{"path":"a.txt"}`}
 	updateToolArguments(partial, 2, `{"path":"a.txt"}`)
 	if got := partial.Content[0].(llm.ThinkingContent).Thinking; got != "plan" {
@@ -64,8 +64,8 @@ func TestOutputSlotsSeparateMessageContentParts(t *testing.T) {
 	if !addContentPartSlot(partial, slots, 0, 1, "output_text", send) {
 		t.Fatal("addContentPartSlot returned false")
 	}
-	appendText(partial, slots[outputSlotKey{outputIndex: 0}].contentIdx, "first")
-	appendText(partial, slots[outputSlotKey{outputIndex: 0, contentIndex: 1}].contentIdx, "second")
+	llm.AppendText(partial, slots[outputSlotKey{outputIndex: 0}].contentIdx, "first")
+	llm.AppendText(partial, slots[outputSlotKey{outputIndex: 0, contentIndex: 1}].contentIdx, "second")
 
 	done := responseItem(t, `{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first","annotations":[]},{"type":"refusal","refusal":"second"}]}`)
 	if !finishOutputSlot(partial, slots, 0, done, send) {
@@ -127,7 +127,7 @@ func TestAssistantMessageSnapshotCopiesContent(t *testing.T) {
 		ResponseID: "before",
 		Content:    []llm.Content{llm.TextContent{Text: "before"}},
 	}
-	snapshot := assistantMessageSnapshot(message)
+	snapshot := llm.CloneMessage(message)
 
 	message.ResponseID = "after"
 	message.Content[0] = llm.TextContent{Text: "after"}
@@ -279,11 +279,11 @@ func TestStreamEventPartialHelpersCoverAllEventTypes(t *testing.T) {
 		llm.AssistantMessageErrorEvent{},
 	}
 	for _, event := range tests {
-		if eventPartial(event) != nil {
+		if llm.EventPartial(event) != nil {
 			t.Fatalf("event %T unexpectedly has partial", event)
 		}
-		updated := withEventPartial(event, partial)
-		if eventPartial(updated) != partial {
+		updated := llm.WithPartial(event, partial)
+		if llm.EventPartial(updated) != partial {
 			t.Fatalf("event %T did not receive partial", event)
 		}
 	}
@@ -293,7 +293,7 @@ func TestSendEventHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	events := make(chan llm.AssistantMessageEvent)
-	if sendEvent(ctx, events, llm.AssistantMessageStartEvent{}) {
+	if llm.SendEvent(ctx, events, llm.AssistantMessageStartEvent{}) {
 		t.Fatal("sendEvent() = true for canceled context")
 	}
 }

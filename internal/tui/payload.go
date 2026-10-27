@@ -2,9 +2,9 @@ package tui
 
 // ImagePart 是编辑器里待发送的一张图片
 type ImagePart struct {
-	MIMEType string
 	// Data 是 base64 编码的图片内容
-	Data string
+	Data     string
+	MIMEType string
 }
 
 // ComposerPayload 是编辑器产出的待发送内容，TUI 之外由适配器转成领域消息
@@ -39,7 +39,4 @@ const (
 	RequestDelete   RequestKind = "delete"
 	// RequestTreeRestore 只在 TUI 内部区分选择器阶段，不会作为请求发出
 	RequestTreeRestore RequestKind = "tree_restore"
-	// RequestSteer 与 RequestFollowUp 不走 operation，只入队
-	RequestSteer    RequestKind = "steer"
-	RequestFollowUp RequestKind = "follow-up"
 )

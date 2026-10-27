@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/agent"
@@ -22,10 +20,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	"github.com/ywxzm03/Rivo/internal/tool"
-	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
-	"github.com/ywxzm03/Rivo/internal/tool/backgroundbash"
-	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
-	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
+	"github.com/ywxzm03/Rivo/internal/tool/registry"
 )
 
 const (
@@ -52,26 +47,12 @@ type App struct {
 	loader *prompt.Loader
 	cwd    string
 	tools  []llm.Tool
-	// subagents 是子任务管理器，subagentRunner 持有子 agent 的默认 model 与 stream
-	subagents      *subagent.Manager
-	subagentRunner *agenttool.Runner
+	// subagents 是子任务管理器
+	subagents *subagent.Manager
 	// modelFallback 非空表示恢复时模型解析失败，已回退 env 默认模型
 	modelFallback string
-	// notifyQueue 把子任务终态通知转成一次后台 run;缓冲 1 让重复通知合并
-	notifyQueue chan struct{}
-	// evictStop 关闭时停止驱逐定时器;与 notifyQueue 分开,
-	// 避免关闭信号被通知循环当成一次待消费通知。
-	// 通道本身只读,关闭动作由 evictStopOnce 保证只执行一次
-	evictStop     chan struct{}
-	evictStopOnce sync.Once
-	// evictionInterval 是驱逐轮询间隔，零值表示用 evictInterval。
-	// 测试注入毫秒级间隔，避免真等
-	evictionMu       sync.Mutex
-	evictionInterval time.Duration
-	// evictWake 在出现新的待驱逐任务时唤醒已停表的驱逐循环
-	evictWake chan struct{}
-	// closed 在进程收尾时置位,让通知循环退出而不是继续起 run
-	closed atomic.Bool
+	// lifecycle 承载后台通知消费与终态任务驱逐两条循环
+	lifecycle *lifecycle
 	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
 	backgroundMu  sync.Mutex
 	backgroundEnd func()
@@ -220,23 +201,17 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 	}
 
 	manager := subagent.NewManager(taskpkg.NewStore(), nil)
+	manager.Store().SetTranscriptReader(session.ReadMessages)
 	var notificationMu sync.Mutex
 	var notificationBatch int
-	tools := []llm.Tool{
-		&tool.Read{SupportsImages: model.SupportsImages, WorkingDir: cwd},
-		&tool.Ls{WorkingDir: cwd},
-		&tool.Grep{WorkingDir: cwd},
-		&tool.Find{WorkingDir: cwd},
-		&tool.Bash{WorkingDir: cwd, Background: backgroundbash.New(manager.Store())},
-		&tool.Write{History: sm.FileHistory(), WorkingDir: cwd},
-		&tool.Edit{History: sm.FileHistory(), WorkingDir: cwd},
-		agenttool.New(manager),
-		sendmessagetool.New(manager),
-		taskstoptool.New(manager.Store()),
-	}
-	if runtime.GOOS == "windows" {
-		tools = append(tools, &tool.PowerShell{WorkingDir: cwd})
-	}
+	tools := registry.Build(registry.Deps{
+		WorkingDir:     cwd,
+		SupportsImages: model.SupportsImages,
+		FileHistory:    tool.Tracker(sm.FileHistory()),
+		Store:          manager.Store(),
+		Launcher:       manager,
+		Messenger:      manager,
+	})
 
 	coord := NewCoordinator(sm, onEvent)
 	coord.SetTransientMessages(func() []llm.Message {
@@ -281,141 +256,39 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 		Hooks:      agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
 	})
 	coord.Agent = ag
-	runner := &agenttool.Runner{
+	registry.BuildRunner(registry.RunnerDeps{
 		ParentCwd:   cwd,
 		SessionDir:  filepath.Dir(sm.Path()),
 		AgentDir:    agentDir,
 		Thinking:    cfg.ThinkingLevel,
 		ParentTools: tools,
-		TaskStore:   manager.Store(),
-	}
-	runner.SetModel(model, streamFn)
-	manager.SetFactory(runner.Run)
-	manager.SetResumeResolver(agenttool.ResumeResolver(filepath.Dir(sm.Path())))
+		Store:       manager.Store(),
+		Model:       model,
+		Stream:      streamFn,
+	}, manager)
 	app := &App{
-		agent:          ag,
-		session:        sm,
-		coordinator:    coord,
-		cfg:            cfg,
-		onEvent:        onEvent,
-		loader:         loader,
-		cwd:            cwd,
-		subagents:      manager,
-		subagentRunner: runner,
-		tools:          tools,
-		notifyQueue:    make(chan struct{}, 1),
-		evictStop:      make(chan struct{}),
-		evictWake:      make(chan struct{}, 1),
+		agent:       ag,
+		session:     sm,
+		coordinator: coord,
+		cfg:         cfg,
+		onEvent:     onEvent,
+		loader:      loader,
+		cwd:         cwd,
+		subagents:   manager,
+		tools:       tools,
+		lifecycle:   newLifecycle(),
 	}
 	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
-	manager.Store().SetNotifyHook(app.wakeForNotification)
-	go app.runNotificationLoop()
+	manager.Store().SetNotifyHook(app.lifecycle.wake)
+	go app.lifecycle.runNotifications(app)
 	// 终态任务的驱逐不能只靠请求边界:用户不再发消息时面板会一直留着旧任务行
-	go app.runEvictionLoop()
+	go app.lifecycle.runEviction(app)
 	return app, nil
 }
 
-// wakeForNotification 在子任务通知入队时启动一次消费 run。
-// 已有操作在跑时不介入:它收尾时会检查队列并续跑
-func (a *App) wakeForNotification() {
-	if a.closed.Load() {
-		return
-	}
-	// 新的终态任务可能让已停表的驱逐循环重新有工作
-	select {
-	case a.evictWake <- struct{}{}:
-	default:
-	}
-	select {
-	case a.notifyQueue <- struct{}{}:
-	default:
-		// 队列已有一次待处理的唤醒,重复通知会被同一轮 run 一并消费
-	}
-}
-
-// runNotificationLoop 消费唤醒信号。用 Continue 驱动空请求,
-// 通知作为 transient 附件挂在这一轮请求上,不写入主 session。
-// Start 被运行中的操作拒绝时不能丢弃信号:否则通知会一直留在队列里,
-// 只能等用户下次输入才投递
-func (a *App) runNotificationLoop() {
-	for range a.notifyQueue {
-		if a.closed.Load() {
-			return
-		}
-		if !a.hasPendingNotification() {
-			continue
-		}
-		op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, NotificationOnly: true})
-		if err != nil {
-			a.retryNotificationWake()
-			continue
-		}
-		// 收尾一定落在操作真正结束后,不依赖 AgentEndEvent 是否成功送达
-		op.Wait()
-		a.notifyBackgroundRunEnd()
-	}
-}
-
-// retryNotificationWake 在 Start 被拒后重新排队一次唤醒。
-// 延迟重试避免占满 CPU;同一时刻只保留一个待处理信号
-func (a *App) retryNotificationWake() {
-	if a.closed.Load() {
-		return
-	}
-	time.AfterFunc(notificationRetryDelay, func() {
-		if a.closed.Load() {
-			return
-		}
-		a.wakeForNotification()
-	})
-}
-
-// runEvictionLoop 每秒回收宽限期已过的终态任务。
-// 只靠请求边界驱逐不够:用户不再发消息时终态任务会永久留在 store 里,
-// TUI 任务行也就一直不消失
 // SetEvictionInterval 覆盖驱逐轮询间隔，只对随后启动的循环生效
 func (a *App) SetEvictionInterval(interval time.Duration) {
-	a.evictionMu.Lock()
-	a.evictionInterval = interval
-	a.evictionMu.Unlock()
-}
-
-func (a *App) evictionTick() time.Duration {
-	a.evictionMu.Lock()
-	defer a.evictionMu.Unlock()
-	if a.evictionInterval > 0 {
-		return a.evictionInterval
-	}
-	return evictInterval
-}
-
-func (a *App) runEvictionLoop() {
-	stop := a.evictStop
-	ticker := time.NewTicker(a.evictionTick())
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			store := a.SubagentStore()
-			if store == nil {
-				return
-			}
-			store.EvictExpired()
-			// 没有待驱逐的终态任务时停表，避免空闲进程每秒空转；
-			// 新任务完成时会重新启动循环
-			if !store.HasEvictionWork() {
-				ticker.Stop()
-				select {
-				case <-stop:
-					return
-				case <-a.evictWake:
-				}
-				ticker = time.NewTicker(a.evictionTick())
-			}
-		}
-	}
+	a.lifecycle.setEvictionInterval(interval)
 }
 
 // notifyBackgroundRunEnd 通知显示层后台 run 已结束。
@@ -502,6 +375,15 @@ func escapeNotificationText(value string) string {
 }
 
 // SubagentStore 暴露根任务存储，供 TUI 投影与操作
+// subagentEvictionStore 返回驱逐循环需要的最小能力视图
+func (a *App) subagentEvictionStore() subagentEvictor {
+	store := a.SubagentStore()
+	if store == nil {
+		return nil
+	}
+	return store
+}
+
 func (a *App) SubagentStore() *taskpkg.Store {
 	if a.subagents == nil {
 		return nil
@@ -522,15 +404,26 @@ func (a *App) ExitSubagentView() {
 
 // ShutdownSubagents 终止所有仍在运行的子任务与后台命令。
 // 进程退出时调用:子任务 lifecycle 与请求解绑,不主动终止会变成孤儿进程
-func (a *App) ShutdownSubagents() int {
-	// 先停通知循环,否则收尾期间到达的终态通知会再起一次 run
-	a.closed.Store(true)
-	select {
-	case a.notifyQueue <- struct{}{}:
-	default:
+// Close 停掉后台循环并解除 store 的通知钩子。
+// 会话切换时旧 App 必须调用它,否则通知循环与驱逐循环会永久存活
+func (a *App) Close() {
+	a.lifecycle.close()
+	if store := a.SubagentStore(); store != nil {
+		store.SetNotifyHook(nil)
 	}
-	// 驱逐循环独立关闭,避免退出后仍有定时器持有 store
-	a.evictStopOnce.Do(func() { close(a.evictStop) })
+}
+
+// startNotificationRun 用 Continue 驱动一次只带通知的空请求
+func (a *App) startNotificationRun() (operationWaiter, error) {
+	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, NotificationOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
+func (a *App) ShutdownSubagents() int {
+	a.Close()
 	store := a.SubagentStore()
 	if store == nil {
 		return 0
@@ -548,7 +441,7 @@ func (a *App) StopSubagent(taskID string) error {
 	if store == nil {
 		return fmt.Errorf("app: subagent manager is unavailable")
 	}
-	_, err := taskstoptool.New(store).Execute(context.Background(), map[string]any{"task_id": taskID})
+	_, err := taskpkg.StopTask(store, taskpkg.StopInput{TaskID: taskID})
 	return err
 }
 
@@ -609,61 +502,32 @@ func (a *App) SessionPath() string { return a.session.Path() }
 
 // Enqueue 把一条内容加入指定队列
 func (a *App) Enqueue(kind agent.QueueKind, payload agent.PendingPayload) error {
-	if a == nil || a.agent == nil {
-		if kind == agent.QueueFollowUp {
-			return ErrFollowUpUnavailable
-		}
-		return ErrSteeringUnavailable
-	}
 	return a.agent.Enqueue(kind, payload)
 }
 
 // QueueLen 返回指定队列等待消费的条数
 func (a *App) QueueLen(kind agent.QueueKind) int {
-	if a == nil || a.agent == nil {
-		return 0
-	}
 	return a.agent.Len(kind)
 }
 
 // QueueRevision 返回指定队列的修订号
 func (a *App) QueueRevision(kind agent.QueueKind) uint64 {
-	if a == nil || a.agent == nil {
-		return 0
-	}
 	return a.agent.Revision(kind)
 }
 
 // QueueMessages 返回指定队列的纯文本视图
 func (a *App) QueueMessages(kind agent.QueueKind) []string {
-	if a == nil || a.agent == nil {
-		return nil
-	}
 	return a.agent.Messages(kind)
 }
 
 // QueuePayloads 返回指定队列的完整内容视图
 func (a *App) QueuePayloads(kind agent.QueueKind) []agent.PendingPayload {
-	if a == nil || a.agent == nil {
-		return nil
-	}
 	return a.agent.Payloads(kind)
 }
 
 // TakeQueue 取出并清空指定队列
 func (a *App) TakeQueue(kind agent.QueueKind) []agent.PendingPayload {
-	if a == nil || a.agent == nil {
-		return nil
-	}
 	return a.agent.Take(kind)
-}
-
-// ClearQueue 清空指定队列并返回被清掉的内容
-func (a *App) ClearQueue(kind agent.QueueKind) []agent.PendingPayload {
-	if a == nil || a.agent == nil {
-		return nil
-	}
-	return a.agent.Clear(kind)
 }
 
 // Skills 返回当前已发现技能的副本
@@ -690,7 +554,7 @@ func (a *App) SetThinkingLevel(level llm.ThinkingLevel) error {
 }
 
 func (a *App) setThinkingLevel(level llm.ThinkingLevel) error {
-	if !validThinkingLevel(level) {
+	if level != "" && !llm.ValidThinkingLevel(level) {
 		return fmt.Errorf("unknown effort level %q", level)
 	}
 	if err := a.session.AppendThinkingLevelChange(string(level)); err != nil {
@@ -710,33 +574,38 @@ func (a *App) SetModel(providerID, modelID string) error {
 }
 
 func (a *App) setModel(providerID, modelID string) error {
-	return a.applyModel(providerID, modelID, true)
+	return a.switchModelPersisted(providerID, modelID)
 }
 
-func (a *App) applyModel(providerID, modelID string, persist bool) error {
+// switchModel 切换模型但不写会话，用于临时切换与回滚
+func (a *App) switchModel(providerID, modelID string) error {
 	resolved, err := a.cfg.Resolve(providerID, modelID)
 	if err != nil {
-		// 自定义 provider 的模型目录可能没登记在流函数里，退回已注册的模型快照
-		for _, candidate := range a.AvailableModels() {
-			if candidate.Provider == providerID && candidate.ID == modelID {
-				resolved = provider.Resolved{ProviderID: providerID, Model: candidate, Stream: a.agent.Stream()}
-				err = nil
-				break
-			}
-		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
-	providerID, model, streamFn := resolved.ProviderID, resolved.Model, resolved.Stream
-	if persist {
-		if err := a.session.AppendModelChange(providerID, modelID); err != nil {
-			return err
-		}
+	a.installModel(resolved)
+	return nil
+}
+
+// switchModelPersisted 切换模型并把变更写入会话
+func (a *App) switchModelPersisted(providerID, modelID string) error {
+	resolved, err := a.cfg.Resolve(providerID, modelID)
+	if err != nil {
+		return err
 	}
+	if err := a.session.AppendModelChange(resolved.ProviderID, modelID); err != nil {
+		return err
+	}
+	a.installModel(resolved)
+	return nil
+}
+
+// installModel 把已解析的模型装到 agent 与压缩器上
+func (a *App) installModel(resolved provider.Resolved) {
+	model, streamFn := resolved.Model, resolved.Stream
 	a.agent.SetModel(model)
 	a.coordinator.setModel(model)
-	_ = a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: streamFn})
+	a.agent.Reconfigure(a.agent.Config(), streamFn)
 	for _, candidate := range a.agent.Context().Tools {
 		if read, ok := candidate.(*tool.Read); ok {
 			read.SupportsImages = model.SupportsImages
@@ -751,17 +620,6 @@ func (a *App) applyModel(providerID, modelID string, persist bool) error {
 		a.coordinator.Compactor.Config = compaction.DefaultConfig(model.ContextWindow)
 	} else {
 		a.coordinator.Compactor = nil
-	}
-	return nil
-}
-
-func validThinkingLevel(level llm.ThinkingLevel) bool {
-	switch level {
-	case llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
-		llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax:
-		return true
-	default:
-		return false
 	}
 }
 

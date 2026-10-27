@@ -60,12 +60,6 @@ func (q *pendingMessageQueue) append(message pendingMessage) {
 	q.revision++
 }
 
-func (q *pendingMessageQueue) hasItems() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.items) > 0
-}
-
 func (q *pendingMessageQueue) snapshot() []pendingMessage {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -113,8 +107,6 @@ func (q *pendingMessageQueue) restoreFront(message pendingMessage) {
 	q.revision++
 }
 
-func (q *pendingMessageQueue) clear() []pendingMessage { return q.takeAllForRestore() }
-
 func (q *pendingMessageQueue) revisionValue() uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -122,7 +114,7 @@ func (q *pendingMessageQueue) revisionValue() uint64 {
 }
 
 func newPendingMessage(message llm.UserMessage) pendingMessage {
-	return pendingMessage{input: textOfUserMessage(message), message: cloneUserMessage(message)}
+	return pendingMessage{input: llm.TextOf(message.Content), message: cloneUserMessage(message)}
 }
 
 func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
@@ -130,43 +122,12 @@ func cloneUserMessage(message llm.UserMessage) llm.UserMessage {
 	return message
 }
 
-func textOfUserMessage(message llm.UserMessage) string {
-	var parts []string
-	for _, content := range message.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-func displayUserMessageText(message llm.UserMessage) string {
-	var parts []string
-	for _, content := range message.Content {
-		switch content := content.(type) {
-		case llm.TextContent:
-			parts = append(parts, content.Text)
-		case llm.ImageContent:
-			label := "[image]"
-			if content.MIMEType != "" {
-				label = "[image: " + content.MIMEType + "]"
-			}
-			parts = append(parts, label)
-		}
-	}
-	return strings.Join(parts, "")
-}
-
 func pendingMessageTexts(items []pendingMessage) []string {
 	messages := make([]string, len(items))
 	for i, item := range items {
-		messages[i] = displayUserMessageText(item.message)
+		messages[i] = llm.DisplayText(item.message.Content)
 	}
 	return messages
-}
-
-func equalUserMessage(left, right llm.UserMessage) bool {
-	return reflect.DeepEqual(left, right)
 }
 
 // QueueKind 区分运行中注入与运行后注入两条队列
@@ -195,7 +156,8 @@ func (p PendingPayload) isEmpty() bool {
 	return strings.TrimSpace(p.Text) == "" && len(p.Images) == 0
 }
 
-func (p PendingPayload) userMessage() llm.UserMessage {
+// UserMessage 把待注入内容转成领域消息，空白文本按无文本处理
+func (p PendingPayload) UserMessage() llm.UserMessage {
 	content := make([]llm.Content, 0, len(p.Images)+1)
 	if text := strings.TrimSpace(p.Text); text != "" {
 		content = append(content, llm.TextContent{Text: text})
@@ -238,13 +200,23 @@ func (a *Agent) Enqueue(kind QueueKind, payload PendingPayload) error {
 		}
 		return errors.New("agent: steering input is empty")
 	}
-	a.queue(kind).append(newPendingMessage(payload.userMessage()))
+	a.queue(kind).append(newPendingMessage(payload.UserMessage()))
 	return nil
 }
 
-// Steer 把一段纯文本加入 steering 队列，是 Runner 接口要求的最小入口
+// Steer 把一段纯文本加入 steering 队列
 func (a *Agent) Steer(input string) error {
 	return a.Enqueue(QueueSteering, PendingPayload{Text: input})
+}
+
+// SteerMessage 把一条带图片的用户消息加入 steering 队列
+func (a *Agent) SteerMessage(message llm.UserMessage) error {
+	return a.Enqueue(QueueSteering, PayloadFromMessage(message))
+}
+
+// FollowUpMessage 把一条带图片的用户消息加入 follow-up 队列
+func (a *Agent) FollowUpMessage(message llm.UserMessage) error {
+	return a.Enqueue(QueueFollowUp, PayloadFromMessage(message))
 }
 
 // FollowUp 把一段纯文本加入 follow-up 队列
@@ -284,13 +256,11 @@ func (a *Agent) Take(kind QueueKind) []PendingPayload {
 }
 
 // Clear 清空队列并返回被清掉的内容
-func (a *Agent) Clear(kind QueueKind) []PendingPayload { return a.Take(kind) }
-
 // Restore 把一批内容按顺序放回队列头部，用于撤回未消费的输入
 func (a *Agent) Restore(kind QueueKind, payloads []PendingPayload) {
 	queue := a.queue(kind)
 	for i := len(payloads) - 1; i >= 0; i-- {
-		queue.restoreFront(newPendingMessage(payloads[i].userMessage()))
+		queue.restoreFront(newPendingMessage(payloads[i].UserMessage()))
 	}
 }
 
@@ -343,10 +313,6 @@ func (a *Agent) clearRetryableQueue(queue *pendingMessageQueue) {
 	a.retryableMu.Unlock()
 }
 
-func (a *Agent) acknowledgeSteering(match func(pendingMessage) bool) bool {
-	return a.acknowledgeQueue(&a.steeringQueue, match)
-}
-
 func (a *Agent) acknowledgeQueue(queue *pendingMessageQueue, match func(pendingMessage) bool) bool {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
@@ -363,11 +329,7 @@ func (a *Agent) acknowledgeQueue(queue *pendingMessageQueue, match func(pendingM
 
 func (a *Agent) takeSteering() (pendingMessage, bool) { return a.steeringQueue.takeOne() }
 
-func (a *Agent) takeFollowUp() (pendingMessage, bool) { return a.followUpQueue.takeOne() }
-
 func (a *Agent) restoreSteering(message pendingMessage) { a.steeringQueue.restoreFront(message) }
-
-func (a *Agent) restoreFollowUp(message pendingMessage) { a.followUpQueue.restoreFront(message) }
 
 // PreparedRequest 是一次模型请求的配置与上下文快照；
 // Compacted 表示来源结构已重建，运行汇总从新快照的末尾开始
@@ -379,7 +341,7 @@ type PreparedRequest struct {
 	TransientAck func()
 }
 
-// Options 是一次装配的全部参数，Agent 不再暴露可写字段
+// Options 是一次装配的全部参数，运行期变更走 Set* 与 Reconfigure
 type Options struct {
 	Config llm.AgentConfig
 	// Context 是初始上下文，含工具与消息
@@ -422,33 +384,10 @@ func New(opts Options) *Agent {
 
 // Reconfigure 替换模型与流函数，保留队列等运行中状态；
 // 未提供的字段保持原值，便于只切换模型
-func (a *Agent) Reconfigure(opts Options) error {
-	if opts.Config.Model.ID != "" {
-		a.cfg = opts.Config
-	}
-	if opts.Stream != nil {
-		a.stream = opts.Stream
-	}
-	if opts.Events != nil {
-		a.events = opts.Events
-	}
-	if opts.WorkingDir != "" {
-		a.workingDir = opts.WorkingDir
-	}
-	if opts.MaxTurns != 0 {
-		a.maxTurns = opts.MaxTurns
-	}
-	if opts.AgentID != "" {
-		a.agentID = opts.AgentID
-	}
-	// Hooks 只覆盖显式提供的回调，未提供的保持原值
-	if opts.Hooks.PrepareRequest != nil {
-		a.hooks.PrepareRequest = opts.Hooks.PrepareRequest
-	}
-	if opts.Hooks.CommitMessages != nil {
-		a.hooks.CommitMessages = opts.Hooks.CommitMessages
-	}
-	return nil
+// Reconfigure 替换模型配置与流函数，模型切换时使用
+func (a *Agent) Reconfigure(config llm.AgentConfig, stream llm.StreamFn) {
+	a.cfg = config
+	a.stream = stream
 }
 
 // Emit 把事件交给当前订阅者，供宿主在装配后触发已安装的处理器
@@ -637,138 +576,37 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 	turns := 0
 	for {
 		turns++
-		var acknowledgeTransient func()
-		// 1.先原子认领一条 steering，后继 run 的首条消息由调用方指定队列
-		var pending pendingMessage
-		var pendingQueue *pendingMessageQueue
-		var ok bool
-		if initialPending != nil {
-			pending, ok = *initialPending, true
-			pendingQueue = initialQueue
-			initialPending, initialQueue = nil, nil
-		} else {
-			pending, ok = a.takeSteering()
-			pendingQueue = &a.steeringQueue
-		}
+		// 1.认领本轮首条用户消息
+		pending, pendingQueue, ok := a.claimPending(&initialPending, &initialQueue)
 		if ok {
-			userMessage := pending.message
-			if len(userMessage.Content) == 0 {
-				userMessage = llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
-			}
-			ids, err := a.persistMessages([]llm.Message{userMessage})
+			var err error
+			ctx, err = a.admitPending(ctx, pending, pendingQueue)
 			if err != nil {
-				pending.retryable = true
-				pendingQueue.restoreFront(pending)
-				a.markRetryableQueue(pendingQueue)
-				return nil, err
-			}
-			if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
-				return nil, err
-			}
-			var sourceID string
-			if len(ids) > 0 {
-				sourceID = ids[0]
-				a.currentUserID = sourceID
-				ctx = llm.WithCurrentUserMessageID(ctx, sourceID)
-			} else {
-				a.currentUserID = ""
-				ctx = llm.WithCurrentUserMessageID(ctx, "")
-			}
-			if err := a.emit(llm.MessageEndEvent{Message: userMessage, SourceID: sourceID}); err != nil {
 				return nil, err
 			}
 		}
 
 		// 2.请求准备只返回快照，摘要失败的降级与存储失败的停止由宿主判断
-		if a.hooks.PrepareRequest != nil {
-			request, err := a.hooks.PrepareRequest(ctx, PreparedRequest{Context: a.ctx, Config: a.cfg})
-			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return a.finishModelFailure(firstMessageIndex, llm.StopReasonAborted, err, nil)
-				}
-				return nil, err
+		var acknowledgeTransient func()
+		request, err := a.prepareRequest(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return a.finishModelFailure(firstMessageIndex, llm.StopReasonAborted, err, nil)
 			}
+			return nil, err
+		}
+		if request != nil {
 			a.ctx, a.cfg = request.Context, request.Config
 			acknowledgeTransient = request.TransientAck
 			if request.Compacted {
 				firstMessageIndex = len(a.ctx.Messages)
 			}
 		}
-		// 3.消费模型流并同步发出 assistant partial 更新
-		partial := a.newAssistantMessage()
-		if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
-			return nil, err
-		}
-		// 每轮单独派生 stream ctx，错误事件分支只取消它
-		streamCtx, streamCancel := context.WithCancel(ctx)
-		requestContext := contextForModel(a.ctx)
-		events, streamErr := a.stream(streamCtx, a.cfg.Model, requestContext, llm.Options{
-			ThinkingLevel: a.cfg.ThinkingLevel,
-			SessionID:     a.cfg.SessionID,
-		})
 
-		var final *llm.AssistantMessage
-		var streamReason llm.StopReason
-		var eventErr error
-		toolCallArguments := make(map[int]string)
-		if streamErr == nil {
-			for event := range events {
-				// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接
-				if eventErr != nil || streamErr != nil {
-					continue
-				}
-				switch ev := event.(type) {
-				case llm.AssistantMessageStartEvent:
-					if ev.Partial != nil {
-						partial = cloneAssistantMessage(*ev.Partial)
-					}
-				case llm.AssistantMessageTextStartEvent, llm.AssistantMessageTextDeltaEvent, llm.AssistantMessageTextEndEvent,
-					llm.AssistantMessageThinkingStartEvent, llm.AssistantMessageThinkingDeltaEvent, llm.AssistantMessageThinkingEndEvent,
-					llm.AssistantMessageToolCallStartEvent, llm.AssistantMessageToolCallDeltaEvent, llm.AssistantMessageToolCallEndEvent:
-					if snapshot := assistantEventPartial(ev); snapshot != nil {
-						partial = cloneAssistantMessage(*snapshot)
-					} else {
-						appendAssistantEvent(&partial, ev, toolCallArguments)
-					}
-					if err := a.emit(llm.MessageUpdateEvent{
-						Message:               cloneAssistantMessage(partial),
-						AssistantMessageEvent: ev,
-					}); err != nil {
-						eventErr = err
-						streamCancel()
-					}
-				case llm.AssistantMessageDoneEvent:
-					final = ev.Message
-				case llm.AssistantMessageErrorEvent:
-					streamErr = ev.Err
-					if streamErr == nil {
-						streamErr = errors.New("agent: model stream returned empty error")
-					}
-					streamReason = ev.Reason
-					if streamReason != llm.StopReasonAborted && streamReason != llm.StopReasonError {
-						streamReason = llm.StopReasonError
-					}
-					if ev.Partial != nil {
-						partial = cloneAssistantMessage(*ev.Partial)
-					}
-					streamCancel()
-				}
-			}
-		}
-		streamCause := streamCtx.Err()
-		streamCancel()
-		if streamErr != nil && ctx.Err() != nil {
-			streamReason = llm.StopReasonAborted
-		}
-		if eventErr != nil {
-			return nil, eventErr
-		}
-		if streamErr == nil && final == nil {
-			if errors.Is(streamCause, context.Canceled) || errors.Is(streamCause, context.DeadlineExceeded) {
-				streamReason = llm.StopReasonAborted
-			} else {
-				streamErr = errors.New("agent: stream ended without a final message")
-			}
+		// 3.消费模型流并同步发出 assistant partial 更新
+		final, partial, streamReason, streamErr, err := a.consumeStream(ctx)
+		if err != nil {
+			return nil, err
 		}
 		if streamErr != nil || streamReason == llm.StopReasonAborted {
 			reason := streamReason
@@ -777,26 +615,20 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			}
 			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
-		// 4.提交最终 assistant 消息，并检查是否需要执行工具
-		setAssistantMetadata(final, a.cfg.Model)
-		if final.Usage.Cost == nil {
-			final.Usage.Cost = llm.PriceUsage(a.cfg.Model, final.Usage)
-		}
-		if err := a.commitMessages([]llm.Message{*final}); err != nil {
+
+		// 4.提交最终 assistant 消息，元数据在提交时补全
+		committed, err := a.commitTurn(*final, acknowledgeTransient)
+		if err != nil {
 			cancel()
 			return nil, err
 		}
-		if acknowledgeTransient != nil {
-			acknowledgeTransient()
-		}
+		final = &committed
 
-		// 达到轮次上限时先收尾本轮,再决定是否继续
-		if a.maxTurns > 0 && turns >= a.maxTurns {
-			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
-				cancel()
-				return nil, err
-			}
-			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+		// 5.决定本轮如何收尾：轮次上限、截断恢复、无工具调用、执行工具
+		decision := a.decideTurn(*final, turns)
+		switch decision {
+		case turnMaxReached:
+			if err := a.endTurn(firstMessageIndex, *final, nil); err != nil {
 				cancel()
 				return nil, err
 			}
@@ -804,28 +636,19 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				return final, ErrMaxTurns
 			}
 			return final, nil
-		}
-
-		toolCalls := assistantToolCalls(*final)
-		// 5.输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
-		// 正常提交本轮后由编排层驱动溢出恢复；达到上限的截断是正常输出限制
-		if a.hooks.PrepareRequest != nil && isRecoverableLength(*final, a.cfg.Model) {
-			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
-				cancel()
-				return nil, err
-			}
-			if err := a.emitAgentEnd(firstMessageIndex); err != nil {
+		case turnTruncated:
+			if err := a.endTurn(firstMessageIndex, *final, nil); err != nil {
 				cancel()
 				return nil, err
 			}
 			return final, nil
-		}
-		if len(toolCalls) == 0 {
+		case turnFinished:
 			if err := a.emit(llm.TurnEndEvent{Message: *final}); err != nil {
 				cancel()
 				return nil, err
 			}
-			pending, ok := a.takeSteering()
+			// 还有排队的 steering 就接着跑下一轮
+			next, ok := a.takeSteering()
 			if !ok {
 				if err := a.emitAgentEnd(firstMessageIndex); err != nil {
 					cancel()
@@ -834,24 +657,22 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 				return final, nil
 			}
 			if err := a.emit(llm.TurnStartEvent{}); err != nil {
-				a.restoreSteering(pending)
+				a.restoreSteering(next)
 				cancel()
 				return nil, err
 			}
-			initialPending, initialQueue = &pending, &a.steeringQueue
+			initialPending, initialQueue = &next, &a.steeringQueue
 			continue
 		}
 
 		// 6.执行工具批次，结束当前 turn 后开始下一轮模型调用
+		toolCalls := assistantToolCalls(*final)
 		toolResults, err := a.executeToolBatch(ctx, toolCalls)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
-		if err := a.emit(llm.TurnEndEvent{
-			Message:     *final,
-			ToolResults: toolResults,
-		}); err != nil {
+		if err := a.endTurn(firstMessageIndex, *final, toolResults); err != nil {
 			cancel()
 			return nil, err
 		}
@@ -860,6 +681,197 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return nil, err
 		}
 	}
+}
+
+// turnDecision 表示一轮结束后主循环该走哪条路
+type turnDecision int
+
+const (
+	// turnContinue 表示还有工具要执行
+	turnContinue turnDecision = iota
+	// turnFinished 表示本轮正常结束
+	turnFinished
+	// turnTruncated 表示输出被截断，交给编排层做溢出恢复
+	turnTruncated
+	// turnMaxReached 表示达到轮次上限
+	turnMaxReached
+)
+
+// claimPending 取本轮首条用户消息，调用方指定队列时优先用它
+func (a *Agent) claimPending(initialPending **pendingMessage, initialQueue **pendingMessageQueue) (pendingMessage, *pendingMessageQueue, bool) {
+	if *initialPending != nil {
+		pending, queue := **initialPending, *initialQueue
+		*initialPending, *initialQueue = nil, nil
+		return pending, queue, true
+	}
+	pending, ok := a.takeSteering()
+	return pending, &a.steeringQueue, ok
+}
+
+// admitPending 落盘并广播一条待注入的用户消息，返回带消息 ID 的 ctx
+func (a *Agent) admitPending(ctx context.Context, pending pendingMessage, pendingQueue *pendingMessageQueue) (context.Context, error) {
+	userMessage := pending.message
+	if len(userMessage.Content) == 0 {
+		userMessage = llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
+	}
+	ids, err := a.persistMessages([]llm.Message{userMessage})
+	if err != nil {
+		pending.retryable = true
+		pendingQueue.restoreFront(pending)
+		a.markRetryableQueue(pendingQueue)
+		return ctx, err
+	}
+	if err := a.emit(llm.MessageStartEvent{Message: userMessage}); err != nil {
+		return ctx, err
+	}
+	var sourceID string
+	if len(ids) > 0 {
+		sourceID = ids[0]
+		a.currentUserID = sourceID
+		ctx = llm.WithCurrentUserMessageID(ctx, sourceID)
+	} else {
+		a.currentUserID = ""
+		ctx = llm.WithCurrentUserMessageID(ctx, "")
+	}
+	if err := a.emit(llm.MessageEndEvent{Message: userMessage, SourceID: sourceID}); err != nil {
+		return ctx, err
+	}
+	return ctx, nil
+}
+
+// prepareRequest 让宿主对齐上下文；未挂 hook 时返回 nil
+func (a *Agent) prepareRequest(ctx context.Context) (*PreparedRequest, error) {
+	if a.hooks.PrepareRequest == nil {
+		return nil, nil
+	}
+	request, err := a.hooks.PrepareRequest(ctx, PreparedRequest{Context: a.ctx, Config: a.cfg})
+	if err != nil {
+		return nil, err
+	}
+	return &request, nil
+}
+
+// consumeStream 读完整条模型流，返回最终消息、最后一个 partial 与流错误
+func (a *Agent) consumeStream(ctx context.Context) (*llm.AssistantMessage, llm.AssistantMessage, llm.StopReason, error, error) {
+	partial := a.newAssistantMessage()
+	if err := a.emit(llm.MessageStartEvent{Message: partial}); err != nil {
+		return nil, partial, llm.StopReasonError, nil, err
+	}
+	// 每轮单独派生 stream ctx，错误事件分支只取消它
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+	requestContext := contextForModel(a.ctx)
+	events, streamErr := a.stream(streamCtx, a.cfg.Model, requestContext, llm.Options{
+		ThinkingLevel: a.cfg.ThinkingLevel,
+		SessionID:     a.cfg.SessionID,
+	})
+
+	var final *llm.AssistantMessage
+	var streamReason llm.StopReason
+	var eventErr error
+	toolCallArguments := make(map[int]string)
+	if streamErr == nil {
+		for event := range events {
+			// 消费者失败或模型已终止时仍排空通道，等待生产者释放连接
+			if eventErr != nil || streamErr != nil {
+				continue
+			}
+			switch ev := event.(type) {
+			case llm.AssistantMessageStartEvent:
+				if ev.Partial != nil {
+					partial = cloneAssistantMessage(*ev.Partial)
+				}
+			case llm.AssistantMessageTextStartEvent, llm.AssistantMessageTextDeltaEvent, llm.AssistantMessageTextEndEvent,
+				llm.AssistantMessageThinkingStartEvent, llm.AssistantMessageThinkingDeltaEvent, llm.AssistantMessageThinkingEndEvent,
+				llm.AssistantMessageToolCallStartEvent, llm.AssistantMessageToolCallDeltaEvent, llm.AssistantMessageToolCallEndEvent:
+				if snapshot := assistantEventPartial(ev); snapshot != nil {
+					partial = cloneAssistantMessage(*snapshot)
+				} else {
+					appendAssistantEvent(&partial, ev, toolCallArguments)
+				}
+				if err := a.emit(llm.MessageUpdateEvent{
+					Message:               cloneAssistantMessage(partial),
+					AssistantMessageEvent: ev,
+				}); err != nil {
+					eventErr = err
+					streamCancel()
+				}
+			case llm.AssistantMessageDoneEvent:
+				final = ev.Message
+			case llm.AssistantMessageErrorEvent:
+				streamErr = ev.Err
+				if streamErr == nil {
+					streamErr = errors.New("agent: model stream returned empty error")
+				}
+				streamReason = ev.Reason
+				if streamReason != llm.StopReasonAborted && streamReason != llm.StopReasonError {
+					streamReason = llm.StopReasonError
+				}
+				if ev.Partial != nil {
+					partial = cloneAssistantMessage(*ev.Partial)
+				}
+				streamCancel()
+			}
+		}
+	}
+	streamCause := streamCtx.Err()
+	streamCancel()
+	if streamErr != nil && ctx.Err() != nil {
+		streamReason = llm.StopReasonAborted
+	}
+	if eventErr != nil {
+		return nil, partial, streamReason, nil, eventErr
+	}
+	if streamErr == nil && final == nil {
+		if errors.Is(streamCause, context.Canceled) || errors.Is(streamCause, context.DeadlineExceeded) {
+			streamReason = llm.StopReasonAborted
+		} else {
+			streamErr = errors.New("agent: stream ended without a final message")
+		}
+	}
+	return final, partial, streamReason, streamErr, nil
+}
+
+// commitTurn 提交最终 assistant 消息并结算费用，返回补全元数据后的消息
+func (a *Agent) commitTurn(final llm.AssistantMessage, acknowledgeTransient func()) (llm.AssistantMessage, error) {
+	setAssistantMetadata(&final, a.cfg.Model)
+	if final.Usage.Cost == nil {
+		final.Usage.Cost = llm.PriceUsage(a.cfg.Model, final.Usage)
+	}
+	if err := a.commitMessages([]llm.Message{final}); err != nil {
+		return final, err
+	}
+	if acknowledgeTransient != nil {
+		acknowledgeTransient()
+	}
+	return final, nil
+}
+
+// decideTurn 判断本轮结束后主循环的去向
+func (a *Agent) decideTurn(final llm.AssistantMessage, turns int) turnDecision {
+	if a.maxTurns > 0 && turns >= a.maxTurns {
+		return turnMaxReached
+	}
+	// 输出在达到模型上限前被截断且启用了编排层：跳过截断消息里的工具调用，
+	// 正常提交本轮后由编排层驱动溢出恢复；达到上限的截断是正常输出限制
+	if a.hooks.PrepareRequest != nil && isRecoverableLength(final, a.cfg.Model) {
+		return turnTruncated
+	}
+	if len(assistantToolCalls(final)) == 0 {
+		return turnFinished
+	}
+	return turnContinue
+}
+
+// endTurn 广播 turn 结束并开启下一轮
+func (a *Agent) endTurn(firstMessageIndex int, final llm.AssistantMessage, toolResults []llm.ToolResultMessage) error {
+	if toolResults == nil {
+		if err := a.emit(llm.TurnEndEvent{Message: final}); err != nil {
+			return err
+		}
+		return a.emitAgentEnd(firstMessageIndex)
+	}
+	return a.emit(llm.TurnEndEvent{Message: final, ToolResults: toolResults})
 }
 
 // contextForModel 过滤已错误收尾的 assistant，避免取消/失败文本污染下一次请求
@@ -909,9 +921,8 @@ func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMess
 	case llm.AssistantMessageTextDeltaEvent:
 		index = event.ContentIndex
 		if ensureAssistantContentSlot(message, index) {
-			text, _ := message.Content[index].(llm.TextContent)
-			text.Text += event.Delta
-			message.Content[index] = text
+			// slot 不是文本时保持原类型，不做静默覆写
+			llm.AppendText(message, index, event.Delta)
 		}
 	case llm.AssistantMessageTextEndEvent:
 		index = event.ContentIndex
@@ -922,9 +933,8 @@ func appendAssistantEvent(message *llm.AssistantMessage, event llm.AssistantMess
 	case llm.AssistantMessageThinkingDeltaEvent:
 		index = event.ContentIndex
 		if ensureAssistantContentSlot(message, index) {
-			thinking, _ := message.Content[index].(llm.ThinkingContent)
-			thinking.Thinking += event.Delta
-			message.Content[index] = thinking
+			// slot 不是思考时保持原类型，不做静默覆写
+			llm.AppendThinking(message, index, event.Delta)
 		}
 	case llm.AssistantMessageThinkingEndEvent:
 		index = event.ContentIndex

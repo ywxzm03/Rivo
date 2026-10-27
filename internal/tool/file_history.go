@@ -18,38 +18,39 @@ type FileHistoryContentTracker interface {
 	TrackEditContent(context.Context, string, string, []byte, os.FileMode) error
 }
 
-// trackFileEdit 在写盘前登记备份。
-// tracker 常由 FileHistory() 直接返回 typed-nil 指针,接口判空对它无效,
-// 因此这里再用 reflect 排除 nil 指针,避免写文件时解引用崩溃
-func trackFileEdit(ctx context.Context, tracker FileHistoryTracker, path string) {
+// trackFileEdit 在写盘前登记备份，返回备份失败原因供调用方提示用户
+func trackFileEdit(ctx context.Context, tracker FileHistoryTracker, path string) error {
 	if tracker == nil {
-		return
-	}
-	if value := reflect.ValueOf(tracker); value.Kind() == reflect.Pointer && value.IsNil() {
-		return
+		return nil
 	}
 	messageID := llm.CurrentUserMessageID(ctx)
 	if messageID == "" {
-		return
+		return nil
 	}
-	// 备份失败不阻止工具继续写盘
-	_ = tracker.TrackEdit(ctx, messageID, path)
+	return tracker.TrackEdit(ctx, messageID, path)
 }
 
-func trackFileEditContent(ctx context.Context, tracker FileHistoryTracker, path string, content []byte, mode os.FileMode) {
+// trackFileEditContent 优先用内容快照登记备份，tracker 不支持时退回按路径备份
+func trackFileEditContent(ctx context.Context, tracker FileHistoryTracker, path string, content []byte, mode os.FileMode) error {
 	if tracker == nil {
-		return
-	}
-	if value := reflect.ValueOf(tracker); value.Kind() == reflect.Pointer && value.IsNil() {
-		return
+		return nil
 	}
 	messageID := llm.CurrentUserMessageID(ctx)
 	if messageID == "" {
-		return
+		return nil
 	}
 	if contentTracker, ok := tracker.(FileHistoryContentTracker); ok {
-		_ = contentTracker.TrackEditContent(ctx, messageID, path, content, mode)
-		return
+		return contentTracker.TrackEditContent(ctx, messageID, path, content, mode)
 	}
-	trackFileEdit(ctx, tracker, path)
+	return tracker.TrackEdit(ctx, messageID, path)
+}
+
+// Tracker 把可能为 nil 的具体指针归一成真正的 nil 接口，
+// 避免 typed-nil 让接口判空失效
+func Tracker[T FileHistoryTracker](tracker T) FileHistoryTracker {
+	value := reflect.ValueOf(tracker)
+	if !value.IsValid() || (value.Kind() == reflect.Pointer && value.IsNil()) {
+		return nil
+	}
+	return tracker
 }

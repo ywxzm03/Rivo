@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 )
@@ -97,12 +96,7 @@ func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 		close(events)
 		return events, nil
 	}
-	if err := a.SetModel(deepseek.ProviderID, deepseek.DefaultModel); err == nil {
-		// SetModel 会覆盖 StreamFn；改为直接注入测试流
-		a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: next})
-	} else {
-		a.agent.Reconfigure(agent.Options{Config: a.agent.Config(), Stream: next})
-	}
+	a.agent.Reconfigure(a.agent.Config(), next)
 	if _, err := a.Run(context.Background(), "again"); err != nil {
 		t.Fatal(err)
 	}

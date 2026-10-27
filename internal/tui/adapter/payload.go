@@ -8,22 +8,20 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
-// payloadMessage 把编辑器产出转成领域消息；图片按 base64 原样搬运
+// payloadMessage 把编辑器产出转成领域消息；转换规则只在 PendingPayload.UserMessage 里定义一次
 func payloadMessage(payload *tui.ComposerPayload) *llm.UserMessage {
 	if payload == nil {
 		return nil
 	}
-	content := make([]llm.Content, 0, len(payload.Images)+1)
-	if payload.Text != "" {
-		content = append(content, llm.TextContent{Text: payload.Text})
-	}
+	converted := agent.PendingPayload{Text: payload.Text}
 	for _, image := range payload.Images {
-		content = append(content, llm.ImageContent{Data: image.Data, MIMEType: image.MIMEType})
+		converted.Images = append(converted.Images, agent.ImagePart{Data: image.Data, MIMEType: image.MIMEType})
 	}
-	if len(content) == 0 {
+	message := converted.UserMessage()
+	if len(message.Content) == 0 {
 		return nil
 	}
-	return &llm.UserMessage{Content: content}
+	return &message
 }
 
 // payloadFromMessage 是 payloadMessage 的逆变换，用于把已入队的消息回填到编辑器
@@ -72,24 +70,12 @@ func payloadsFromMessages(messages []llm.UserMessage) []tui.ComposerPayload {
 	return payloads
 }
 
-// pendingMessage 把队列内容转成领域消息，保留图片
-func pendingMessage(payload agent.PendingPayload) llm.UserMessage {
-	content := make([]llm.Content, 0, len(payload.Images)+1)
-	if payload.Text != "" {
-		content = append(content, llm.TextContent{Text: payload.Text})
-	}
-	for _, image := range payload.Images {
-		content = append(content, llm.ImageContent{Data: image.Data, MIMEType: image.MIMEType})
-	}
-	return llm.UserMessage{Content: content}
-}
-
 // queueUserMessages 把队列内容转成领域消息，供既有投影逻辑复用
 func queueUserMessages(app *app.App, kind agent.QueueKind) []llm.UserMessage {
 	payloads := app.QueuePayloads(kind)
 	messages := make([]llm.UserMessage, 0, len(payloads))
 	for _, payload := range payloads {
-		messages = append(messages, pendingMessage(payload))
+		messages = append(messages, payload.UserMessage())
 	}
 	return messages
 }
@@ -99,7 +85,7 @@ func queueUserMessagesFrom(app *app.App, kind agent.QueueKind) []llm.UserMessage
 	payloads := app.TakeQueue(kind)
 	messages := make([]llm.UserMessage, 0, len(payloads))
 	for _, payload := range payloads {
-		messages = append(messages, pendingMessage(payload))
+		messages = append(messages, payload.UserMessage())
 	}
 	return messages
 }

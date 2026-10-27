@@ -21,13 +21,13 @@ func TestBackgroundBashCanBeStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	details, ok := result.Details.(map[string]any)
+	details, ok := result.Details.(BackgroundOutput)
 	if !ok {
 		t.Fatalf("details = %#v, want task details", result.Details)
 	}
-	id, _ := details["task_id"].(string)
+	id := details.TaskID
 	if id == "" {
-		t.Fatalf("task ID = %#v, want non-empty", details["task_id"])
+		t.Fatalf("task ID = %#v, want non-empty", details.TaskID)
 	}
 	stop, err := taskstoptool.New(store).Execute(context.Background(), map[string]any{"task_id": id})
 	if err != nil {

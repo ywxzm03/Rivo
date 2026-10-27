@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -64,7 +63,7 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, taskMessageText(*payloadMessage(request.Message)))
+				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, llm.TextOf(payloadMessage(request.Message).Content))
 			}
 		case "dequeue":
 			// 从子任务队列撤回:与主 agent 一样,取出后交回编辑器
@@ -91,16 +90,6 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 		}
 		return result
 	}
-}
-
-func taskMessageText(message llm.UserMessage) string {
-	var parts []string
-	for _, content := range message.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // transcriptCache 是 TUI 侧的 transcript 增量投影缓存。
@@ -325,9 +314,11 @@ func projectSubagentMessages(taskID string, start int, messages []llm.Message) [
 				case llm.ToolCall:
 					// 从磁盘读到的调用参数已经完整,ArgsComplete 必须置真,
 					// 否则渲染层会把它当成"参数还在流式写入"而跳过
-					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolPending, ArgsComplete: true, Round: index}
+					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeToolArguments(content.Arguments), Status: tui.ToolPending, ArgsComplete: true, Round: index}
 					if result, ok := results[content.ID]; ok {
-						call.Result = formatTaskToolResult(result)
+						// 与主视图一致：Details 单独走结构化字段，不混进结果正文
+						call.Result = formatToolResult(llm.ToolResult{Content: result.Content, IsError: result.IsError})
+						call.Details = encodeToolDetails(result.Details)
 						call.Status = tui.ToolSuccess
 						if result.IsError {
 							call.Status = tui.ToolError
@@ -364,30 +355,6 @@ func taskMessageContent(content []llm.Content) (string, []tui.ImageView) {
 	return text, images
 }
 
-func encodeTaskArguments(arguments map[string]any) string {
-	data, err := json.MarshalIndent(arguments, "", "  ")
-	if err != nil {
-		return fmt.Sprint(arguments)
-	}
-	return string(data)
-}
-
-func formatTaskToolResult(result llm.ToolResultMessage) string {
-	var parts []string
-	for _, content := range result.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	if result.Details != nil {
-		data, err := json.MarshalIndent(result.Details, "", "  ")
-		if err == nil {
-			parts = append(parts, string(data))
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
 // messageTexts 把队列消息投影成首行文本
 func messageTexts(messages []llm.UserMessage) []string {
 	if len(messages) == 0 {
@@ -395,7 +362,7 @@ func messageTexts(messages []llm.UserMessage) []string {
 	}
 	texts := make([]string, 0, len(messages))
 	for _, message := range messages {
-		if text := taskMessageText(message); text != "" {
+		if text := llm.TextOf(message.Content); text != "" {
 			texts = append(texts, text)
 		}
 	}

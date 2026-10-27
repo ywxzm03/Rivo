@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
@@ -38,7 +40,7 @@ func formatToolResult(result llm.ToolResult) string {
 }
 
 // encodeToolDetails 把工具的结构化详情编码成 JSON，供渲染层取 diff 等字段
-func encodeToolDetails(details any) string {
+func encodeToolDetails(details llm.ToolDetails) string {
 	if details == nil {
 		return ""
 	}
@@ -50,20 +52,20 @@ func encodeToolDetails(details any) string {
 }
 
 func assistantContent(message llm.AssistantMessage) (string, []tui.ThinkingBlockView, []llm.ToolCall) {
-	var text string
+	var text strings.Builder
 	var blocks []tui.ThinkingBlockView
 	var calls []llm.ToolCall
 	for index, content := range message.Content {
 		switch content := content.(type) {
 		case llm.TextContent:
-			text += content.Text
+			text.WriteString(content.Text)
 		case llm.ThinkingContent:
 			blocks = append(blocks, tui.ThinkingBlockView{Index: index, Text: content.Thinking})
 		case llm.ToolCall:
 			calls = append(calls, content)
 		}
 	}
-	return text, blocks, calls
+	return text.String(), blocks, calls
 }
 
 func toolCallView(call llm.ToolCall, round int) tui.ToolCallView {
@@ -104,7 +106,7 @@ func (r *Runtime) newToolGroupLocked(anchorID string) *tui.ToolGroupView {
 
 func (r *Runtime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
-		return current.Clone()
+		return current
 	}
 	group := r.newToolGroupLocked(anchorID)
 	r.activeToolAnchorID = anchorID
@@ -120,7 +122,7 @@ func (r *Runtime) ensureToolGroupLocked(anchorID string) *tui.ToolGroupView {
 func (r *Runtime) setToolGroupLocked(group *tui.ToolGroupView) {
 	index, _ := r.groupAnchorLocked()
 	if index >= 0 {
-		r.messages[index].ToolGroup = group.Clone()
+		r.messages[index].ToolGroup = group
 		r.messages[index].Revision++
 	}
 }
@@ -164,13 +166,11 @@ func (r *Runtime) sealToolGroupLocked() {
 	if index < 0 || current == nil {
 		return
 	}
-	group := current.Clone()
-	for i := range group.Calls {
-		if group.Calls[i].Status == tui.ToolPending {
-			group.Calls[i].Status = tui.ToolInterrupted
+	for i := range current.Calls {
+		if current.Calls[i].Status == tui.ToolPending {
+			current.Calls[i].Status = tui.ToolInterrupted
 		}
 	}
-	r.messages[index].ToolGroup = group
 	r.messages[index].Revision++
 	r.activeToolAnchorID = ""
 }
@@ -263,7 +263,7 @@ func (r *Runtime) liveAssistantLocked(message llm.AssistantMessage, id string, s
 	text, blocks, calls := assistantContent(message)
 	group := (*tui.ToolGroupView)(nil)
 	if index, current := r.groupAnchorLocked(); index >= 0 && current != nil {
-		group = current.Clone()
+		group = current
 	}
 	round := r.assistantTurn
 	// 参数是否写完：toolcall_end 或后续执行事件都会把它标成 true
@@ -386,7 +386,7 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 			switch current := message.(type) {
 			case llm.UserMessage:
 				seal()
-				text := textContent(current.Content)
+				text := llm.TextOf(current.Content)
 				images := imageViews(current.Content)
 				if text != "" || len(images) > 0 {
 					projected = append(projected, tui.Message{ID: id, Role: "user", Text: text, Images: images, Skill: skillInvocation(text)})
@@ -445,7 +445,7 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 					toolIndex = len(group.Calls) - 1
 				}
 				group.Calls[toolIndex].Name = current.ToolName
-				group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, Details: current.Details, IsError: current.IsError})
+				group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, IsError: current.IsError})
 				group.Calls[toolIndex].Details = encodeToolDetails(current.Details)
 				group.Calls[toolIndex].Status = tui.ToolSuccess
 				if current.IsError {
@@ -457,4 +457,288 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 	}
 	seal()
 	return projected
+}
+
+// eventResult 是单个事件投影出的待发布结果
+type eventResult struct {
+	// notifications 直接透传给 TUI 的消息
+	notifications []tea.Msg
+	// message 需要 upsert 的消息
+	message *tui.Message
+	// previousID 非空表示该消息换了 ID
+	previousID string
+	// status 非空表示要更新状态栏
+	status string
+	// queueChanged 表示队列镜像需要重发
+	queueChanged bool
+}
+
+func (r *Runtime) handleEvent(event llm.AgentEvent) error {
+	r.mu.Lock()
+	result := eventResult{}
+	previousToolAnchor := r.activeToolAnchorID
+	r.applyEventLocked(event, &result)
+	notifications := result.notifications
+	if result.message != nil {
+		r.upsertLocked(*result.message)
+		if result.previousID != "" {
+			notifications = append(notifications, tui.MessageCommittedMsg{PreviousID: result.previousID, Message: r.publishLocked(r.messageIndexLocked(result.message.ID))})
+		} else {
+			notifications = append(notifications, tui.MessageMsg(r.publishLocked(r.messageIndexLocked(result.message.ID))))
+		}
+	}
+	if previousToolAnchor != "" && r.activeToolAnchorID == "" {
+		if index := r.messageIndexLocked(previousToolAnchor); index >= 0 {
+			notifications = append(notifications, tui.MessageMsg(r.publishLocked(index)))
+		}
+	}
+	if result.status != "" {
+		notifications = append(notifications, tui.StatusMsg(result.status))
+	}
+	if result.queueChanged && r.app != nil {
+		notifications = append(notifications, tui.QueueStateMsg{
+			Steering: r.app.QueueMessages(agent.QueueSteering), SteeringInputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueSteering)), SteeringRevision: r.app.QueueRevision(agent.QueueSteering),
+			FollowUp: r.app.QueueMessages(agent.QueueFollowUp), FollowUpInputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueFollowUp)), FollowUpRevision: r.app.QueueRevision(agent.QueueFollowUp),
+		})
+		notifications = append(notifications, tui.SteeringStateMsg{Messages: r.app.QueueMessages(agent.QueueSteering), Inputs: payloadsFromMessages(queueUserMessages(r.app, agent.QueueSteering)), Revision: r.app.QueueRevision(agent.QueueSteering)})
+	}
+	send := r.send
+	r.mu.Unlock()
+	// 通知可能阻塞，发送时不持有投影或取消所需的锁
+	if send != nil {
+		for _, message := range notifications {
+			send(message)
+		}
+	}
+	return nil
+}
+
+// applyEventLocked 按事件种类更新投影，结果写入 result
+func (r *Runtime) applyEventLocked(event llm.AgentEvent, result *eventResult) {
+	switch event := event.(type) {
+	case llm.AgentStartEvent:
+		r.applyAgentStartLocked(event, result)
+	case llm.TurnStartEvent:
+		if r.turnStarted.IsZero() {
+			r.turnStarted = time.Now()
+		}
+	case llm.MessageStartEvent:
+		r.applyMessageStartLocked(event, result)
+	case llm.MessageUpdateEvent:
+		if assistant, ok := event.Message.(llm.AssistantMessage); ok {
+			converted, ok := r.liveAssistantLocked(assistant, r.currentAssistantID, event.AssistantMessageEvent)
+			if ok {
+				result.message = &converted
+			}
+		}
+	case llm.MessageEndEvent:
+		if projected, renamed := r.projectMessageEnd(event); projected != nil {
+			result.message, result.previousID = projected, renamed
+		}
+	case llm.AgentEndEvent:
+		r.applyAgentEndLocked(event, result)
+	case llm.ToolExecutionStartEvent:
+		converted := r.toolStartLocked(event)
+		result.message = &converted
+	case llm.ToolExecutionUpdateEvent:
+		converted := r.toolUpdateLocked(event)
+		result.message = &converted
+	case llm.ToolExecutionEndEvent:
+		converted := r.toolEndLocked(event)
+		result.message = &converted
+	case llm.WarningEvent:
+		r.warningSeq++
+		result.message = &tui.Message{
+			ID:   fmt.Sprintf("%s/warning/%d", r.namespace, r.warningSeq),
+			Role: "notice",
+			Text: "Warning: " + event.Message,
+		}
+	case llm.CompactionStartEvent:
+		result.status = "Compacting context…"
+	case llm.CompactionEndEvent:
+		r.applyCompactionEndLocked(event, result)
+	}
+}
+
+// applyAgentStartLocked 记录 turn 起点并补发后台 run 通知
+func (r *Runtime) applyAgentStartLocked(event llm.AgentStartEvent, result *eventResult) {
+	if r.turnStarted.IsZero() || !r.turnRetrying {
+		r.turnStarted = time.Now()
+	}
+	r.turnRetrying = false
+	// 用户请求驱动的 run 已由 TUI 自己置忙碌态;这里只补后台 run
+	if !r.externalRunSeen && !r.operationActive {
+		r.externalRunSeen = true
+		result.notifications = append(result.notifications, tui.BackgroundRunMsg{Running: true})
+	}
+}
+
+// applyMessageStartLocked 为用户或 assistant 消息开一个新投影
+func (r *Runtime) applyMessageStartLocked(event llm.MessageStartEvent, result *eventResult) {
+	switch current := event.Message.(type) {
+	case llm.UserMessage:
+		r.sealToolGroupLocked()
+		r.userMessages++
+		if r.userMessages > 1 {
+			result.queueChanged = true
+			r.userID = fmt.Sprintf("%s/live/%d/user/%d", r.namespace, r.sequence, r.userMessages)
+		}
+		converted, ok := r.messageFromLLMLocked(event.Message, r.userID)
+		if ok {
+			result.message = &converted
+		}
+	case llm.AssistantMessage:
+		r.assistantTurn++
+		r.currentAssistantID = fmt.Sprintf("%s/live/%d/assistant/%d", r.namespace, r.sequence, r.assistantTurn)
+		converted, ok := r.liveAssistantLocked(current, r.currentAssistantID, nil)
+		if ok {
+			result.message = &converted
+		}
+	}
+}
+
+// applyAgentEndLocked 收尾工具组，重试时保留分组
+func (r *Runtime) applyAgentEndLocked(event llm.AgentEndEvent, result *eventResult) {
+	if !event.WillRetry && r.externalRunSeen {
+		r.externalRunSeen = false
+		result.notifications = append(result.notifications, tui.BackgroundRunMsg{Running: false})
+	}
+	r.sealToolGroupLocked()
+	if event.WillRetry {
+		r.turnRetrying = true
+		return
+	}
+	if index := r.addDividerLocked(); index >= 0 {
+		result.notifications = append(result.notifications, tui.MessageMsg(r.publishLocked(index)))
+	}
+	r.turnStarted = time.Time{}
+	r.turnRetrying = false
+}
+
+// applyCompactionEndLocked 更新压缩结果提示
+func (r *Runtime) applyCompactionEndLocked(event llm.CompactionEndEvent, result *eventResult) {
+	if event.Error != "" {
+		result.status = "Compaction failed"
+		r.compactionNotice = nil
+		return
+	}
+	result.status = "Working"
+	r.resetNeeded = true
+	r.compactionNoticeSeq++
+	notice := tui.Message{
+		ID:   fmt.Sprintf("%s/compaction/%d", r.namespace, r.compactionNoticeSeq),
+		Role: "summary",
+		Text: fmt.Sprintf("Context compacted (%s): %d -> %d tokens", event.Reason, event.TokensBefore, event.TokensAfter),
+	}
+	r.compactionNotice = &notice
+}
+
+func (r *Runtime) upsertLocked(message tui.Message) {
+	index := r.messageIndexLocked(message.ID)
+	if message.ToolGroup != nil {
+		r.hasToolGroup = true
+	}
+	if message.Role == "assistant" && message.Text != "" {
+		if index < 0 {
+			r.lastAssistantIndex = len(r.messages)
+		} else {
+			r.lastAssistantIndex = index
+		}
+	}
+	if index >= 0 {
+		message.Revision = r.messages[index].Revision + 1
+		r.messages[index] = message
+		return
+	}
+	if message.Revision == 0 {
+		message.Revision = 1
+	}
+	r.messageIndex[message.ID] = len(r.messages)
+	r.messages = append(r.messages, message)
+}
+
+// publishLocked 复制要发给 TUI 的消息，保证渲染层持有快照，
+// 内部后续对 ToolGroup 的原地修改不会污染已发布的状态
+func (r *Runtime) publishLocked(index int) tui.Message {
+	if index < 0 || index >= len(r.messages) {
+		return tui.Message{}
+	}
+	message := r.messages[index]
+	if message.ToolGroup != nil {
+		message.ToolGroup = message.ToolGroup.Clone()
+	}
+	return message
+}
+
+func (r *Runtime) sourceID(source, part string) string {
+	return r.namespace + "/entry/" + source + "/" + part
+}
+
+func (r *Runtime) renameMessageLocked(oldID, newID string) {
+	if index := r.messageIndexLocked(oldID); index >= 0 {
+		delete(r.messageIndex, oldID)
+		r.messageIndex[newID] = index
+		r.messages[index].ID = newID
+	}
+	if r.userID == oldID {
+		r.userID = newID
+	}
+	if r.currentAssistantID == oldID {
+		r.currentAssistantID = newID
+	}
+	if r.activeToolAnchorID == oldID {
+		r.activeToolAnchorID = newID
+	}
+}
+
+func (r *Runtime) replaceMessagesLocked(view ctxview.ContextView) {
+	messages := preserveDisplayMetadata(r.projectContext(view), r.messages)
+	r.messages = messages
+	r.messageIndex = nil
+	r.activeToolAnchorID, r.currentAssistantID = "", ""
+}
+
+func (r *Runtime) resetProjectionLocked() {
+	r.lastAssistantIndex = 0
+	r.hasToolGroup = false
+	r.operationLastAssistant, r.operationHadToolGroup = 0, false
+	r.operationStart = 0
+	r.operationEntries = nil
+	r.userID = ""
+	r.assistantTurn = 0
+	r.currentAssistantID, r.activeToolAnchorID = "", ""
+	r.toolStarted = nil
+	r.turnStarted, r.turnRetrying = time.Time{}, false
+	r.compactionNotice = nil
+}
+
+func (r *Runtime) partialAssistantLocked() *tui.Message {
+	for i := len(r.messages) - 1; i >= 0; i-- {
+		message := r.messages[i]
+		if message.Role == "assistant" && message.ID == r.currentAssistantID && (message.Text != "" || message.ToolGroup != nil || message.Aborted) {
+			copy := message
+			return &copy
+		}
+		if message.Role == "user" {
+			break
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) hasMessageLocked(message tui.Message) bool {
+	return r.messageIndexLocked(message.ID) >= 0
+}
+
+func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Message, bool) {
+	converted := tui.Message{ID: id}
+	switch message := message.(type) {
+	case llm.UserMessage:
+		converted.Role, converted.Text = "user", llm.TextOf(message.Content)
+		converted.Images = imageViews(message.Content)
+		converted.Skill = skillInvocation(converted.Text)
+	default:
+		return tui.Message{}, false
+	}
+	return converted, converted.Text != "" || len(converted.Images) > 0
 }

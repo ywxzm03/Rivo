@@ -186,6 +186,10 @@ type AgentLaunched struct {
 	WorktreePath string `json:"worktreePath,omitempty"`
 }
 
+func (AgentLaunched) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[AgentLaunched]("agentId") }
+
 type AgentResult struct {
 	AgentID           string      `json:"agentId"`
 	Content           []TextBlock `json:"content"`
@@ -221,6 +225,10 @@ type StopOutput struct {
 	Type    Type   `json:"task_type"`
 	Command string `json:"command"`
 }
+
+func (StopOutput) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[StopOutput]("task_type") }
 
 type StopTaskError struct {
 	Code    string

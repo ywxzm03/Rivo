@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 const lsDefaultLimit = 500
@@ -52,13 +53,23 @@ func (l *Ls) Parameters() map[string]any {
 }
 
 // Execute 列出目录内容，目录带斜杠后缀，撞到条目数或字节上限时附上提示
+// lsParams 是 ls 工具的参数形状
+type lsParams struct {
+	Path  string `json:"path"`
+	Limit int    `json:"limit"`
+}
+
 func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.取参数，limit 非正数当作没给
-	path, _ := args["path"].(string)
+	params, err := toolargs.Decode[lsParams](args)
+	if err != nil {
+		return llm.ToolResult{}, err
+	}
+	path := params.Path
 	if path == "" {
 		path = "."
 	}
-	limit, _ := argInt(args, "limit")
+	limit := params.Limit
 	if limit <= 0 {
 		limit = lsDefaultLimit
 	}

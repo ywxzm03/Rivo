@@ -106,7 +106,7 @@ func TestManualCompactionHidesPromptAfterCompletionAndResume(t *testing.T) {
 			t.Fatalf("model context lost compaction entry: %d entries", len(view.Entries))
 		}
 		messages := view.Messages()
-		if len(messages) != 4 || messages[0].Role() != llm.RoleSystem || textContent(messages[1].(llm.UserMessage).Content) != ctxview.WrappedSummary("internal compaction summary") {
+		if len(messages) != 4 || messages[0].Role() != llm.RoleSystem || llm.TextOf(messages[1].(llm.UserMessage).Content) != ctxview.WrappedSummary("internal compaction summary") {
 			t.Fatalf("model context lost summary or snapshot: %d messages", len(messages))
 		}
 	}
