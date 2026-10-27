@@ -61,8 +61,10 @@ type Coordinator struct {
 	// mu 只保护基线分节；runMu 串行化编排
 	mu    sync.Mutex
 	runMu sync.Mutex
-	// transientMessages 提供只在单次请求内出现的附件,例如子任务完成通知
+	// transientMessages 提供只在单次请求内出现的附件
 	transientMessages func() []llm.Message
+	// notificationClaimer 认领待落盘的子任务通知
+	notificationClaimer func() ([]llm.Message, func())
 	// transientAck 在请求成功提交后确认这批附件已被消费
 	transientAck func()
 	taskEvictor  func() int
@@ -192,6 +194,14 @@ func (c *Coordinator) SetTransientMessages(provider func() []llm.Message) {
 	c.mu.Unlock()
 }
 
+// SetNotificationClaimer 安装子任务通知的认领器。
+// 通知由 agent 每轮开头认领并落盘,不再走 transient 附件
+func (c *Coordinator) SetNotificationClaimer(claim func() ([]llm.Message, func())) {
+	c.mu.Lock()
+	c.notificationClaimer = claim
+	c.mu.Unlock()
+}
+
 // SetTransientAck 安装请求成功后的确认回调
 func (c *Coordinator) SetTransientAck(ack func()) {
 	c.mu.Lock()
@@ -214,6 +224,12 @@ func (c *Coordinator) takeTransientMessages() []llm.Message {
 		return nil
 	}
 	return provider()
+}
+
+func (c *Coordinator) takeNotificationClaimer() func() ([]llm.Message, func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.notificationClaimer
 }
 
 func (c *Coordinator) takeTransientAck() func() {
@@ -245,6 +261,7 @@ func (c *Coordinator) PrepareRequest(ctx context.Context, current agent.Prepared
 	current.Context.Messages = c.m.BuildContext().Messages()
 	current.Context.Messages = append(current.Context.Messages, c.takeTransientMessages()...)
 	current.TransientAck = c.takeTransientAck()
+	current.ClaimNotifications = c.takeNotificationClaimer()
 	current.Compacted = compacted
 	return current, nil
 }

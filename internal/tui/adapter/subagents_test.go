@@ -22,7 +22,7 @@ func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Runtime{}
-	views := r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views := r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views) != 1 {
 		t.Fatalf("views = %d, want 1", len(views))
 	}
@@ -30,7 +30,7 @@ func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 		t.Fatalf("projection did not read the transcript from disk: %+v", views[0].Messages)
 	}
 	// 1.重复快照不得重复投影同一段 transcript
-	views = r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views = r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views[0].Messages) != 1 {
 		t.Fatalf("repeated snapshot duplicated the transcript: %+v", views[0].Messages)
 	}
@@ -38,7 +38,7 @@ func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 	if err := manager.AppendMessage(llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}}); err != nil {
 		t.Fatal(err)
 	}
-	views = r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views = r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views[0].Messages) != 2 || views[0].Messages[1].Text != "answer" {
 		t.Fatalf("incremental projection = %+v", views[0].Messages)
 	}
@@ -57,7 +57,7 @@ func TestProjectSubagentTasksSkipsUnviewedTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Runtime{}
-	views := r.projectSubagentTasks(store, store.Snapshot(), "")
+	views := r.projectSubagentSnapshot(store, store.Snapshot(), "").Tasks
 	if len(views) != 1 || len(views[0].Messages) != 0 {
 		t.Fatalf("unviewed task projected messages: %+v", views)
 	}
@@ -80,7 +80,7 @@ func TestProjectSubagentTasksReProjectsPendingToolCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Runtime{}
-	views := r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views := r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views) != 1 || len(views[0].Messages) != 1 {
 		t.Fatalf("pending projection = %+v", views)
 	}
@@ -91,7 +91,7 @@ func TestProjectSubagentTasksReProjectsPendingToolCall(t *testing.T) {
 	if err := manager.AppendMessage(llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file body"}}}); err != nil {
 		t.Fatal(err)
 	}
-	views = r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views = r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views[0].Messages) != 1 {
 		t.Fatalf("result duplicated the assistant message: %+v", views[0].Messages)
 	}
@@ -120,7 +120,7 @@ func TestProjectSubagentTasksSealsTerminalTail(t *testing.T) {
 		t.Fatal("completion failed")
 	}
 	r := &Runtime{}
-	views := r.projectSubagentTasks(store, store.Snapshot(), "agent-1")
+	views := r.projectSubagentSnapshot(store, store.Snapshot(), "agent-1").Tasks
 	if len(views) != 1 || len(views[0].Messages) != 1 {
 		t.Fatalf("terminal projection = %+v", views)
 	}

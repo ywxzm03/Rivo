@@ -202,8 +202,6 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 
 	manager := subagent.NewManager(taskpkg.NewStore(), nil)
 	manager.Store().SetTranscriptReader(session.ReadMessages)
-	var notificationMu sync.Mutex
-	var notificationBatch int
 	tools := registry.Build(registry.Deps{
 		WorkingDir:     cwd,
 		SupportsImages: model.SupportsImages,
@@ -214,19 +212,22 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 	})
 
 	coord := NewCoordinator(sm, onEvent)
-	coord.SetTransientMessages(func() []llm.Message {
-		notifications := manager.Store().PeekNotifications()
-		notificationMu.Lock()
-		notificationBatch = len(notifications)
-		notificationMu.Unlock()
-		return subagentNotificationMessages(notifications)
-	})
-	coord.SetTransientAck(func() {
-		notificationMu.Lock()
-		count := notificationBatch
-		notificationBatch = 0
-		notificationMu.Unlock()
-		manager.Store().AckNotifications(count)
+	// 子任务通知由 agent 每轮开头认领并落盘进主会话,
+	// 落盘成功才 ack:模型后续轮次仍能回看,不会"忘记"自己刚被告知的结果
+	coord.SetNotificationClaimer(func() ([]llm.Message, func()) {
+		claimed := manager.Store().ClaimNotifications()
+		if claimed.Count == 0 {
+			return nil, nil
+		}
+		ids := make([]string, 0, claimed.Count)
+		for _, notification := range claimed.Notifications {
+			ids = append(ids, notification.TaskID)
+		}
+		ack := func() {
+			manager.Store().AckNotifications(claimed.Count)
+			manager.Store().MarkNotified(ids)
+		}
+		return subagentNotificationMessages(claimed.Notifications), ack
 	})
 	// 每个请求前回收宽限期已过的终态子任务
 	coord.SetTaskEvictor(manager.Store().EvictExpired)

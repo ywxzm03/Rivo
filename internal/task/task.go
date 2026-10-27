@@ -53,17 +53,20 @@ func StoppedAgentSummary(description string, reason StopReason) string {
 
 // StateBase 是 BashState 与 AgentState 共享的公共 lifecycle 状态
 type StateBase struct {
-	ID             string
-	Type           Type
-	Status         Status
-	Description    string
-	ToolUseID      string
-	StartTime      time.Time
-	EndTime        *time.Time
-	OutputFile     string
-	Notified       bool
-	LifecycleToken uint64
-	StopReason     StopReason
+	ID          string
+	Type        Type
+	Status      Status
+	Description string
+	ToolUseID   string
+	StartTime   time.Time
+	EndTime     *time.Time
+	OutputFile  string
+	// Notified 表示通知已入队,用于去重
+	Notified bool
+	// NotificationDelivered 表示通知已落盘进主会话,此后才允许驱逐任务行
+	NotificationDelivered bool
+	LifecycleToken        uint64
+	StopReason            StopReason
 
 	// EvictAfter 是终态任务的驱逐截止时间。nil 表示通知投递后立即可驱逐;
 	// agent 任务用它实现面板宽限期

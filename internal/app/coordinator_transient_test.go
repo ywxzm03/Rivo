@@ -9,26 +9,32 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-func TestCoordinatorTransientMessagesAreRequestOnly(t *testing.T) {
+func TestCoordinatorExposesNotificationClaimer(t *testing.T) {
 	sm := session.New("/work", t.TempDir())
 	coord := NewCoordinator(sm, nil)
-	used := false
-	coord.SetTransientMessages(func() []llm.Message {
-		if used {
-			return nil
-		}
-		used = true
-		return []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "<task-notification>{}</task-notification>"}}}}
+	message := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "<task-notification>{}</task-notification>"}}}
+	acked := false
+	coord.SetNotificationClaimer(func() ([]llm.Message, func()) {
+		return []llm.Message{message}, func() { acked = true }
 	})
 	request, err := coord.PrepareRequest(context.Background(), agent.PreparedRequest{Context: llm.Context{Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "input"}}}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.Context.Messages) != 1 || request.Context.Messages[0].(llm.UserMessage).Content[0].(llm.TextContent).Text != "<task-notification>{}</task-notification>" {
-		t.Fatalf("request messages = %#v, want only transient message from persisted projection", request.Context.Messages)
+	// 通知不再挂进请求上下文,由 agent 认领后落盘
+	if len(request.Context.Messages) != 0 {
+		t.Fatalf("request messages = %#v, want the transient attachment to stay empty", request.Context.Messages)
 	}
-	if len(sm.BuildContext().Messages()) != 0 {
-		t.Fatal("transient task notification was persisted into the parent session")
+	if request.ClaimNotifications == nil {
+		t.Fatal("ClaimNotifications not installed on the prepared request")
+	}
+	messages, ack := request.ClaimNotifications()
+	if len(messages) != 1 || ack == nil {
+		t.Fatalf("claimed = %#v, want one message and an ack", messages)
+	}
+	ack()
+	if !acked {
+		t.Fatal("ack callback did not run")
 	}
 }
 

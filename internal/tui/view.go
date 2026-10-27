@@ -202,6 +202,10 @@ func (m *Model) frameLines() []string {
 		if m.viewport.Height > 0 {
 			lines = append(lines, "")
 		}
+		// 后台 shell 提示行固定在输入框上方,与任务列表分开
+		if status := backgroundShellStatusLine(m.state.Subagents.RunningShells); status != "" {
+			lines = append(lines, colored(mutedColor, ansi.Truncate(" "+status, m.width, "…")))
+		}
 		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
 		if completions := m.completionView(); completions != "" {
 			lines = append(lines, splitFrameLines(completions)...)

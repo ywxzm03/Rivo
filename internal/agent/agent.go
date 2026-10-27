@@ -339,6 +339,9 @@ type PreparedRequest struct {
 	Compacted bool
 	// TransientAck 在本次请求成功提交后确认 transient 附件已被消费
 	TransientAck func()
+	// ClaimNotifications 认领待投递的子任务通知。返回要落盘的消息与
+	// 落盘成功后的 ack 回调;队列为空时返回 nil
+	ClaimNotifications func() ([]llm.Message, func())
 }
 
 // Options 是一次装配的全部参数，运行期变更走 Set* 与 Reconfigure
@@ -588,6 +591,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 
 		// 2.请求准备只返回快照，摘要失败的降级与存储失败的停止由宿主判断
 		var acknowledgeTransient func()
+		var claimNotifications func() ([]llm.Message, func())
 		request, err := a.prepareRequest(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -598,12 +602,29 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 		if request != nil {
 			a.ctx, a.cfg = request.Context, request.Config
 			acknowledgeTransient = request.TransientAck
+			claimNotifications = request.ClaimNotifications
 			if request.Compacted {
 				firstMessageIndex = len(a.ctx.Messages)
 			}
 		}
 
-		// 3.消费模型流并同步发出 assistant partial 更新
+		// 3.把待投递的子任务通知落盘进主会话,模型后续轮次仍能回看;
+		// 落盘成功才 ack,失败时通知留在队列等下次唤醒
+		if claimNotifications != nil {
+			messages, ack := claimNotifications()
+			if len(messages) > 0 {
+				if err := a.commitMessages(messages); err != nil {
+					cancel()
+					return nil, err
+				}
+				a.ctx.Messages = append(a.ctx.Messages, messages...)
+				if ack != nil {
+					ack()
+				}
+			}
+		}
+
+		// 4.消费模型流并同步发出 assistant partial 更新
 		final, partial, streamReason, streamErr, err := a.consumeStream(ctx)
 		if err != nil {
 			return nil, err
@@ -616,7 +637,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 			return a.finishModelFailure(firstMessageIndex, reason, streamErr, &partial)
 		}
 
-		// 4.提交最终 assistant 消息，元数据在提交时补全
+		// 5.提交最终 assistant 消息，元数据在提交时补全
 		committed, err := a.commitTurn(*final, acknowledgeTransient)
 		if err != nil {
 			cancel()

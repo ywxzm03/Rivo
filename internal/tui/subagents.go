@@ -16,7 +16,6 @@ import (
 // TUI 永远拿不到 runtime 句柄或可变任务状态。
 type SubagentTaskView struct {
 	ID             string
-	Type           string
 	Status         string
 	AgentType      string
 	Description    string
@@ -41,7 +40,10 @@ type SubagentTaskView struct {
 }
 
 type SubagentSnapshot struct {
-	Tasks         []SubagentTaskView
+	// Tasks 只含子 agent 任务,后台 bash 不进入该列表
+	Tasks []SubagentTaskView
+	// RunningShells 是运行中的后台 bash 数量,提示行与刷新链据此判断
+	RunningShells int
 	ViewingTaskID string
 	Revision      uint64
 }
@@ -73,7 +75,8 @@ type subagentRefreshMsg struct{}
 // 面板里还有任务（含终态）就必须续链：终态任务要显示到被驱逐，
 // 首次进入视图时 transcript 也可能还没加载完
 func (m *Model) needsSubagentRefresh() bool {
-	if len(m.state.Subagents.Tasks) > 0 || m.panel.viewingTaskID != "" {
+	// 后台 shell 不在 Tasks 里,必须单独计入,否则提示行的计数不会更新
+	if len(m.state.Subagents.Tasks) > 0 || m.state.Subagents.RunningShells > 0 || m.panel.viewingTaskID != "" {
 		return true
 	}
 	return m.busy && m.operationIsRun
@@ -135,14 +138,19 @@ func (m *Model) applySubagentSnapshot(snapshot SubagentSnapshot) {
 	previousPending := m.pendingRows()
 	previousWaiting := m.backgroundWaitingLabel()
 	previousTask, hadPreviousTask := findSubagentTask(m.state.Subagents.Tasks, m.panel.viewingTaskID)
+	previousTasks := m.state.Subagents.Tasks
 	snapshot = shallowSubagentSnapshot(snapshot)
 	m.state.Subagents = snapshot
 	waitingChanged := previousWaiting != m.backgroundWaitingLabel()
+	// 选中项消失时先落到邻居,没有再回 main 行,避免光标直接跳走
 	if m.panel.selectedTaskID != "" && !hasSubagentTask(snapshot.Tasks, m.panel.selectedTaskID) {
-		// 选中的任务被驱逐或清空后光标回到 main 行,
-		// 否则列表会停在"全都没有选中"的状态
-		m.panel.selectedTaskID = ""
-		m.panel.mainSelected = true
+		if next, ok := removalFallback(previousTasks, snapshot.Tasks, m.panel.selectedTaskID); ok {
+			m.panel.selectedTaskID = next
+			m.panel.mainSelected = false
+		} else {
+			m.panel.selectedTaskID = ""
+			m.panel.mainSelected = true
+		}
 	}
 	if m.panel.taskSelector && len(snapshot.Tasks) == 0 {
 		// 列表消失时必须把焦点交回输入框,否则编辑器保持失焦、无法输入
@@ -196,6 +204,35 @@ func hasSubagentTask(tasks []SubagentTaskView, id string) bool {
 	return ok
 }
 
+// removalFallback 计算选中项被移除后应落到哪一行:
+// 先在旧顺序里取其后第一个仍存在的任务,没有再回退到其前最近的一个,
+// 两者都没有则返回空,由调用方回到 main 行
+func removalFallback(previous []SubagentTaskView, remaining []SubagentTaskView, removedID string) (string, bool) {
+	position := -1
+	for i, task := range previous {
+		if task.ID == removedID {
+			position = i
+			break
+		}
+	}
+	if position < 0 {
+		return "", false
+	}
+	// 1.向后找:移除位置之后的第一个幸存者
+	for _, task := range previous[position+1:] {
+		if hasSubagentTask(remaining, task.ID) {
+			return task.ID, true
+		}
+	}
+	// 2.向前找:移除位置之前的最近幸存者
+	for i := position - 1; i >= 0; i-- {
+		if hasSubagentTask(remaining, previous[i].ID) {
+			return previous[i].ID, true
+		}
+	}
+	return "", false
+}
+
 func findSubagentTask(tasks []SubagentTaskView, id string) (SubagentTaskView, bool) {
 	for _, task := range tasks {
 		if task.ID == id {
@@ -205,36 +242,93 @@ func findSubagentTask(tasks []SubagentTaskView, id string) (SubagentTaskView, bo
 	return SubagentTaskView{}, false
 }
 
+// applyKeyboardFocus 把 taskSelector 意图落到编辑器上,返回是否改变了焦点。
+// 选择器打开时焦点归选择器,这里不动
+func (m *Model) applyKeyboardFocus() bool {
+	if m.composer.selector != nil {
+		return false
+	}
+	if m.panel.taskSelector {
+		if !m.editor.Focused() {
+			return false
+		}
+		m.editor.Blur()
+		return true
+	}
+	if m.editor.Focused() {
+		return false
+	}
+	m.editor.Focus()
+	return true
+}
+
+// reconcilePanelFocus 收敛面板状态与键盘焦点,幂等。
+// 依次处理:查看目标消失、选中目标消失、列表为空仍聚焦、焦点与意图不一致
+func (m *Model) reconcilePanelFocus() bool {
+	changed := false
+	if m.panel.viewingTaskID != "" && !hasSubagentTask(m.state.Subagents.Tasks, m.panel.viewingTaskID) {
+		m.exitSubagentView()
+		changed = true
+	}
+	if m.panel.selectedTaskID != "" && !hasSubagentTask(m.state.Subagents.Tasks, m.panel.selectedTaskID) {
+		// 收敛阶段拿不到旧列表,直接回 main 行;快照落地时已有邻居落位
+		m.panel.selectedTaskID = ""
+		m.panel.mainSelected = true
+		changed = true
+	}
+	if m.panel.taskSelector && len(m.state.Subagents.Tasks) == 0 {
+		m.panel.taskSelector = false
+		changed = true
+	}
+	if m.applyKeyboardFocus() {
+		changed = true
+	}
+	if changed {
+		m.layout()
+	}
+	return changed
+}
+
+// ensureTypingFocus 在可打印按键到达时把焦点交回输入框,
+// 只在输入框失焦、列表未聚焦、选择器未打开时生效,返回是否修复过
+func (m *Model) ensureTypingFocus(msg tea.KeyMsg) bool {
+	if m.composer.selector != nil || m.panel.taskSelector || m.editor.Focused() {
+		return false
+	}
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return false
+	}
+	m.editor.Focus()
+	return true
+}
+
 // setTaskFocus 把焦点在输入框与任务列表之间切换。
 // 从 child view 进入列表时保留当前查看任务作为方向键锚点
 func (m *Model) setTaskFocus(focused bool) {
-	if m.panel.taskSelector == focused {
-		if focused && !m.panel.mainSelected && m.panel.selectedTaskID == "" {
-			m.panel.mainSelected = true
-			m.layout()
-		}
-		return
-	}
-	m.panel.taskSelector = focused
-	if focused {
-		m.editor.Blur()
-		if m.panel.viewingTaskID != "" && hasSubagentTask(m.state.Subagents.Tasks, m.panel.selectedTaskID) {
-			m.panel.mainSelected = false
+	if m.panel.taskSelector != focused {
+		m.panel.taskSelector = focused
+		if focused {
+			if m.panel.viewingTaskID != "" && hasSubagentTask(m.state.Subagents.Tasks, m.panel.selectedTaskID) {
+				m.panel.mainSelected = false
+			} else {
+				m.clearSelection()
+				m.panel.mainSelected = true
+				m.panel.selectedTaskID = ""
+			}
 		} else {
-			m.clearSelection()
-			m.panel.mainSelected = true
-			m.panel.selectedTaskID = ""
+			if m.panel.viewingTaskID != "" && hasSubagentTask(m.state.Subagents.Tasks, m.panel.viewingTaskID) {
+				m.panel.mainSelected = false
+				m.panel.selectedTaskID = m.panel.viewingTaskID
+			} else {
+				m.panel.selectedTaskID = ""
+				m.panel.mainSelected = true
+			}
 		}
-	} else {
-		if m.panel.viewingTaskID != "" && hasSubagentTask(m.state.Subagents.Tasks, m.panel.viewingTaskID) {
-			m.panel.mainSelected = false
-			m.panel.selectedTaskID = m.panel.viewingTaskID
-		} else {
-			m.panel.selectedTaskID = ""
-			m.panel.mainSelected = true
-		}
-		m.editor.Focus()
+	} else if focused && !m.panel.mainSelected && m.panel.selectedTaskID == "" {
+		m.panel.mainSelected = true
 	}
+	// 意图未变时也要落焦:历史路径可能只改了 taskSelector 而漏了编辑器焦点
+	m.applyKeyboardFocus()
 	m.layout()
 }
 
@@ -285,8 +379,7 @@ func (m *Model) enterSelectedSubagent() tea.Cmd {
 			return m.exitSubagentViewCmd()
 		}
 		m.panel.mainSelected = true
-		m.panel.taskSelector = false
-		m.layout()
+		m.setTaskFocus(false)
 		return nil
 	}
 	task, ok := m.selectedSubagent()
@@ -331,7 +424,8 @@ func (m *Model) enterSubagentView(id string) {
 	m.editor.BlurredStyle.Prompt = m.editor.FocusedStyle.Prompt
 	m.editor.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(blueColor))
 	m.editor.Placeholder = "Message @" + taskLabel(task) + "…"
-	m.editor.Focus()
+	m.panel.taskSelector = false
+	m.applyKeyboardFocus()
 	m.viewport.GotoBottom()
 	m.layout()
 	m.refreshTranscript()
@@ -373,7 +467,8 @@ func (m *Model) exitSubagentView() {
 	m.editor.BlurredStyle.Prompt = m.editor.FocusedStyle.Prompt
 	m.editor.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	m.editor.Placeholder = ""
-	m.editor.Focus()
+	m.panel.taskSelector = false
+	m.applyKeyboardFocus()
 	m.layout()
 	m.refreshTranscript()
 }
@@ -529,14 +624,10 @@ func (m *Model) taskRows() []string {
 }
 
 func taskLabel(task SubagentTaskView) string {
-	label := task.AgentType
-	if label == "" {
-		label = task.Type
+	if task.AgentType == "" {
+		return "agent"
 	}
-	if label == "" {
-		label = "agent"
-	}
-	return label
+	return task.AgentType
 }
 
 func taskElapsed(task SubagentTaskView, now time.Time) string {

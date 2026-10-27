@@ -103,6 +103,10 @@ type Message struct {
 	Divider        *TurnDividerView
 	Skill          *SkillInvocationView
 	Images         []ImageView
+	// Shells 非空或 ShellPanel 为真时该消息渲染成 /ps 面板
+	Shells     []ShellView
+	ShellPanel bool
+	ShellError string
 }
 
 // ImageView 是消息投影中的图片元数据
@@ -179,6 +183,10 @@ type Handlers struct {
 	WriteClipboard          func(string) error
 	SubagentRequest         func(SubagentRequest) tea.Cmd
 	SubagentSnapshot        func() tea.Cmd
+	// ShellList 查询后台 shell,供 /ps 使用
+	ShellList func() tea.Cmd
+	// ShellStopAll 终止全部运行中的后台 shell,供 /stop 使用
+	ShellStopAll func() tea.Cmd
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -296,8 +304,10 @@ type Model struct {
 	// queues 承载 steering / follow-up 队列镜像
 	queues          queueMirror
 	statusNoticeSeq uint64
-	cursorRow       atomic.Int64
-	cursorColumn    atomic.Int64
+	// shellPanelSeq 是 /ps 面板与命令回显的独立序号,避免与 /status 互相覆盖
+	shellPanelSeq uint64
+	cursorRow     atomic.Int64
+	cursorColumn  atomic.Int64
 }
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
@@ -531,6 +541,23 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case flushMsg:
 		m.flushPending = false
 		m.refreshTranscript()
+	case ShellsMsg:
+		m.appendShellPanel(msg)
+		return m, nil
+	case ShellsStoppedMsg:
+		// 受理文案顶格呈现,与 /ps 面板的标题对齐,不加圆点
+		m.shellPanelSeq++
+		m.upsertMessage(Message{
+			ID:   fmt.Sprintf("shell-stop/%d", m.shellPanelSeq),
+			Role: "summary",
+			Text: shellStopLine(msg.Stopped, msg.Err),
+		})
+		m.refreshTranscript()
+		// 立刻拉一次快照,提示行的计数不等下一轮轮询
+		if m.handlers.SubagentSnapshot != nil {
+			return m, m.handlers.SubagentSnapshot()
+		}
+		return m, nil
 	case StatusMsg:
 		value := string(msg)
 		m.status = value
@@ -1192,6 +1219,8 @@ func (m *Model) resetSessionUI() {
 	m.composer.historyPos, m.composer.completion = 0, 0
 	m.composer.completionHidden = true
 	m.composer.selector = nil
+	// 跨会话必须清空面板状态,否则 viewingTaskID 与焦点意图会泄漏
+	m.panel = subagentPanel{}
 	m.editor.Focus()
 	m.transcript.showThinking, m.transcript.showAllTools, m.transcript.hideTools = false, false, false
 	m.clearSelection()
@@ -1301,6 +1330,8 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state = s
 	m.state.Messages = messages
 	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
+	// 整份快照替换后必须收敛焦点:列表可能被清空而 taskSelector 仍为真
+	m.reconcilePanelFocus()
 	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)

@@ -200,17 +200,27 @@ func (r *Runtime) subagentTranscript(store *task.Store, state *task.AgentState) 
 	return append(projected, tail...)
 }
 
-func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, viewingTaskID string) []tui.SubagentTaskView {
+// projectSubagentSnapshot 把 store 状态投影成面板快照:
+// 任务列表只收子 agent,后台 bash 只贡献运行中计数
+func (r *Runtime) projectSubagentSnapshot(store *task.Store, states []task.State, viewingTaskID string) tui.SubagentSnapshot {
 	tasks := make([]tui.SubagentTaskView, 0, len(states))
 	live := make(map[string]bool, len(states))
+	runningShells := 0
 	for _, state := range states {
 		if state == nil || state.Base() == nil {
 			continue
 		}
 		base := state.Base()
 		live[base.ID] = true
+		// 1.后台 bash 走独立展示路径,不进入任务列表
+		if _, isBash := state.(*task.BashState); isBash {
+			if base.Status == task.StatusRunning {
+				runningShells++
+			}
+			continue
+		}
 		view := tui.SubagentTaskView{
-			ID: base.ID, Type: string(base.Type), Status: string(base.Status),
+			ID: base.ID, Status: string(base.Status),
 			Description: base.Description, OutputFile: base.OutputFile,
 			StartTime: base.StartTime, EndTime: base.EndTime,
 			LifecycleToken: base.LifecycleToken,
@@ -238,14 +248,6 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 				}
 			}
 			view.Error = task.Error
-		case *task.BashState:
-			view.AgentType = "bash"
-			view.Description = task.Command
-			view.TotalTokens = 0
-			view.Revision = subagentTaskRevision(base, 0, 0)
-			if task.Result != nil && task.Result.Code != 0 {
-				view.Error = fmt.Sprintf("exit code %d", task.Result.Code)
-			}
 		}
 		tasks = append(tasks, view)
 	}
@@ -263,7 +265,7 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 		}
 		return left.ID < right.ID
 	})
-	return tasks
+	return tui.SubagentSnapshot{Tasks: tasks, RunningShells: runningShells, ViewingTaskID: viewingTaskID}
 }
 
 func subagentTaskRevision(base *task.StateBase, messageCount, pendingCount int) uint64 {

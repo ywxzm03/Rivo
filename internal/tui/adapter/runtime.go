@@ -80,9 +80,10 @@ func (r *Runtime) subagentSnapshotLocked() tui.SubagentSnapshot {
 	r.subagentMu.Lock()
 	defer r.subagentMu.Unlock()
 	viewingTaskID := store.ViewingTaskID()
-	tasks := r.projectSubagentTasks(store, store.Snapshot(), viewingTaskID)
+	snapshot := r.projectSubagentSnapshot(store, store.Snapshot(), viewingTaskID)
 	r.subagentRevision++
-	return tui.SubagentSnapshot{Tasks: tasks, ViewingTaskID: viewingTaskID, Revision: r.subagentRevision}
+	snapshot.Revision = r.subagentRevision
+	return snapshot
 }
 
 func (r *Runtime) SetProgram(program *tea.Program) {

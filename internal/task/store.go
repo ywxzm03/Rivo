@@ -280,7 +280,7 @@ func (s *Store) HasEvictionWork() bool {
 	defer s.mu.Unlock()
 	for _, state := range s.tasks {
 		base := state.Base()
-		if base.Status.Terminal() && base.Notified && base.EvictAfter != nil {
+		if base.Status.Terminal() && base.NotificationDelivered && base.EvictAfter != nil {
 			return true
 		}
 	}
@@ -293,7 +293,7 @@ func (s *Store) EvictExpired() int {
 	evicted := 0
 	for id, state := range s.tasks {
 		base := state.Base()
-		if !base.Status.Terminal() || !base.Notified {
+		if !base.Status.Terminal() || !base.NotificationDelivered {
 			continue
 		}
 		// 用户正在查看的 transcript 永不自动回收,否则面板会在阅读中途消失
@@ -407,6 +407,8 @@ func (s *Store) EnqueueNotification(id string, token uint64, notification Notifi
 		s.mu.Unlock()
 		return false
 	}
+	// Notified 只做入队去重;能否驱逐看 NotificationDelivered,
+	// 它在通知真正落盘后才置位,任务行因此能保留到送达之后
 	task.Base().Notified = true
 	s.notifications = append(s.notifications, notification)
 	notify := s.notify
@@ -431,6 +433,32 @@ func (s *Store) PeekNotifications() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Notification(nil), s.notifications...)
+}
+
+// ClaimResult 是一次通知认领的结果
+type ClaimResult struct {
+	Notifications []Notification
+	Count         int
+}
+
+// ClaimNotifications 认领当前队列里的全部通知但不移除,
+// 供调用方在落盘成功后再 AckNotifications。落盘失败时通知仍在队列里
+func (s *Store) ClaimNotifications() ClaimResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claimed := append([]Notification(nil), s.notifications...)
+	return ClaimResult{Notifications: claimed, Count: len(claimed)}
+}
+
+// MarkNotified 把指定任务标记为通知已落盘送达,之后才允许被 EvictExpired 回收
+func (s *Store) MarkNotified(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		if task, ok := s.tasks[id]; ok {
+			task.Base().NotificationDelivered = true
+		}
+	}
 }
 
 // AckNotifications 确认前 count 条通知已被模型消费。
@@ -697,6 +725,11 @@ func (s *Store) beginAgentKill(id string, reason StopReason) (Runtime, context.C
 	task.Abort = nil
 	task.PendingSteering = nil
 	task.PendingFollowUp = nil
+	// 启动窗口内没有 runtime 时不会有通知入队,直接视为已送达,
+	// 否则任务行永远不会被回收
+	if runtime == nil {
+		task.Base().NotificationDelivered = true
+	}
 	setEvictAfter(&task.StateBase, task.Retain, now, s.gracePeriod())
 	return runtime, abort, token, nil
 }

@@ -144,6 +144,9 @@ func (m *Model) renderMessage(message Message) string {
 	if message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
+	if message.Role == "shells" {
+		return renderShellsPanel(message, width)
+	}
 	if message.Role == "notice" {
 		// 提示行的圆点与中断提示的方块对齐，正文从第三列开始；换行后保持相同缩进
 		wrapped := ansi.Wrap(message.Text, max(1, width-3), "")
@@ -251,26 +254,21 @@ func (m *Model) isLatestDivider(messageID string) bool {
 	return false
 }
 
-// backgroundWaitingLabel 按 active background task 类型聚合等待文案
+// backgroundWaitingLabel 聚合运行中的子 agent 等待文案;
+// 后台 bash 走独立提示行,不参与这里的计数
 func (m *Model) backgroundWaitingLabel() string {
 	count := 0
-	allAgents, allBash := true, true
 	for _, task := range m.state.Subagents.Tasks {
-		if task.Status != "running" {
-			continue
+		if task.Status == "running" {
+			count++
 		}
-		count++
-		allAgents = allAgents && task.Type == "agent"
-		allBash = allBash && task.Type == "bash"
 	}
 	if count == 0 {
 		return ""
 	}
-	kind := "tasks"
-	if allAgents {
-		kind = "agents"
-	} else if allBash {
-		kind = "bash"
+	kind := "agents"
+	if count == 1 {
+		kind = "agent"
 	}
 	return fmt.Sprintf("Waiting for %d background %s to finish", count, kind)
 }

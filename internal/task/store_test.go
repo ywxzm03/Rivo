@@ -39,9 +39,9 @@ func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 	if !store.EnqueueNotification(id, token, notification) || store.EnqueueNotification(id, token, notification) {
 		t.Fatal("notification should be enqueued once")
 	}
-	got := store.DrainNotifications()
-	if len(got) != 1 || got[0].TaskID != id {
-		t.Fatalf("notifications = %#v, want one notification", got)
+	claimed := store.ClaimNotifications()
+	if claimed.Count != 1 || claimed.Notifications[0].TaskID != id {
+		t.Fatalf("notifications = %#v, want one notification", claimed.Notifications)
 	}
 }
 
@@ -315,7 +315,10 @@ func TestStoreEvictExpiredReclaimsTerminalTaskAfterGracePeriod(t *testing.T) {
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d tasks inside the grace period, want 0", evicted)
 	}
-	// 2.宽限期结束后驱逐,通知仍留在队列中
+	// 2.通知送达后再过期驱逐;未送达时任务行必须保留
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past := time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].(*AgentState).EvictAfter = &past
@@ -326,8 +329,8 @@ func TestStoreEvictExpiredReclaimsTerminalTaskAfterGracePeriod(t *testing.T) {
 	if _, ok := store.Task(id); ok {
 		t.Fatal("expired task is still tracked")
 	}
-	if got := store.DrainNotifications(); len(got) != 1 || got[0].TaskID != id {
-		t.Fatalf("notifications after expiry = %#v, want the undelivered notification", got)
+	if got := store.ClaimNotifications(); got.Count != 0 {
+		t.Fatalf("notifications after ack = %#v, want none", got.Notifications)
 	}
 }
 
@@ -392,6 +395,10 @@ func TestStoreEvictExpiredSkipsViewedTask(t *testing.T) {
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d tasks right after leaving the view, want 0", evicted)
 	}
+	// 通知送达后才允许回收
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past = time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].Base().EvictAfter = &past
@@ -429,8 +436,8 @@ func TestAgentTaskStopDuringLaunchWindowTransitionsToKilled(t *testing.T) {
 		t.Fatal("killed task has no eviction deadline")
 	}
 	// 没有 lifecycle 就没有通知可投递,直接视为已通知,否则该任务永远无法回收
-	if !task.Base().Notified {
-		t.Fatal("launch-window kill must be marked notified so it can be reclaimed")
+	if !task.Base().NotificationDelivered {
+		t.Fatal("launch-window kill must be marked delivered so it can be reclaimed")
 	}
 	// 迟到的 AttachAgentRuntime 必须失败,不能把已停止的任务拉回运行态
 	if _, err := store.AttachAgentRuntime(id, &fakeRuntime{abort: func() {}}, "late"); err == nil {
@@ -450,6 +457,10 @@ func TestStoreEvictExpiredReclaimsTerminalBashTask(t *testing.T) {
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d during the grace period, want 0", evicted)
 	}
+	// 通知送达后才允许回收
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past := time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].Base().EvictAfter = &past

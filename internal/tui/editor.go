@@ -27,6 +27,8 @@ var commands = []slashCommand{
 	{"compact", "[instructions] — Compact the conversation"},
 	{"clear-follow-up", "Clear queued follow-up messages"},
 	{"status", "Show model, context usage and session info"},
+	{"ps", "List background shells"},
+	{"stop", "Stop all background shells"},
 	{"exit", "Exit Rivo"},
 }
 
@@ -303,6 +305,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	}
+	// 兜底前先自愈:历史路径可能只改了 taskSelector 而漏了编辑器焦点
+	m.ensureTypingFocus(msg)
 	before := m.editor.Value()
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
@@ -529,6 +533,28 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 			return nil
 		}
 		return m.handlers.Status()
+	case "/ps":
+		if arg != "" {
+			m.notice("Usage: /ps")
+			return nil
+		}
+		if m.handlers.ShellList == nil {
+			m.notice("Background shells are unavailable")
+			return nil
+		}
+		m.echoSlashCommand("/ps")
+		return m.handlers.ShellList()
+	case "/stop":
+		if arg != "" {
+			m.notice("Usage: /stop")
+			return nil
+		}
+		if m.handlers.ShellStopAll == nil {
+			m.notice("Background shells are unavailable")
+			return nil
+		}
+		m.echoSlashCommand("/stop")
+		return m.handlers.ShellStopAll()
 	case "/rename":
 		if arg == "" {
 			m.notice("usage: /rename <new Name>")
@@ -619,15 +645,24 @@ func (m *Model) handleDequeueKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	return false, nil
 }
 
-// handleTaskKillKey 在空输入下用 x 停止或驱逐选中的子任务
+// handleTaskKillKey 用 x 停止运行中的子任务或驱逐终态子任务;
+// 焦点在任务列表时该键是命令键,输入框内容不参与判定
 func (m *Model) handleTaskKillKey(msg tea.KeyMsg) (tea.Cmd, bool) {
-	if msg.String() != "x" || strings.TrimSpace(m.editor.Value()) != "" {
+	focused := m.panel.taskSelector
+	// 1.未聚焦列表时 x 仍是普通字符,输入框非空就不拦截
+	if !focused && strings.TrimSpace(m.editor.Value()) != "" {
 		return nil, false
 	}
+	if msg.Type != tea.KeyRunes || msg.Paste || msg.String() != "x" {
+		return nil, false
+	}
+	// 2.列表聚焦但无可执行目标(选中 main 行、目标刚消失)时吞掉按键:
+	// 不落字符、不改焦点,命令键不退化成文本
 	task, ok := m.selectedSubagent()
 	if !ok || m.handlers.SubagentRequest == nil {
-		return nil, false
+		return nil, focused
 	}
+	// 3.运行中先停,终态直接驱逐
 	kind := "evict"
 	if task.Status == "running" {
 		kind = "stop"
@@ -635,12 +670,24 @@ func (m *Model) handleTaskKillKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID}), true
 }
 
+// runnableWhileBusy 报告命令能否在 agent 运行中执行。
+// /ps 只读后台 shell 状态,/stop 只发终止信号,都不改动对话上下文,
+// 因此与 /clear-follow-up 一样不受忙碌态限制
+func runnableWhileBusy(name string) bool {
+	switch name {
+	case "/clear-follow-up", "/ps", "/stop":
+		return true
+	default:
+		return false
+	}
+}
+
 func isQueueControlCommand(input string) bool {
 	name := input
 	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
 		name = input[:index]
 	}
-	return name == "/clear-follow-up"
+	return runnableWhileBusy(name)
 }
 
 func (m *Model) stageCompactionMessage(input string, message ComposerPayload, kind queuedKind) tea.Cmd {

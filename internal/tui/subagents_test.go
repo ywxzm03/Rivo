@@ -19,7 +19,7 @@ func TestSubagentRowsAndViewSwitch(t *testing.T) {
 	m := New(Snapshot{
 		Cwd: "/repo",
 		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-			ID: "agent-1", Type: "agent", AgentType: "Explore", Status: "running",
+			ID: "agent-1", AgentType: "Explore", Status: "running",
 			Description: "inspect tree", StartTime: started,
 			Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}},
 		}}},
@@ -44,7 +44,7 @@ func TestSubagentRowsAndViewSwitch(t *testing.T) {
 	if m.panel.viewingTaskID != "agent-1" || len(requests) != 2 || requests[1].Kind != "stop" || requests[1].TaskID != "agent-1" {
 		t.Fatalf("Esc did not stop child: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
-	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "agent-1", Type: "agent", AgentType: "Explore", Status: "killed", Description: "inspect tree", Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}}}}})
+	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "agent-1", AgentType: "Explore", Status: "killed", Description: "inspect tree", Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}}}}})
 	press(m, tea.KeyUp)
 	press(m, tea.KeyEnter)
 	if m.panel.viewingTaskID != "" || len(requests) != 3 || requests[2].Kind != "exit" {
@@ -466,60 +466,6 @@ func TestSubagentViewKeepsMainMessagesAndNavigates(t *testing.T) {
 	mainView := ansi.Strip(m.View())
 	if !strings.Contains(mainView, "main live response") || !strings.Contains(mainView, "main pending") || strings.Contains(mainView, "child two") {
 		t.Fatalf("main transcript after exit = %q", mainView)
-	}
-}
-
-// 详情页里输入框有内容时 x 是普通字符,不能触发 stop/evict
-func TestSubagentViewTypesXInsteadOfStoppingWhenEditorHasText(t *testing.T) {
-	var requests []SubagentRequest
-	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
-	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
-		requests = append(requests, request)
-		return nil
-	}})
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	m.enterSubagentView("agent-1")
-	typeText(m, "fi")
-	typeText(m, "x")
-	if got := m.editor.Value(); got != "fix" {
-		t.Fatalf("editor value = %q, want %q", got, "fix")
-	}
-	if len(requests) != 0 {
-		t.Fatalf("x triggered a subagent request: %#v", requests)
-	}
-	// 1.焦点移到任务列表后 x 才是 stop
-	m.editor.Reset()
-	m.setTaskFocus(true)
-	m.panel.selectedTaskID = "agent-1"
-	m.panel.mainSelected = false
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	if len(requests) != 1 || requests[0].Kind != "stop" || requests[0].TaskID != "agent-1" {
-		t.Fatalf("stop request = %#v", requests)
-	}
-	if got := m.editor.Value(); got != "" {
-		t.Fatalf("stop key leaked into the editor: %q", got)
-	}
-}
-
-// 主视图里输入框为空时 x 仍是 stop/evict;有内容时是普通字符
-func TestMainViewXRequiresEmptyEditor(t *testing.T) {
-	var requests []SubagentRequest
-	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
-	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
-		requests = append(requests, request)
-		return nil
-	}})
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	m.panel.selectedTaskID = "agent-1"
-	typeText(m, "a")
-	typeText(m, "x")
-	if got := m.editor.Value(); got != "ax" {
-		t.Fatalf("editor value = %q, want %q", got, "ax")
-	}
-	if len(requests) != 0 {
-		t.Fatalf("x triggered a subagent request while typing: %#v", requests)
 	}
 }
 
@@ -1401,14 +1347,14 @@ func TestTaskListTruncationKeepsNewest(t *testing.T) {
 func TestSubagentErrorResponseAppliesFreshSnapshot(t *testing.T) {
 	m := New(Snapshot{Subagents: SubagentSnapshot{
 		Revision: 1,
-		Tasks:    []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running", Description: "finished task"}},
+		Tasks:    []SubagentTaskView{{ID: "a1", Status: "running", Description: "finished task"}},
 	}}, Handlers{})
 	m.Update(teaWindow(100, 16))
 	m.Update(SubagentSnapshotMsg{
 		Err: errors.New("task finished before stop"),
 		Snapshot: SubagentSnapshot{
 			Revision: 2,
-			Tasks:    []SubagentTaskView{{ID: "a1", Type: "agent", Status: "completed", Description: "finished task"}},
+			Tasks:    []SubagentTaskView{{ID: "a1", Status: "completed", Description: "finished task"}},
 		},
 	})
 	task, ok := findSubagentTask(m.state.Subagents.Tasks, "a1")
