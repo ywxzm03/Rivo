@@ -762,6 +762,58 @@ func TestStoreKillAllRunningTasks(t *testing.T) {
 	}
 }
 
+// /stop 只停后台 shell,不能碰子 agent
+func TestKillAllRunningBashTasksStopsAllBash(t *testing.T) {
+	store := NewStore()
+	var bashIDs []string
+	for _, command := range []string{"sleep 120", "tail -f log"} {
+		id, _, err := store.Register(RegisterSpec{
+			Type: TypeBash, Description: command, BashState: &BashState{Command: command},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bashIDs = append(bashIDs, id)
+	}
+
+	if killed := store.KillAllRunningBashTasks(); killed != 2 {
+		t.Fatalf("killed %d bash tasks, want 2", killed)
+	}
+	for _, id := range bashIDs {
+		state, ok := store.Task(id)
+		if !ok || state.Base().Status == StatusRunning {
+			t.Fatalf("bash %s still running", id)
+		}
+	}
+}
+
+// 只停 bash 时子 agent 必须继续运行
+func TestKillAllRunningBashTasksLeavesAgents(t *testing.T) {
+	store := NewStore()
+	agentID, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bashID, _, err := store.Register(RegisterSpec{
+		Type: TypeBash, Description: "sleep 120", BashState: &BashState{Command: "sleep 120"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if killed := store.KillAllRunningBashTasks(); killed != 1 {
+		t.Fatalf("killed %d tasks, want 1", killed)
+	}
+	agent, _ := store.Task(agentID)
+	if agent.Base().Status != StatusRunning {
+		t.Fatalf("agent status = %v, want running", agent.Base().Status)
+	}
+	bash, _ := store.Task(bashID)
+	if bash.Base().Status == StatusRunning {
+		t.Fatal("bash still running")
+	}
+}
+
 // 子任务的 steering 与 follow-up 是两条独立队列
 func TestStoreSubagentHasTwoQueues(t *testing.T) {
 	store := NewStore()

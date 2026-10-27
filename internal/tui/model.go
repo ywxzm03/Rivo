@@ -103,10 +103,6 @@ type Message struct {
 	Divider        *TurnDividerView
 	Skill          *SkillInvocationView
 	Images         []ImageView
-	// Shells 非空或 ShellPanel 为真时该消息渲染成 /ps 面板
-	Shells     []ShellView
-	ShellPanel bool
-	ShellError string
 }
 
 // ImageView 是消息投影中的图片元数据
@@ -187,6 +183,8 @@ type Handlers struct {
 	ShellList func() tea.Cmd
 	// ShellStopAll 终止全部运行中的后台 shell,供 /stop 使用
 	ShellStopAll func() tea.Cmd
+	// ShellKill 终止单个后台 shell,供 /ps 弹窗内按 x 使用
+	ShellKill func(id string) tea.Cmd
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -304,10 +302,12 @@ type Model struct {
 	// queues 承载 steering / follow-up 队列镜像
 	queues          queueMirror
 	statusNoticeSeq uint64
-	// shellPanelSeq 是 /ps 面板与命令回显的独立序号,避免与 /status 互相覆盖
+	// shellPanelSeq 是 /stop 受理文案与命令回显的独立序号,避免与 /status 互相覆盖
 	shellPanelSeq uint64
-	cursorRow     atomic.Int64
-	cursorColumn  atomic.Int64
+	// shellDialog 非空时输入坞被 /ps 弹窗接管,transcript 不动
+	shellDialog  *shellDialog
+	cursorRow    atomic.Int64
+	cursorColumn atomic.Int64
 }
 
 // New 创建界面，预览与正式运行共享同一套组件和消息处理
@@ -542,7 +542,17 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushPending = false
 		m.refreshTranscript()
 	case ShellsMsg:
-		m.appendShellPanel(msg)
+		m.updateShellDialog(msg)
+		return m, nil
+	case ShellKilledMsg:
+		if msg.Err != nil {
+			m.notice("Failed to stop background shell: " + msg.Err.Error())
+			return m, nil
+		}
+		// 终止成功后立刻重查,弹窗内的状态不等下一轮刷新
+		if m.handlers.ShellList != nil {
+			return m, m.handlers.ShellList()
+		}
 		return m, nil
 	case ShellsStoppedMsg:
 		// 受理文案顶格呈现,与 /ps 面板的标题对齐,不加圆点
@@ -628,12 +638,24 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case subagentRefreshMsg:
 		m.panel.refreshRunning = false
+		// 弹窗只依赖 ShellList,不要求存在子任务快照通道
+		if m.shellDialog != nil && m.handlers.ShellList != nil {
+			return m, tea.Batch(m.handlers.ShellList(), subagentRefreshTick())
+		}
 		if m.handlers.SubagentSnapshot == nil || !m.needsSubagentRefresh() {
 			return m, nil
 		}
 		// 唯一所有者:只有本 tick 链续接自己,pushed snapshot 不得再开第二条链
 		m.panel.refreshRunning = true
-		return m, tea.Batch(m.handlers.SubagentSnapshot(), m.startSpinner(), subagentRefreshTick())
+		cmds := []tea.Cmd{m.startSpinner(), subagentRefreshTick()}
+		if m.handlers.SubagentSnapshot != nil {
+			cmds = append(cmds, m.handlers.SubagentSnapshot())
+		}
+		// 弹窗打开期间同一 tick 顺带重查 shell,运行时长与输出跟着走
+		if m.shellDialog != nil && m.handlers.ShellList != nil {
+			cmds = append(cmds, m.handlers.ShellList())
+		}
+		return m, tea.Batch(cmds...)
 	case spinner.TickMsg:
 		if m.busy || hasRunningSubagent(m.state.Subagents.Tasks) {
 			var cmd tea.Cmd
@@ -1219,6 +1241,7 @@ func (m *Model) resetSessionUI() {
 	m.composer.historyPos, m.composer.completion = 0, 0
 	m.composer.completionHidden = true
 	m.composer.selector = nil
+	m.shellDialog = nil
 	// 跨会话必须清空面板状态,否则 viewingTaskID 与焦点意图会泄漏
 	m.panel = subagentPanel{}
 	m.editor.Focus()

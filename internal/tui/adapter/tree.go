@@ -8,13 +8,18 @@ import (
 )
 
 // projectTree 隐藏 assistant/tool entry 但保留其父链，
-// 使每个可见 user 节点都挂在最近的可见 user 祖先下
+// 使每个可见 user 节点都挂在最近的可见 user 祖先下。
+// 隐藏 user 条目(子任务通知)不是可回退节点,同样只保留父链
 func projectTree(snapshot session.TreeSnapshot) []tui.TreeNode {
 	entries := make(map[string]session.TreeEntry, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		entries[entry.ID] = entry
 	}
 
+	// visible 判定条目能否成为树节点:只有可见 user 可以
+	visible := func(entry session.TreeEntry) bool {
+		return entry.Role == "user" && !entry.Hidden
+	}
 	visibleParent := func(entry session.TreeEntry) string {
 		parent := entry.ParentID
 		seen := make(map[string]bool)
@@ -24,7 +29,7 @@ func projectTree(snapshot session.TreeSnapshot) []tui.TreeNode {
 			if !ok {
 				return ""
 			}
-			if ancestor.Role == "user" {
+			if visible(ancestor) {
 				return ancestor.ID
 			}
 			parent = ancestor.ParentID
@@ -35,7 +40,7 @@ func projectTree(snapshot session.TreeSnapshot) []tui.TreeNode {
 	children := make(map[string][]string)
 	var roots []string
 	for _, entry := range snapshot.Entries {
-		if entry.Role != "user" {
+		if !visible(entry) {
 			continue
 		}
 		parent := visibleParent(entry)
@@ -53,13 +58,13 @@ func projectTree(snapshot session.TreeSnapshot) []tui.TreeNode {
 		if !ok {
 			break
 		}
-		if entry.Role == "user" {
+		if visible(entry) {
 			current = entry.ID
 			break
 		}
 		current = entry.ParentID
 	}
-	if current == "" || entries[current].Role != "user" {
+	if current == "" || !visible(entries[current]) {
 		current = ""
 	}
 

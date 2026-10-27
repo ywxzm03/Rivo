@@ -75,6 +75,10 @@ type subagentRefreshMsg struct{}
 // 面板里还有任务（含终态）就必须续链：终态任务要显示到被驱逐，
 // 首次进入视图时 transcript 也可能还没加载完
 func (m *Model) needsSubagentRefresh() bool {
+	// /ps 弹窗打开期间要持续刷新运行时长与输出
+	if m.shellDialog != nil {
+		return true
+	}
 	// 后台 shell 不在 Tasks 里,必须单独计入,否则提示行的计数不会更新
 	if len(m.state.Subagents.Tasks) > 0 || m.state.Subagents.RunningShells > 0 || m.panel.viewingTaskID != "" {
 		return true
@@ -243,9 +247,9 @@ func findSubagentTask(tasks []SubagentTaskView, id string) (SubagentTaskView, bo
 }
 
 // applyKeyboardFocus 把 taskSelector 意图落到编辑器上,返回是否改变了焦点。
-// 选择器打开时焦点归选择器,这里不动
+// 覆盖层打开时焦点归覆盖层,这里不动
 func (m *Model) applyKeyboardFocus() bool {
-	if m.composer.selector != nil {
+	if m.overlayOpen() {
 		return false
 	}
 	if m.panel.taskSelector {
@@ -290,9 +294,9 @@ func (m *Model) reconcilePanelFocus() bool {
 }
 
 // ensureTypingFocus 在可打印按键到达时把焦点交回输入框,
-// 只在输入框失焦、列表未聚焦、选择器未打开时生效,返回是否修复过
+// 只在输入框失焦、列表未聚焦、覆盖层未打开时生效,返回是否修复过
 func (m *Model) ensureTypingFocus(msg tea.KeyMsg) bool {
-	if m.composer.selector != nil || m.panel.taskSelector || m.editor.Focused() {
+	if m.overlayOpen() || m.panel.taskSelector || m.editor.Focused() {
 		return false
 	}
 	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {

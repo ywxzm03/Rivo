@@ -360,6 +360,27 @@ func (s *Store) KillAllRunningTasks() int {
 // shutdownWait 是退出时等待子任务收尾的上限
 const shutdownWait = 3 * time.Second
 
+// KillAllRunningBashTasks 终止全部运行中的后台 bash 任务,返回成功终止的数量。
+// /stop 只停 shell:子 agent 有自己的取消链路,不能被这条用户命令连带终止
+func (s *Store) KillAllRunningBashTasks() int {
+	s.mu.Lock()
+	var ids []string
+	for id, state := range s.tasks {
+		if _, ok := state.(*BashState); !ok || state.Base().Status != StatusRunning {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	killed := 0
+	for _, id := range ids {
+		if err := KillBash(id, s); err == nil {
+			killed++
+		}
+	}
+	return killed
+}
+
 // KillBashTasksForAgent 终止某子 agent 启动且仍在运行的后台 bash 任务,
 // 返回成功终止的数量。子 agent 结束后它的 query loop 不再运行,
 // 这些任务没人能再停止,因此必须在子 agent 收尾时回收

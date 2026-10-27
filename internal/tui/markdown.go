@@ -144,9 +144,6 @@ func (m *Model) renderMessage(message Message) string {
 	if message.Role == "summary" {
 		return colored(mutedColor, ansi.Wrap(message.Text, width, ""))
 	}
-	if message.Role == "shells" {
-		return renderShellsPanel(message, width)
-	}
 	if message.Role == "notice" {
 		// 提示行的圆点与中断提示的方块对齐，正文从第三列开始；换行后保持相同缩进
 		wrapped := ansi.Wrap(message.Text, max(1, width-3), "")

@@ -82,7 +82,8 @@ lint: $(GOLANGCI_LINT) ## Run golangci-lint
 	$(GOLANGCI_LINT) run ./... --timeout=10m
 
 deadcode: $(DEADCODE) ## Report unreachable functions (must be empty)
-	$(DEADCODE) -test ./...
+	@out="$$($(DEADCODE) -test ./...)"; \
+	if [ -n "$$out" ]; then echo "$$out"; echo "deadcode: unreachable funcs found"; exit 1; fi
 
 tools: $(GOLANGCI_LINT) $(GOIMPORTS) $(MODERNIZE) $(DEADCODE) ## Install pinned dev tools into .tools/bin
 

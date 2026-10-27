@@ -24,7 +24,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	m.sel.mouse = screenPoint{x: msg.X, y: msg.Y}
 	m.sel.mouseSet = true
 	if mouseIsWheel(msg) {
-		if m.composer.selector == nil {
+		if !m.overlayOpen() {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return cmd
@@ -34,7 +34,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Button == tea.MouseButtonRight && msg.Action == tea.MouseActionPress {
 		return m.readClipboard()
 	}
-	if m.composer.selector != nil {
+	if m.overlayOpen() {
 		return nil
 	}
 	switch msg.Action {
@@ -83,7 +83,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 }
 
 func (m *Model) scrollWheel(direction int) {
-	if m.composer.selector != nil {
+	if m.overlayOpen() {
 		return
 	}
 	if direction > 0 {

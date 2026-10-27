@@ -538,12 +538,7 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 			m.notice("Usage: /ps")
 			return nil
 		}
-		if m.handlers.ShellList == nil {
-			m.notice("Background shells are unavailable")
-			return nil
-		}
-		m.echoSlashCommand("/ps")
-		return m.handlers.ShellList()
+		return m.openShellDialog()
 	case "/stop":
 		if arg != "" {
 			m.notice("Usage: /stop")
@@ -612,6 +607,9 @@ func (m *Model) handleOverlayKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	if msg.String() == "esc" && m.jumpPillVisible() && (!m.busy || len(m.state.Steering) == 0) {
 		m.jumpToBottom()
 		return true, nil
+	}
+	if m.shellDialog != nil {
+		return true, m.shellDialogKey(msg)
 	}
 	if m.composer.selector != nil {
 		return true, m.selectorKey(msg)

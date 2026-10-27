@@ -29,9 +29,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install tools
-        run: make tools
-
       - name: Check formatting
         run: make check-fmt
 
@@ -48,11 +45,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install tools
-        run: make tools
-
       - name: Run golangci-lint
         run: make lint
+
+  deadcode:
+    name: Deadcode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run deadcode
+        run: make deadcode
 
   test:
     name: Test (${{ matrix.os }})

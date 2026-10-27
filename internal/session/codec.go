@@ -336,10 +336,12 @@ func encodeMessage(m llm.Message) (json.RawMessage, error) {
 	}
 	switch m := m.(type) {
 	case llm.UserMessage:
+		// 隐藏标记只对通知这类内部消息写盘,普通用户消息保持既有格式
 		return json.Marshal(struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
-		}{"user", content})
+			Hidden  bool            `json:"hidden,omitempty"`
+		}{"user", content, m.Hidden})
 	case llm.AssistantMessage:
 		return json.Marshal(struct {
 			Role         string          `json:"role"`
@@ -388,8 +390,11 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 	}
 	switch probe.Role {
 	case "user":
+		// 1.按 wire 结构解出正文与显式标记
 		var wire struct {
 			Content json.RawMessage `json:"content"`
+			// 缺省 false:没有该字段的旧会话按可见消息处理
+			Hidden bool `json:"hidden"`
 		}
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			return nil, err
@@ -398,7 +403,10 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		return llm.UserMessage{Content: content}, nil
+		// 2.旧会话里落盘的通知没有 hidden 字段,按渲染形态补齐标记,
+		// 否则升级后重开会话仍会把通知正文渲染出来
+		hidden := wire.Hidden || llm.LooksLikeTaskNotification(llm.TextOf(content))
+		return llm.UserMessage{Content: content, Hidden: hidden}, nil
 	case "assistant":
 		var wire struct {
 			Content      json.RawMessage `json:"content"`

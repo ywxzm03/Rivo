@@ -65,6 +65,7 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 		SubagentRequest:         runtime.SubagentRequest,
 		SubagentSnapshot:        runtime.SubagentSnapshot,
 		ShellList:               runtime.ShellList,
+		ShellKill:               runtime.ShellKill,
 		ShellStopAll:            runtime.ShellStopAll,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {

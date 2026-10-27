@@ -385,7 +385,11 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 			id := r.sourceID(entry.SourceID, "message")
 			switch current := message.(type) {
 			case llm.UserMessage:
+				// 先封组再判隐藏:通知落在两个工具轮之间时,工具组仍要正常收尾
 				seal()
+				if current.Hidden {
+					continue
+				}
 				text := llm.TextOf(current.Content)
 				images := imageViews(current.Content)
 				if text != "" || len(images) > 0 {
@@ -730,7 +734,12 @@ func (r *Runtime) hasMessageLocked(message tui.Message) bool {
 	return r.messageIndexLocked(message.ID) >= 0
 }
 
+// messageFromLLMLocked 把一条 llm 消息投影成 TUI 消息
+// 隐藏消息(如子任务通知)只供模型阅读,返回 false 让调用方跳过渲染
 func (r *Runtime) messageFromLLMLocked(message llm.Message, id string) (tui.Message, bool) {
+	if llm.IsHiddenMessage(message) {
+		return tui.Message{}, false
+	}
 	converted := tui.Message{ID: id}
 	switch message := message.(type) {
 	case llm.UserMessage:

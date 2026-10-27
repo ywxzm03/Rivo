@@ -54,7 +54,10 @@ func (m *Model) layout() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
 	dock := m.pendingRows() + m.editor.Height() + 2
-	if m.composer.selector != nil {
+	if m.shellDialog != nil {
+		// 弹窗覆盖输入坞与状态栏,高度预算用整屏,视口只吃剩下的顶部空间
+		dock = m.shellDialogRows()
+	} else if m.composer.selector != nil {
 		m.composer.selector.input.Width = max(1, m.width-3)
 		dock = m.composer.selector.height(max(1, m.height-2))
 	} else {
@@ -62,13 +65,33 @@ func (m *Model) layout() {
 		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
-	// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
-	// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
-	// 补白就落在任务列表下方,看起来像是底部多了几行空行
-	m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
+	if m.shellDialog != nil {
+		// 弹窗贴屏幕底部,视口被压到 0 行也合法:帧总高仍等于终端高度
+		m.viewport.Height = max(0, m.height-dock)
+	} else {
+		// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
+		// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
+		// 补白就落在任务列表下方,看起来像是底部多了几行空行
+		m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
+	}
 	if follow {
 		m.viewport.GotoBottom()
 	}
+}
+
+// shellDialogRows 是 /ps 弹窗占用的行数,预算为整屏高度:
+// 弹窗从屏幕底部向上长出,不再给 footer 留位置
+func (m *Model) shellDialogRows() int {
+	if m.shellDialog == nil {
+		return 0
+	}
+	return m.shellDialog.height(max(1, m.height))
+}
+
+// overlayOpen 报告是否有覆盖层接管输入坞:命令选择器或 /ps 弹窗。
+// 覆盖层打开期间输入框不可编辑,鼠标与光标都要让位
+func (m *Model) overlayOpen() bool {
+	return m.composer.selector != nil || m.shellDialog != nil
 }
 
 func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int) {
@@ -128,7 +151,7 @@ func (m *Model) view() string {
 
 // jumpPillBounds 返回主 transcript 离底时覆盖的 pill 区域
 func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
-	if m.closing || m.composer.selector != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
+	if m.closing || m.composer.selector != nil || m.shellDialog != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
 		return jumpPillBounds{}, false
 	}
 	if rows := m.completionRows(len(m.completionItems())); rows > 0 {
@@ -191,6 +214,11 @@ func (m *Model) frameLines() []string {
 			body = append(body, "")
 		}
 		lines = append(lines, body...)
+	}
+	if m.shellDialog != nil {
+		// 弹窗覆盖输入坞与状态栏,独占屏幕底部:footer 与任务列表都不再渲染,
+		// 弹窗最后一行正好落在屏幕最后一行
+		return append(lines, splitFrameLines(m.shellDialog.view(m.width, m.shellDialogRows(), m.clock()))...)
 	}
 	if m.composer.selector != nil {
 		lines = append(lines, splitFrameLines(m.composer.selector.view(m.width, max(1, m.height-2)))...)

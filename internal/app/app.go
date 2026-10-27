@@ -310,16 +310,17 @@ func (a *App) SetBackgroundRunHook(hook func()) {
 	a.backgroundMu.Unlock()
 }
 
-// subagentNotificationMessages 把待投递的子任务通知渲染成 transient 消息。
+// subagentNotificationMessages 把待投递的子任务通知渲染成消息。
 // 用 XML 标签而不是 JSON:模型按标签定位字段比解析 JSON 更稳,
-// 空字段整段省略,避免模型把空串当成有效结果
+// 空字段整段省略,避免模型把空串当成有效结果。
+// 消息带 Hidden 标记:模型照常读到正文,TUI 投影与会话树跳过渲染
 func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Message {
 	if len(notifications) == 0 {
 		return nil
 	}
 	result := make([]llm.Message, 0, len(notifications))
 	for _, notification := range notifications {
-		result = append(result, llm.UserMessage{Content: []llm.Content{llm.TextContent{
+		result = append(result, llm.UserMessage{Hidden: true, Content: []llm.Content{llm.TextContent{
 			Text: renderNotification(notification),
 		}}})
 	}
@@ -330,7 +331,7 @@ func subagentNotificationMessages(notifications []taskpkg.Notification) []llm.Me
 // summary 与 result 来自模型输出,必须转义后写入,否则会破坏标签结构
 func renderNotification(notification taskpkg.Notification) string {
 	var b strings.Builder
-	b.WriteString("<task-notification>\n")
+	b.WriteString(llm.TaskNotificationOpenTag + "\n")
 	writeNotificationTag(&b, "task-id", notification.TaskID)
 	writeNotificationTag(&b, "tool-use-id", notification.ToolUseID)
 	writeNotificationTag(&b, "output-file", notification.OutputFile)
@@ -357,7 +358,7 @@ func renderNotification(notification taskpkg.Notification) string {
 		writeNotificationTag(&b, "worktreePath", notification.WorktreePath)
 		b.WriteString("</worktree>\n")
 	}
-	b.WriteString("</task-notification>")
+	b.WriteString(llm.TaskNotificationCloseTag)
 	return b.String()
 }
 

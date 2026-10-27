@@ -28,6 +28,8 @@ const (
 	selectionBackground = "#264f78" // text selection
 	// backgroundFill 是终端底色，呼吸状态点由它混向正文色
 	backgroundFill = "#1e1e1e"
+	// dialogAccentColor 是 /ps 弹窗的标题、运行中状态值与输出边框色
+	dialogAccentColor = "#00cccc"
 )
 
 func colored(color, value string) string {

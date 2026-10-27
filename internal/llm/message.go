@@ -16,10 +16,21 @@ type Message interface {
 
 type UserMessage struct {
 	Content []Content
+	// Hidden 标记这条消息只供模型阅读,不进显示层
+	// 子任务通知落盘时置位:模型下一轮照常读到正文,TUI 投影与会话树跳过渲染
+	// 标记随会话文件持久化,重开会话后仍然生效
+	Hidden bool
 }
 
 func (UserMessage) Role() Role { return RoleUser }
 func (UserMessage) message()   {}
+
+// IsHiddenMessage 报告该消息是否只供模型阅读
+// 它让显示层与会话元数据不必各自展开 UserMessage 判空
+func IsHiddenMessage(m Message) bool {
+	user, ok := m.(UserMessage)
+	return ok && user.Hidden
+}
 
 type AssistantMessage struct {
 	API          API

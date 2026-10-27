@@ -160,6 +160,11 @@ func (c *Coordinator) CommitMessages(messages []llm.Message) ([]string, error) {
 		if _, ok := message.(llm.UserMessage); !ok || index >= len(ids) || ids[index] == "" {
 			continue
 		}
+		// 隐藏消息(子任务通知)不是一轮对话的起点,给它建快照只会白扫一遍受跟踪文件,
+		// 还会让恢复点挂在一个用户看不到的条目上
+		if llm.IsHiddenMessage(message) {
+			continue
+		}
 		// 发送给模型前建立 turn 起点；文件历史失败只记录降级状态
 		if snapshotErr := c.m.MakeFileHistorySnapshot(ids[index]); snapshotErr != nil {
 			warning := fmt.Sprintf("file history snapshot unavailable for %s: %v", ids[index], snapshotErr)

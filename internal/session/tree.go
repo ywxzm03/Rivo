@@ -14,6 +14,8 @@ type TreeEntry struct {
 	Type     string
 	Role     string
 	Text     string
+	// Hidden 表示该 user 条目只供模型阅读,显示层不把它当可回退节点
+	Hidden bool
 }
 
 // TreeSnapshot 包含完整树与当前内存叶子，调用方据此构建显示投影
@@ -44,6 +46,7 @@ func (m *SessionManager) Tree() TreeSnapshot {
 		if message, ok := entry.(*MessageEntry); ok {
 			projected.Role = messageRole(message.Message)
 			projected.Text = treeMessageText(message.Message)
+			projected.Hidden = llm.IsHiddenMessage(message.Message)
 		}
 		entries = append(entries, projected)
 	}

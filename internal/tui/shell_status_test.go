@@ -40,12 +40,18 @@ func TestShellStopLine(t *testing.T) {
 }
 
 // /ps 结果写进 transcript，主 agent 运行中也能看到
-func TestShellsMsgAppendsPanel(t *testing.T) {
-	m := testModel(100, 20)
-	m.Update(ShellsMsg{Shells: []ShellView{{Command: "sleep 120", Status: "running"}}})
+// ShellsMsg 在弹窗打开时填充列表,不写 transcript
+func TestShellsMsgFillsDialog(t *testing.T) {
+	m := dialogModel(t, func(string) tea.Cmd { return nil })
+	m.editor.SetValue("/ps")
+	m.submit()
+	m.Update(ShellsMsg{Shells: []ShellView{
+		shellSample("sleep 120", "running"),
+		shellSample("sleep 240", "running"),
+	}})
 	view := m.View()
 	if !strings.Contains(view, "Background shells") || !strings.Contains(view, "sleep 120") {
-		t.Fatalf("view = %q, want the shell panel", view)
+		t.Fatalf("view = %q, want the shell list in the dialog", view)
 	}
 }
 
