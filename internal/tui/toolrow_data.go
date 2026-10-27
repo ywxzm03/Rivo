@@ -246,7 +246,7 @@ func harmlessRedirect(segment string) bool {
 	if !strings.ContainsAny(segment, "<>") {
 		return true
 	}
-	for _, word := range strings.Fields(segment) {
+	for word := range strings.FieldsSeq(segment) {
 		if !strings.ContainsAny(word, "<>") {
 			continue
 		}
@@ -284,11 +284,11 @@ func isDescriptorCopy(word string) bool {
 	}
 	operators := []string{">&", "<&"}
 	for _, operator := range operators {
-		index := strings.Index(word, operator)
-		if index < 0 {
+		_, after, ok := strings.Cut(word, operator)
+		if !ok {
 			continue
 		}
-		target := strings.Trim(word[index+len(operator):], " ;|")
+		target := strings.Trim(after, " ;|")
 		if target == "-" {
 			return true
 		}

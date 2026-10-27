@@ -34,13 +34,13 @@ func TestToolMetadata(t *testing.T) {
 
 func TestExecuteStopsAgentTask(t *testing.T) {
 	store := taskpkg.NewStore()
-	cancelled := make(chan struct{})
+	canceled := make(chan struct{})
 	id, _, err := store.Register(taskpkg.RegisterSpec{
 		Type:        taskpkg.TypeAgent,
 		Description: "long task",
 		AgentType:   "Work",
 		Runtime: &subagent.AgentRuntime{
-			Cancel:   func() { close(cancelled) },
+			Cancel:   func() { close(canceled) },
 			DoneChan: make(chan struct{}),
 		},
 	})
@@ -53,7 +53,7 @@ func TestExecuteStopsAgentTask(t *testing.T) {
 	}
 	// 1.执行面必须真正取消任务,而不只是改状态
 	select {
-	case <-cancelled:
+	case <-canceled:
 	default:
 		t.Fatal("TaskStop did not cancel the task runtime")
 	}

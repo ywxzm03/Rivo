@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,9 +14,7 @@ import (
 func runEdit(t *testing.T, path string, edits any, extra map[string]any) (llm.ToolResult, error) {
 	t.Helper()
 	args := map[string]any{"path": path, "edits": edits}
-	for key, value := range extra {
-		args[key] = value
-	}
+	maps.Copy(args, extra)
 	return (&Edit{}).Execute(context.Background(), args)
 }
 

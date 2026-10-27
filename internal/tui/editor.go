@@ -531,7 +531,7 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 		return m.handlers.Status()
 	case "/rename":
 		if arg == "" {
-			m.notice("Usage: /rename <new Name>")
+			m.notice("usage: /rename <new Name>")
 			return nil
 		}
 		return m.dispatch(RequestRename, arg)
@@ -583,7 +583,7 @@ func (m *Model) handleOverlayKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.setTaskFocus(false)
 		return true, nil
 	}
-	if msg.String() == "esc" && m.jumpPillVisible() && !(m.busy && len(m.state.Steering) > 0) {
+	if msg.String() == "esc" && m.jumpPillVisible() && (!m.busy || len(m.state.Steering) == 0) {
 		m.jumpToBottom()
 		return true, nil
 	}

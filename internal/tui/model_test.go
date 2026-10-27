@@ -83,7 +83,7 @@ func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 
 func testState() Snapshot {
 	s := Snapshot{Cwd: "/project/Rivo", Branch: "feat(tui)/fullscreen-tui", Thinking: "high"}
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		s.Models = append(s.Models, ModelOption{ID: fmt.Sprintf("model-%02d", i), Provider: fmt.Sprintf("provider-%d", i%2), Name: fmt.Sprintf("Model %d", i), ContextWindow: 1000000, Levels: []string{"off", "low", "high"}})
 	}
 	s.ModelKey, s.DefaultModelKey = s.Models[0].Key(), s.Models[1].Key()
@@ -503,13 +503,13 @@ func TestPendingSteeringViewUsesOnlyTheFirstLine(t *testing.T) {
 
 func TestEscapeRestoresSteeringBeforeCancel(t *testing.T) {
 	m := testModel(80, 24)
-	cancelled := 0
+	canceled := 0
 	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return []ComposerPayload{textPayload("queued message")} }
-	m.handlers.Cancel = func() { cancelled++ }
+	m.handlers.Cancel = func() { canceled++ }
 	m.busy = true
 	press(m, tea.KeyEsc)
-	if cancelled != 1 {
-		t.Fatalf("cancelled = %d, want one cancellation", cancelled)
+	if canceled != 1 {
+		t.Fatalf("canceled = %d, want one cancellation", canceled)
 	}
 	if got, want := m.editor.Value(), "queued message"; got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
@@ -753,16 +753,16 @@ func TestTreeRestoreSelectorDispatchesCodeMode(t *testing.T) {
 
 func TestCancelAndExit(t *testing.T) {
 	m := testModel(80, 24)
-	cancelled := 0
-	m.handlers.Cancel = func() { cancelled++ }
+	canceled := 0
+	m.handlers.Cancel = func() { canceled++ }
 	m.busy = true
 	typeText(m, "/")
 	press(m, tea.KeyEsc)
-	if cancelled != 0 || len(m.completionItems()) != 0 {
+	if canceled != 0 || len(m.completionItems()) != 0 {
 		t.Fatal("first Escape must dismiss completion")
 	}
 	press(m, tea.KeyEsc)
-	if cancelled != 1 || !m.busy {
+	if canceled != 1 || !m.busy {
 		t.Fatal("cancel should signal and await operation completion")
 	}
 	typeText(m, "draft")
@@ -773,12 +773,12 @@ func TestCancelAndExit(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m.clock = func() time.Time { return now }
 	press(m, tea.KeyCtrlC)
-	if m.editor.Value() != "" || cancelled != 1 {
+	if m.editor.Value() != "" || canceled != 1 {
 		t.Fatal("first Ctrl+C should clear only")
 	}
 	now = now.Add(200 * time.Millisecond)
 	cmd := press(m, tea.KeyCtrlC)
-	if !m.closing || cancelled != 2 {
+	if !m.closing || canceled != 2 {
 		t.Fatal("second Ctrl+C must exit even while busy")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
@@ -793,7 +793,7 @@ func TestCancelAndExit(t *testing.T) {
 func TestStreamingUpsertFlushAndScroll(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	for i := 0; i < 35; i++ {
+	for i := range 35 {
 		m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprint(i), Role: "assistant", Text: fmt.Sprintf("History line %d", i)})
 	}
 	m.refreshTranscript()
@@ -929,7 +929,7 @@ func TestFrameFitsVerySmallTerminal(t *testing.T) {
 
 func TestTerminalMouseAndClipboardInput(t *testing.T) {
 	m := testModel(60, 18)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprint(i), Role: "assistant", Text: "scrollable line"})
 	}
 	m.refreshTranscript()

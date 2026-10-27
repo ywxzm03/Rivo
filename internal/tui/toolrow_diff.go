@@ -43,7 +43,7 @@ func parseUnifiedDiff(patch string) []rowDiffLine {
 	var lines []rowDiffLine
 	oldLine, newLine := 0, 0
 	inHunk := false
-	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
 		if match := unifiedHunkHeader.FindStringSubmatch(line); match != nil {
 			oldLine, _ = strconv.Atoi(match[1])
 			newLine, _ = strconv.Atoi(match[2])

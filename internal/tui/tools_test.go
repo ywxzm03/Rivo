@@ -30,7 +30,7 @@ func TestShortenToolPathRequiresHomeBoundary(t *testing.T) {
 
 func testToolGroup(count int) *ToolGroupView {
 	group := &ToolGroupView{ID: "group"}
-	for i := 0; i < count; i++ {
+	for i := range count {
 		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess, ArgsComplete: true})
 	}
 	return group
@@ -196,7 +196,7 @@ func TestPlainMessageDoesNotInheritToolHits(t *testing.T) {
 // 展开靠后的 thinking 后仍能折叠回来
 func TestThinkingTogglesAcrossMessages(t *testing.T) {
 	var messages []Message
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		messages = append(messages, Message{
 			ID:   string(rune('a' + i)),
 			Role: "assistant",

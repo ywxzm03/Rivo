@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -192,9 +193,7 @@ func (c Config) WithStreamForTest(providerID string, models []llm.Model, stream 
 	spec.new = func(string, string) ([]llm.Model, llm.StreamFn) { return models, stream }
 	cloned := c
 	cloned.registry = make(map[string]providerSpec, len(c.registry))
-	for key, value := range c.registry {
-		cloned.registry[key] = value
-	}
+	maps.Copy(cloned.registry, c.registry)
 	cloned.registry[id] = spec
 	return cloned
 }
@@ -209,9 +208,7 @@ func NewBuiltinForTest(providerID, modelID string) Config {
 func (c Config) WithProviderForTest(providerID string, models []llm.Model, stream llm.StreamFn) Config {
 	cloned := c
 	cloned.registry = make(map[string]providerSpec, len(c.registry)+1)
-	for key, value := range c.registry {
-		cloned.registry[key] = value
-	}
+	maps.Copy(cloned.registry, c.registry)
 	cloned.registry[providerID] = providerSpec{
 		id:     providerID,
 		apiKey: "test-key",

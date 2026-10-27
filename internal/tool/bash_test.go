@@ -21,9 +21,6 @@ func runBash(t *testing.T, ctx context.Context, args map[string]any) (llm.ToolRe
 func bashText(result llm.ToolResult) string { return result.Content[0].(llm.TextContent).Text }
 
 func TestBashExecutesAndCombinesOutput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns a real shell")
-	}
 	result, err := runBash(t, context.Background(), map[string]any{"command": "printf out; printf err >&2"})
 	if err != nil {
 		t.Fatal(err)
@@ -37,9 +34,6 @@ func TestBashExecutesAndCombinesOutput(t *testing.T) {
 }
 
 func TestBashUsesConfiguredWorkingDir(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns a real shell")
-	}
 	if runtime.GOOS == "windows" {
 		t.Skip("bash working directory test requires Unix shell")
 	}
@@ -58,9 +52,6 @@ func TestBashUsesConfiguredWorkingDir(t *testing.T) {
 }
 
 func TestBashEmptyOutputAndNonzeroExit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns a real shell")
-	}
 	result, err := runBash(t, context.Background(), map[string]any{"command": "true"})
 	if err != nil || bashText(result) != "(no output)" {
 		t.Errorf("empty result = %q, %v", bashText(result), err)
@@ -87,9 +78,6 @@ func TestBashValidatesArgumentsAndTimeout(t *testing.T) {
 }
 
 func TestBashContextCancellationKillsProcessGroup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("spawns a real shell")
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	timer := time.AfterFunc(50*time.Millisecond, cancel)
 	defer timer.Stop()

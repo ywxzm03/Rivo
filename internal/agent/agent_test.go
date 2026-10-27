@@ -1201,7 +1201,7 @@ func TestAgentFiltersErrorAssistantFromNextRequest(t *testing.T) {
 	}
 	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "m1"}}, Context: llm.Context{Messages: []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "old"}}},
-		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "cancelled"}}, StopReason: llm.StopReasonError},
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "canceled"}}, StopReason: llm.StopReasonError},
 	}}, Stream: streamFn, Events: nil})
 	if _, err := a.Run(context.Background(), "new"); err != nil {
 		t.Fatal(err)

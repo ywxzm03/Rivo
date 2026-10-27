@@ -207,7 +207,7 @@ func TestBuildParams(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
-			llm.ThinkingLevelMedium: effortPtr("custom-effort"),
+			llm.ThinkingLevelMedium: new(llm.ReasoningEffort("custom-effort")),
 		}
 		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelMedium})
 		if err != nil {
@@ -220,7 +220,7 @@ func TestBuildParams(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
-			llm.ThinkingLevelHigh: effortPtr("high-plus"),
+			llm.ThinkingLevelHigh: new(llm.ReasoningEffort("high-plus")),
 		}
 		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelLow})
 		if err != nil {
@@ -257,7 +257,7 @@ func TestBuildParams(t *testing.T) {
 		model := testModel()
 		model.Reasoning = true
 		model.ThinkingLevelMap = map[llm.ThinkingLevel]*llm.ReasoningEffort{
-			llm.ThinkingLevelHigh: effortPtr("high-plus"),
+			llm.ThinkingLevelHigh: new(llm.ReasoningEffort("high-plus")),
 		}
 		params, err := BuildParams(model, llm.Context{}, llm.Options{ThinkingLevel: llm.ThinkingLevelMax})
 		if err != nil {
@@ -475,11 +475,6 @@ func TestAssistantMessageReplayRoundTrip(t *testing.T) {
 		`{"model":"gpt-5","input":[`+
 			`{"type":"message","role":"assistant","status":"completed","id":"msg_rivo_0",`+
 			`"content":[{"type":"output_text","text":"pi is approximately 3.14159","annotations":[]}]}]}`)
-}
-
-// effortPtr 返回 effort 字符串的指针，便于构造 thinkingLevelMap
-func effortPtr(e llm.ReasoningEffort) *llm.ReasoningEffort {
-	return &e
 }
 
 func TestAssistantMessageIDVariants(t *testing.T) {

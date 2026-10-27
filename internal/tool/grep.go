@@ -162,16 +162,10 @@ func parseGrepArgs(values map[string]any) (grepOptions, error) {
 	if searchPath == "" {
 		searchPath = "."
 	}
-	contextLines := params.Context
-	if contextLines < 0 {
-		contextLines = 0
-	}
+	contextLines := max(params.Context, 0)
 	limit := grepDefaultLimit
 	if params.Limit != nil {
-		limit = *params.Limit
-		if limit < 1 {
-			limit = 1
-		}
+		limit = max(*params.Limit, 1)
 	}
 	return grepOptions{
 		pattern:      params.Pattern,
@@ -192,7 +186,7 @@ func resolveGrepPath(searchPath, workingDir string) (string, bool, error) {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", false, fmt.Errorf("Path not found: %s", absPath)
+			return "", false, fmt.Errorf("path not found: %s", absPath)
 		}
 		return "", false, err
 	}

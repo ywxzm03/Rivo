@@ -138,7 +138,7 @@ func TestHistoryProjectionMergesConsecutiveToolTurns(t *testing.T) {
 func TestHistoryProjectionMarksUnfinishedToolsInterrupted(t *testing.T) {
 	runtime := &Runtime{}
 	projected := runtime.projectContext(testContext([]llm.Message{
-		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "cancelled", Name: "bash", Arguments: map[string]any{"command": "sleep 1"}}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "canceled", Name: "bash", Arguments: map[string]any{"command": "sleep 1"}}}},
 	}))
 	if len(projected) != 1 || projected[0].ToolGroup == nil || projected[0].ToolGroup.Calls[0].Status != tui.ToolInterrupted {
 		t.Fatalf("projected = %+v", projected)

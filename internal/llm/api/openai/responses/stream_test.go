@@ -409,10 +409,10 @@ func TestFinishEmptyMessageUsesOutputSlotContentIndex(t *testing.T) {
 }
 
 func TestStreamStopsWhenContextIsCanceled(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.(http.Flusher).Flush()
-		<-w.(http.CloseNotifier).CloseNotify()
+		<-r.Context().Done()
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())

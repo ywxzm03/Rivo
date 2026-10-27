@@ -3,6 +3,7 @@ package shell
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -27,10 +28,8 @@ func Environment() []string {
 
 // prependPath 只在目录尚未出现时前置，避免多次调用叠加重复项
 func prependPath(entry, current string) string {
-	for _, item := range strings.Split(current, string(os.PathListSeparator)) {
-		if item == entry {
-			return current
-		}
+	if slices.Contains(strings.Split(current, string(os.PathListSeparator)), entry) {
+		return current
 	}
 	if current == "" {
 		return entry

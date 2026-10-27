@@ -16,6 +16,44 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tools
+        run: make tools
+
+      - name: Check formatting
+        run: make check-fmt
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tools
+        run: make tools
+
+      - name: Run golangci-lint
+        run: make lint
+
   test:
     name: Test (${{ matrix.os }})
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -39,10 +77,7 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run fast tests
-        run: go test -short ./...
-
-      - name: Run full tests
+      - name: Run tests
         run: go test ./...
 
   race:
@@ -79,13 +114,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests with coverage
-        run: go test -coverprofile=coverage.txt -covermode=atomic ./...
-      - name: Check subagent coverage threshold
-        run: |
-          go test -coverprofile=subagent-coverage.txt -covermode=atomic ./internal/app ./internal/subagent ./internal/task ./internal/tool/agenttool ./internal/tui ./internal/tui/adapter
-          coverage=$(go tool cover -func=subagent-coverage.txt | awk '$1 == "total:" {gsub("%", "", $NF); print $NF}')
-          awk -v coverage="$coverage" 'BEGIN { if (coverage < 80) { printf "subagent coverage %.1f%% is below 80%%\n", coverage; exit 1 } }'
+      - name: Run tests with coverage threshold
+        run: make cover-check
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -94,4 +124,3 @@ jobs:
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-

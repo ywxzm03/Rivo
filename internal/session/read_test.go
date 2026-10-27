@@ -89,7 +89,7 @@ func TestReadMessagesDeliversOversizedEntry(t *testing.T) {
 
 	var texts []string
 	offset := int64(0)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		messages, next, err := ReadMessages(path, offset)
 		if err != nil {
 			t.Fatal(err)

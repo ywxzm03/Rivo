@@ -341,7 +341,7 @@ func isShiftArrow(msg tea.KeyMsg, key tea.KeyType) bool {
 		return true
 	}
 	// 部分终端只给 KeyRunes 加修饰,用语义字符串兜底
-	return msg.Alt == false && msg.String() == shiftArrowName(key)
+	return !msg.Alt && msg.String() == shiftArrowName(key)
 }
 
 func shiftArrowName(key tea.KeyType) string {

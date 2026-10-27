@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 // 复刻截图场景：turn1 toolUse（工具组）→ 工具批次中取消 → turn2 aborted（空）
@@ -44,8 +43,7 @@ func TestAbortDuringToolTurnKeepsAbortedMarker(t *testing.T) {
 	sink(llm.AgentEndEvent{Messages: nil})
 
 	// dispatch 收尾：会话投影包含全部已落盘消息（含 aborted assistant，E2E 已证实落盘）
-	var partial *tui.Message
-	partial = runtime.partialAssistantLocked()
+	partial := runtime.partialAssistantLocked()
 	runtime.replaceMessagesLocked(testContext([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "分析一下当前项目"}}},
 		llm.AssistantMessage{

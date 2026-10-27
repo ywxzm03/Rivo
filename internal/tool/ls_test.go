@@ -96,8 +96,8 @@ func TestLsPathNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a missing-path error")
 	}
-	if got := err.Error(); got != "Path not found: "+want {
-		t.Errorf("err = %q, want %q", got, "Path not found: "+want)
+	if got := err.Error(); got != "path not found: "+want {
+		t.Errorf("err = %q, want %q", got, "path not found: "+want)
 	}
 }
 
@@ -108,8 +108,8 @@ func TestLsNotADirectory(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want a not-a-directory error")
 	}
-	if got := err.Error(); got != "Not a directory: "+path {
-		t.Errorf("err = %q, want %q", got, "Not a directory: "+path)
+	if got := err.Error(); got != "not a directory: "+path {
+		t.Errorf("err = %q, want %q", got, "not a directory: "+path)
 	}
 }
 

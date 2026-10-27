@@ -43,7 +43,7 @@ func (m *Model) layout() {
 	})
 	probe.ShowLineNumbers = false
 	probe.SetWidth(max(1, m.width))
-	for _, line := range strings.Split(m.editor.Value(), "\n") {
+	for line := range strings.SplitSeq(m.editor.Value(), "\n") {
 		// 使用编辑器自身的软换行规则，包含行尾光标与按单词换行占用的空间
 		probe.SetValue(line)
 		rows += probe.LineInfo().Height
@@ -75,7 +75,7 @@ func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int)
 	// textarea 在 SetHeight/SetWidth 后会保留私有视口偏移，先回到输入起点，
 	// 再走到原来的逻辑行，使光标停在用户离开的位置
 	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyCtrlHome})
-	for steps := 0; steps < 100000; steps++ {
+	for range 100000 {
 		line := editor.Line()
 		if line >= targetLine {
 			break

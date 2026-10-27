@@ -188,7 +188,7 @@ func TestToolBatchKeepsCompletedResultsAfterCancel(t *testing.T) {
 type blockingTool struct{}
 
 func (blockingTool) Name() string               { return "blocking" }
-func (blockingTool) Description() string        { return "blocks until cancelled" }
+func (blockingTool) Description() string        { return "blocks until canceled" }
 func (blockingTool) PromptSnippet() string      { return "" }
 func (blockingTool) PromptGuidelines() []string { return nil }
 func (blockingTool) Parameters() map[string]any {

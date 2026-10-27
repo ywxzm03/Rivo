@@ -207,7 +207,7 @@ func TestBackspaceDeletesMarker(t *testing.T) {
 	pasteText(m, strings.Repeat("line\n", 10)+"line")
 	typeText(m, "after")
 	// 光标在 "after" 末尾，先退 5 次到标记尾部
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		press(m, tea.KeyBackspace)
 	}
 	press(m, tea.KeyBackspace)

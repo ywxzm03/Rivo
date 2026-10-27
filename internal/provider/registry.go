@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/config"
@@ -256,17 +257,13 @@ func applyModelOverride(model llm.Model, override config.ModelOverride) llm.Mode
 		if model.ThinkingLevelMap == nil {
 			model.ThinkingLevelMap = make(map[llm.ThinkingLevel]*llm.ReasoningEffort)
 		}
-		for level, effort := range thinkingLevelMap(override.ThinkingLevelMap) {
-			model.ThinkingLevelMap[level] = effort
-		}
+		maps.Copy(model.ThinkingLevelMap, thinkingLevelMap(override.ThinkingLevelMap))
 	}
 	if override.SamplingParams != nil {
 		if model.SamplingParams == nil {
 			model.SamplingParams = make(map[string]any)
 		}
-		for key, value := range override.SamplingParams {
-			model.SamplingParams[key] = value
-		}
+		maps.Copy(model.SamplingParams, override.SamplingParams)
 	}
 	return model
 }
@@ -330,8 +327,6 @@ func copyParams(params map[string]any) map[string]any {
 		return nil
 	}
 	cloned := make(map[string]any, len(params))
-	for key, value := range params {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, params)
 	return cloned
 }

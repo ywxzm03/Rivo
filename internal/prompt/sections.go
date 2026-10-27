@@ -90,11 +90,12 @@ func buildRules(tools []llm.Tool) string {
 }
 
 func buildInstructions(files []ContextFile) string {
-	body := "Project-specific instructions and guidelines:"
+	var body strings.Builder
+	body.WriteString("Project-specific instructions and guidelines:")
 	for _, file := range files {
-		body += "\n\n<instructions path=\"" + escapeXML(file.Path) + "\">\n" + file.Content + "\n</instructions>"
+		body.WriteString("\n\n<instructions path=\"" + escapeXML(file.Path) + "\">\n" + file.Content + "\n</instructions>")
 	}
-	return wrap("instructions", body)
+	return wrap("instructions", body.String())
 }
 
 // DiffSections 只返回发生变化或需要删除的节，值指向目标文本；无差异返回 nil，

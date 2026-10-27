@@ -3,6 +3,7 @@ package completions
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
@@ -54,9 +55,7 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (sdk.ChatComp
 			overrides[key] = value
 		}
 	}
-	for key, value := range overrides {
-		body[key] = value
-	}
+	maps.Copy(body, overrides)
 	data, err := json.Marshal(body)
 	if err != nil {
 		return sdk.ChatCompletionNewParams{}, fmt.Errorf("openai: marshal chat completion params: %w", err)

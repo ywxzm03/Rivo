@@ -76,7 +76,7 @@ func TestFreshStoresDoNotReuseTaskIDs(t *testing.T) {
 	// 单轮几乎撞不上：两个 Store 的实例内计数器都从 1 开始，
 	// 只有同一纳秒注册才会碰撞，所以必须多轮才有意义
 	seen := make(map[string]struct{}, 500)
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		first, second := NewStore(), NewStore()
 		id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
 		if err != nil {
@@ -102,12 +102,10 @@ func TestConcurrentStoresDoNotReuseTaskIDs(t *testing.T) {
 	const workers = 8
 	ids := make(chan string, workers*20)
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			store := NewStore()
-			for j := 0; j < 20; j++ {
+			for range 20 {
 				id, _, err := store.Register(RegisterSpec{Type: TypeBash, Description: "bg"})
 				if err != nil {
 					t.Error(err)
@@ -115,7 +113,7 @@ func TestConcurrentStoresDoNotReuseTaskIDs(t *testing.T) {
 				}
 				ids <- id
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(ids)

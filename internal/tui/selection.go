@@ -181,7 +181,7 @@ func wordBounds(lines []string, point screenPoint) (int, int, bool) {
 	}
 	var cells []cell
 	column := 0
-	for _, r := range []rune(line) {
+	for _, r := range line {
 		width := ansi.StringWidth(string(r))
 		if width <= 0 {
 			width = 1

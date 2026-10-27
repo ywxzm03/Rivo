@@ -505,7 +505,7 @@ func TestToolRowClickExpandsThinking(t *testing.T) {
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
 
-	var thinkingLine int = -1
+	thinkingLine := -1
 	for _, hit := range m.transcript.hits {
 		if hit.Kind == "thinking" {
 			thinkingLine = hit.Start

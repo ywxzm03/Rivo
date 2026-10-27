@@ -11,8 +11,6 @@ import (
 	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
-const shellMaxTimeoutMS = 2_147_483_647
-
 func shellParameters() map[string]any {
 	return map[string]any{
 		"type":     "object",

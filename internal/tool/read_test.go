@@ -242,7 +242,7 @@ func TestReadOffsetBeyondEnd(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want an out-of-range error")
 	}
-	want := "Offset 100 is beyond end of file (3 lines total)"
+	want := "offset 100 is beyond end of file (3 lines total)"
 	if err.Error() != want {
 		t.Errorf("err = %q, want %q", err, want)
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,13 +64,13 @@ func TestAppCancelSettlesWithAbortedAndReplaysCleanly(t *testing.T) {
 	if message.ErrorMessage != "Operation aborted" {
 		t.Fatalf("errorMessage = %q", message.ErrorMessage)
 	}
-	text := ""
+	var text strings.Builder
 	for _, content := range message.Content {
 		if textContent, ok := content.(llm.TextContent); ok {
-			text += textContent.Text
+			text.WriteString(textContent.Text)
 		}
 	}
-	if text == "" {
+	if text.String() == "" {
 		t.Fatal("aborted message should preserve partial content")
 	}
 

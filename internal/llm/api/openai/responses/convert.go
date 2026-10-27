@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
@@ -100,10 +101,8 @@ func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffo
 // clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级
 func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLevel {
 	available := supportedThinkingLevels(model)
-	for _, l := range available {
-		if l == level {
-			return level
-		}
+	if slices.Contains(available, level) {
+		return level
 	}
 	requestedIndex := -1
 	for i, l := range llm.ThinkingLevels {
@@ -149,12 +148,7 @@ func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
 }
 
 func containsThinkingLevel(levels []llm.ThinkingLevel, level llm.ThinkingLevel) bool {
-	for _, l := range levels {
-		if l == level {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(levels, level)
 }
 
 func firstThinkingLevel(levels []llm.ThinkingLevel) llm.ThinkingLevel {
@@ -277,11 +271,11 @@ func assistantMessageID(msgIndex, textIndex int) string {
 func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionParam {
 	var output responses.ResponseInputItemFunctionCallOutputOutputUnionParam
 	if allText(m.Content) {
-		var text string
+		var text strings.Builder
 		for _, c := range m.Content {
-			text += c.(llm.TextContent).Text
+			text.WriteString(c.(llm.TextContent).Text)
 		}
-		output.OfString = sdk.String(text)
+		output.OfString = sdk.String(text.String())
 	} else {
 		var items responses.ResponseFunctionCallOutputItemListParam
 		for _, c := range m.Content {
@@ -359,9 +353,10 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			})
 		case "message":
 			for _, part := range item.Content {
-				if part.Type == "output_text" {
+				switch part.Type {
+				case "output_text":
 					msg.Content = append(msg.Content, llm.TextContent{Text: part.Text})
-				} else if part.Type == "refusal" {
+				case "refusal":
 					msg.Content = append(msg.Content, llm.TextContent{Text: part.Refusal})
 				}
 			}

@@ -82,18 +82,18 @@ func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, 
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("path not found: %s", absPath)
 		}
 		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("not a directory: %s", absPath)
 	}
 
 	// 3.列目录并按名字排序
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
-		return llm.ToolResult{}, fmt.Errorf("Cannot read directory: %w", err)
+		return llm.ToolResult{}, fmt.Errorf("cannot read directory: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

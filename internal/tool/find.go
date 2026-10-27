@@ -79,12 +79,12 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("path not found: %s", absPath)
 		}
 		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("not a directory: %s", absPath)
 	}
 
 	// 2.查找 rg 并流式读取匹配路径
@@ -121,10 +121,7 @@ func parseFindArgs(values map[string]any) (findOptions, error) {
 	}
 	limit := findDefaultLimit
 	if params.Limit != nil {
-		limit = *params.Limit
-		if limit < 1 {
-			limit = 1
-		}
+		limit = max(*params.Limit, 1)
 	}
 	return findOptions{pattern: params.Pattern, searchPath: searchPath, limit: limit}, nil
 }

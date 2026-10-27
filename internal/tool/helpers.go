@@ -37,24 +37,25 @@ func resolvePathFrom(path, cwd string) (string, error) {
 }
 
 func truncationNote(shown, reason, next string, extra ...string) string {
-	note := shown
+	var note strings.Builder
+	note.WriteString(shown)
 	if reason != "" {
-		note += " (" + reason + ")"
+		note.WriteString(" (" + reason + ")")
 	}
-	note += "."
+	note.WriteString(".")
 	if next != "" {
-		note += " Use " + next + " to continue."
+		note.WriteString(" Use " + next + " to continue.")
 	}
 	for _, item := range extra {
 		if item == "" {
 			continue
 		}
-		note += " " + item
+		note.WriteString(" " + item)
 		if !strings.HasSuffix(item, ".") {
-			note += "."
+			note.WriteString(".")
 		}
 	}
-	return "\n\n[" + note + "]"
+	return "\n\n[" + note.String() + "]"
 }
 
 func truncateLine(line string, maxChars int) (string, bool) {

@@ -11,7 +11,7 @@ import (
 func scrollableModel(t *testing.T) *Model {
 	t.Helper()
 	m := testModel(80, 24)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		m.state.Messages = append(m.state.Messages, Message{ID: string(rune('a' + i)), Role: "assistant", Text: "scrollable line"})
 	}
 	m.refreshTranscript()
@@ -40,15 +40,15 @@ func TestJumpToBottomPillUsesClaudeLabelAndOverlay(t *testing.T) {
 
 func TestJumpToBottomEscapeHasPriorityWhileBusy(t *testing.T) {
 	m := scrollableModel(t)
-	cancelled := 0
+	canceled := 0
 	m.busy = true
-	m.handlers.Cancel = func() { cancelled++ }
+	m.handlers.Cancel = func() { canceled++ }
 	press(m, tea.KeyEsc)
 	if !m.viewport.AtBottom() {
 		t.Fatal("Escape should jump to the bottom")
 	}
-	if cancelled != 0 {
-		t.Fatalf("Escape cancelled the operation %d times, want 0", cancelled)
+	if canceled != 0 {
+		t.Fatalf("Escape canceled the operation %d times, want 0", canceled)
 	}
 }
 

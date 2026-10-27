@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -158,7 +159,7 @@ func (m *SessionManager) AppendThinkingLevelChange(level string) error {
 func (m *SessionManager) AppendSessionInfo(name string) error {
 	name = strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(name))
 	if name == "" {
-		return errors.New("Usage: /rename <new Name>")
+		return errors.New("usage: /rename <new Name>")
 	}
 	return m.appendEntry(&SessionInfoEntry{Name: name})
 }
@@ -281,11 +282,9 @@ func (m *SessionManager) AddWarning(warning string) {
 		return
 	}
 	m.persistMu.Lock()
-	for _, existing := range m.warnings {
-		if existing == warning {
-			m.persistMu.Unlock()
-			return
-		}
+	if slices.Contains(m.warnings, warning) {
+		m.persistMu.Unlock()
+		return
 	}
 	if len(m.warnings) >= maxSessionWarnings {
 		copy(m.warnings, m.warnings[len(m.warnings)-maxSessionWarnings+1:])

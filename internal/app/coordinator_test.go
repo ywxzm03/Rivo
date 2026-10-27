@@ -169,13 +169,14 @@ func sessionEntries(t *testing.T, sm *session.SessionManager) []session.Entry {
 		if err := json.Unmarshal(line, &kind); err != nil {
 			t.Fatal(err)
 		}
-		if kind.Type == session.TypeCompaction {
+		switch kind.Type {
+		case session.TypeCompaction:
 			var e session.CompactionEntry
 			if err := json.Unmarshal(line, &e); err != nil {
 				t.Fatal(err)
 			}
 			entries = append(entries, &e)
-		} else if kind.Type == session.TypeContextEdit {
+		case session.TypeContextEdit:
 			var e session.ContextEditEntry
 			if err := json.Unmarshal(line, &e); err != nil {
 				t.Fatal(err)
@@ -334,7 +335,7 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	hasOmission, hasCompaction := false, false
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		var obj struct {
 			Type        string           `json:"type"`
 			Replacement *json.RawMessage `json:"replacement"`

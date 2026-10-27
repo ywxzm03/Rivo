@@ -120,7 +120,7 @@ func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
 		}
 		return runtime, nil
 	})
-	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "cancelled work", Prompt: "wait"})
+	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "canceled work", Prompt: "wait"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
 		notifications := manager.Store().PeekNotifications()
 		if len(notifications) == 1 {
 			notification := notifications[0]
-			if notification.Reason != taskpkg.StopReasonAborted || notification.Summary != `Agent "cancelled work" was aborted` {
+			if notification.Reason != taskpkg.StopReasonAborted || notification.Summary != `Agent "canceled work" was aborted` {
 				t.Fatalf("cancellation notification = %#v", notification)
 			}
 			return

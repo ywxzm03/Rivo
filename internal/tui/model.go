@@ -284,15 +284,11 @@ type Model struct {
 	// backgroundRun 标记当前忙碌态来自通知驱动的后台 run,不是用户操作
 	backgroundRun bool
 	status        string
-	showThinking  bool
-	showAllTools  bool
-	// hideTools 是 Ctrl+Q 的遮罩：整段工具组与思考块只剩一行提示
-	hideTools    bool
-	lastCtrlC    time.Time
-	flushPending bool
-	cache        map[string]cachedMessage
-	markdown     markdownRenderer
-	clock        func() time.Time
+	lastCtrlC     time.Time
+	flushPending  bool
+	cache         map[string]cachedMessage
+	markdown      markdownRenderer
+	clock         func() time.Time
 	// sel 承载鼠标选择与复制提示状态
 	sel selection
 	// transcript 承载渲染缓存、展开状态与点击命中区间
@@ -1274,10 +1270,7 @@ func (m *Model) trimRenderCache() {
 		return
 	}
 	// 视口附近的条目保留，其余按消息顺序从最早开始丢弃
-	keepFrom := len(m.state.Messages) - renderCacheLimit/2
-	if keepFrom < 0 {
-		keepFrom = 0
-	}
+	keepFrom := max(len(m.state.Messages)-renderCacheLimit/2, 0)
 	kept := make(map[string]cachedMessage, len(m.cache))
 	for index := keepFrom; index < len(m.state.Messages); index++ {
 		id := m.state.Messages[index].ID

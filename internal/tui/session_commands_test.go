@@ -20,7 +20,7 @@ func TestRenameCommandRequiresNameAndKeepsSpaces(t *testing.T) {
 	m.Update(OperationDoneMsg{})
 	m.editor.SetValue("/rename")
 	m.submit()
-	if len(requests) != 1 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Usage: /rename") {
+	if len(requests) != 1 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "usage: /rename") {
 		t.Fatal("empty rename did not show usage")
 	}
 }

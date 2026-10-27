@@ -56,7 +56,7 @@ func TestApplyModelOverrideCoversEveryField(t *testing.T) {
 		Reasoning: true, SupportsImages: true, ContextWindow: 400000, MaxTokens: 128000,
 		Cost: &llm.CostRates{Input: 10},
 		ThinkingLevelMap: map[llm.ThinkingLevel]*llm.ReasoningEffort{
-			llm.ThinkingLevelHigh: effortPtr(llm.ReasoningEffortHigh),
+			llm.ThinkingLevelHigh: new(llm.ReasoningEffortHigh),
 		},
 		SamplingParams: map[string]any{"temperature": 1.0},
 	}
@@ -65,7 +65,7 @@ func TestApplyModelOverrideCoversEveryField(t *testing.T) {
 		Input:         []string{"text"},
 		Cost:          &cost,
 		ContextWindow: &contextWindow, MaxTokens: &maxTokens,
-		ThinkingLevelMap: map[string]*string{"low": stringPtr("low")},
+		ThinkingLevelMap: map[string]*string{"low": new("low")},
 		SamplingParams:   map[string]any{"top_p": 0.9},
 	}
 	got := applyModelOverride(model, override)
@@ -119,6 +119,6 @@ func TestValidateModelOverridesRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func stringPtr(value string) *string { return &value }
+//go:fix inline
 
-func effortPtr(value llm.ReasoningEffort) *llm.ReasoningEffort { return &value }
+//go:fix inline

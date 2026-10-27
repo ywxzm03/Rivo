@@ -393,6 +393,22 @@ func (m *Model) rebuildMessageIndexPreserveCache() {
 	}
 }
 
+// statusLabel 把任务状态转成展示文案，只认四个已知值
+func statusLabel(status string) string {
+	switch status {
+	case "running":
+		return "Running"
+	case "completed":
+		return "Completed"
+	case "failed":
+		return "Failed"
+	case "killed":
+		return "Killed"
+	default:
+		return "Working"
+	}
+}
+
 func taskStatusIcon(status string, runningFrame string) string {
 	switch status {
 	case "running":
@@ -569,10 +585,7 @@ func (m *Model) subagentDetailHeader() string {
 		return ""
 	}
 	name := taskLabel(task)
-	status := strings.Title(task.Status)
-	if status == "" {
-		status = "Working"
-	}
+	status := statusLabel(task.Status)
 	line := name + " › " + task.Description + "  " + taskStatusIcon(task.Status, m.spinner.View()) + " " + status
 	if task.LastActivity != "" {
 		line += "  " + task.LastActivity

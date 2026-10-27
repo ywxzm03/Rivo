@@ -133,7 +133,7 @@ func TestSubagentTaskSuffixIsRightAligned(t *testing.T) {
 	}}}}, Handlers{})
 	m.clock = func() time.Time { return ended }
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	for _, line := range strings.Split(ansi.Strip(m.View()), "\n") {
+	for line := range strings.SplitSeq(ansi.Strip(m.View()), "\n") {
 		if strings.Contains(line, "Explore") && strings.Contains(line, "1.2k") {
 			if !strings.HasSuffix(line, "2s  1.2k  ·2") {
 				t.Fatalf("task suffix is not right aligned: %q", line)
@@ -548,7 +548,7 @@ func TestTaskRowsDoNotSwallowEditor(t *testing.T) {
 // 任务行数量增加时输入框仍要保留
 func TestManyTaskRowsKeepEditorVisible(t *testing.T) {
 	var tasks []SubagentTaskView
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		tasks = append(tasks, SubagentTaskView{ID: fmt.Sprintf("agent-%d", i), AgentType: "work", Status: "running", Description: fmt.Sprintf("task %d", i)})
 	}
 	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: tasks}}, Handlers{})
@@ -1339,7 +1339,7 @@ func TestManyTasksKeepEditorVisible(t *testing.T) {
 	for _, count := range []int{5, 10, 20, 40} {
 		for _, focused := range []bool{false, true} {
 			var tasks []SubagentTaskView
-			for i := 0; i < count; i++ {
+			for i := range count {
 				tasks = append(tasks, SubagentTaskView{
 					ID:          fmt.Sprintf("t-%d", i),
 					AgentType:   "explore",
@@ -1375,7 +1375,7 @@ func TestManyTasksKeepEditorVisible(t *testing.T) {
 // 截断时保留最近的任务,main 行始终在
 func TestTaskListTruncationKeepsNewest(t *testing.T) {
 	var tasks []SubagentTaskView
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		tasks = append(tasks, SubagentTaskView{
 			ID:          fmt.Sprintf("t-%d", i),
 			AgentType:   "explore",

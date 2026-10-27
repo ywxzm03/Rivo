@@ -109,12 +109,12 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	}
 	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
+		return llm.ToolResult{}, fmt.Errorf("could not edit file %s: %w", path, err)
 	}
 	originalData := append([]byte(nil), data...)
 	info, err := os.Lstat(absPath)
 	if err != nil {
-		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
+		return llm.ToolResult{}, fmt.Errorf("could not edit file %s: %w", path, err)
 	}
 	bom := []byte(nil)
 	if bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}) {
@@ -136,7 +136,7 @@ func (e *Edit) executeEdit(ctx context.Context, path, absPath string, edits []te
 	final := append(append([]byte(nil), bom...), []byte(restoreLineEndings(newContent, ending))...)
 	file, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
-		return llm.ToolResult{}, fmt.Errorf("Could not edit file: %s. %w", path, err)
+		return llm.ToolResult{}, fmt.Errorf("could not edit file %s: %w", path, err)
 	}
 	_, writeErr := file.Write(final)
 	closeErr := file.Close()
@@ -174,7 +174,7 @@ func parseEditArgs(values map[string]any) (string, []textEdit, error) {
 	if path.Path == "" {
 		return "", nil, fmt.Errorf("edit: missing required parameter: path")
 	}
-	var raw any = values["edits"]
+	raw := values["edits"]
 	if encoded, ok := raw.(string); ok {
 		var parsed any
 		if err := json.Unmarshal([]byte(encoded), &parsed); err != nil {
@@ -217,9 +217,7 @@ func normalizePathInput(path string) (string, error) {
 			return r
 		}
 	}, path)
-	if strings.HasPrefix(path, "@") {
-		path = path[1:]
-	}
+	path = strings.TrimPrefix(path, "@")
 	if !strings.HasPrefix(path, "file://") {
 		return path, nil
 	}
@@ -298,7 +296,7 @@ func applyTextEdits(content string, edits []textEdit, path string) (string, erro
 	// 1.只要有一处需要模糊匹配，所有匹配都使用同一份规范化文本
 	for i, edit := range edits {
 		if edit.oldText == "" {
-			return "", fmt.Errorf("edits[%d].oldText must not be empty in %s.", i, path)
+			return "", fmt.Errorf("edits[%d].oldText must not be empty in %s", i, path)
 		}
 	}
 	matches := make([]matchedEdit, 0, len(edits))
@@ -320,11 +318,11 @@ func applyTextEdits(content string, edits []textEdit, path string) (string, erro
 		}
 		start := strings.Index(base, oldText)
 		if start < 0 {
-			return "", fmt.Errorf("Could not find edits[%d] in %s. The oldText must match exactly including all whitespace and newlines.", i, path)
+			return "", fmt.Errorf("could not find edits[%d] in %s: oldText must match exactly including all whitespace and newlines", i, path)
 		}
 		count := strings.Count(fuzzyNormalize(content), fuzzyNormalize(edit.oldText))
 		if count > 1 {
-			return "", fmt.Errorf("Found %d occurrences of edits[%d] in %s. Each oldText must be unique. Please provide more context to make it unique.", count, i, path)
+			return "", fmt.Errorf("found %d occurrences of edits[%d] in %s: each oldText must be unique, provide more context to make it unique", count, i, path)
 		}
 		matches = append(matches, matchedEdit{index: i, start: start, length: len(oldText), newText: edit.newText})
 	}
@@ -332,7 +330,7 @@ func applyTextEdits(content string, edits []textEdit, path string) (string, erro
 	for i := 1; i < len(matches); i++ {
 		previous, current := matches[i-1], matches[i]
 		if previous.start+previous.length > current.start {
-			return "", fmt.Errorf("edits[%d] and edits[%d] overlap in %s. Merge them into one edit or target disjoint regions.", previous.index, current.index, path)
+			return "", fmt.Errorf("edits[%d] and edits[%d] overlap in %s: merge them into one edit or target disjoint regions", previous.index, current.index, path)
 		}
 	}
 	newBase := applyReplacements(base, matches)
@@ -341,7 +339,7 @@ func applyTextEdits(content string, edits []textEdit, path string) (string, erro
 		newBase = preserveUnchangedLines(content, base, matches)
 	}
 	if newBase == content {
-		return "", fmt.Errorf("No changes made to %s. The replacements produced identical content.", path)
+		return "", fmt.Errorf("no changes made to %s: replacements produced identical content", path)
 	}
 	return newBase, nil
 }

@@ -233,7 +233,7 @@ func (m *Model) backspaceAtMarker() bool {
 	}
 	// 用 rune 数决定退格次数，避免多字节标记残留半个字符
 	steps := len([]rune(prefix[loc[0]:loc[1]]))
-	for i := 0; i < steps; i++ {
+	for range steps {
 		var cmd tea.Cmd
 		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 		_ = cmd

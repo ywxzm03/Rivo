@@ -109,7 +109,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	}
 	startLineDisplay := startLine + 1
 	if startLine >= totalFileLines {
-		return llm.ToolResult{}, fmt.Errorf("Offset %d is beyond end of file (%d lines total)", offset, totalFileLines)
+		return llm.ToolResult{}, fmt.Errorf("offset %d is beyond end of file (%d lines total)", offset, totalFileLines)
 	}
 
 	// 4.limit 只切出候选区间，真正的截断交给 truncateHead
