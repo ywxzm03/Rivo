@@ -30,10 +30,6 @@ func matchEvent(path string, line int, text string) string {
 	return fmt.Sprintf(`{"type":"match","data":{"path":{"text":%q},"line_number":%d,"lines":{"text":%q}}}`, path, line, text+"\n")
 }
 
-func contextEvent(path string, line int, text string) string {
-	return fmt.Sprintf(`{"type":"context","data":{"path":{"text":%q},"line_number":%d,"lines":{"text":%q}}}`, path, line, text+"\n")
-}
-
 func TestGrepBasicAndArguments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

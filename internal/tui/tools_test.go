@@ -30,7 +30,7 @@ func TestShortenToolPathRequiresHomeBoundary(t *testing.T) {
 
 func testToolGroup(count int) *ToolGroupView {
 	group := &ToolGroupView{ID: "group"}
-	for i := 0; i < count; i++ {
+	for i := range count {
 		group.Calls = append(group.Calls, ToolCallView{ID: string(rune('a' + i)), Name: "bash", Arguments: `{"command":"cmd"}`, Result: "result", Status: ToolSuccess, ArgsComplete: true})
 	}
 	return group
@@ -185,18 +185,18 @@ func TestPlainMessageDoesNotInheritToolHits(t *testing.T) {
 	m.refreshTranscript()
 
 	// 只有第一条消息贡献命中区
-	if len(m.lastToolHits) != 1 {
-		t.Fatalf("hits = %d, want 1 (only the tool group)", len(m.lastToolHits))
+	if len(m.transcript.hits) != 1 {
+		t.Fatalf("hits = %d, want 1 (only the tool group)", len(m.transcript.hits))
 	}
-	if m.lastToolHits[0].Key != "g/r0" {
-		t.Fatalf("hit key = %q, want g/r0", m.lastToolHits[0].Key)
+	if m.transcript.hits[0].Key != "g/r0" {
+		t.Fatalf("hit key = %q, want g/r0", m.transcript.hits[0].Key)
 	}
 }
 
 // 展开靠后的 thinking 后仍能折叠回来
 func TestThinkingTogglesAcrossMessages(t *testing.T) {
 	var messages []Message
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		messages = append(messages, Message{
 			ID:   string(rune('a' + i)),
 			Role: "assistant",
@@ -211,11 +211,11 @@ func TestThinkingTogglesAcrossMessages(t *testing.T) {
 	m.refreshTranscript()
 
 	key := "i/r0"
-	m.expandedThoughts[key] = true
+	m.transcript.expandedThoughts[key] = true
 	m.refreshTranscript()
 	var target toolHit
 	found := false
-	for _, hit := range m.lastToolHits {
+	for _, hit := range m.transcript.hits {
 		if hit.Key == key {
 			target, found = hit, true
 		}
@@ -229,7 +229,7 @@ func TestThinkingTogglesAcrossMessages(t *testing.T) {
 	if !m.toggleToolHit(target.Start) {
 		t.Fatal("toggle did not hit")
 	}
-	if m.expandedThoughts[key] {
+	if m.transcript.expandedThoughts[key] {
 		t.Fatal("thinking did not collapse after expanding")
 	}
 }

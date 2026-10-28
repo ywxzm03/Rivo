@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -54,16 +53,17 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 		case "exit":
 			activeApp.ExitSubagentView()
 		case "queue", "followup":
-			if request.Message == nil {
+			message := payloadMessage(request.Message)
+			if message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				err = activeApp.QueueSubagentMessage(request.TaskID, *request.Message, request.Kind == "followup")
+				err = activeApp.QueueSubagentMessage(request.TaskID, *message, request.Kind == "followup")
 			}
 		case "continue":
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, taskMessageText(*request.Message))
+				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, llm.TextOf(payloadMessage(request.Message).Content))
 			}
 		case "dequeue":
 			// 从子任务队列撤回:与主 agent 一样,取出后交回编辑器
@@ -84,22 +84,12 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 				err = fmt.Errorf("subagent task %s cannot be evicted", request.TaskID)
 			}
 		}
-		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: restored}
+		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: payloadsFromMessages(restored)}
 		if err != nil {
 			result.RestoreMessage = request.Message
 		}
 		return result
 	}
-}
-
-func taskMessageText(message llm.UserMessage) string {
-	var parts []string
-	for _, content := range message.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // transcriptCache 是 TUI 侧的 transcript 增量投影缓存。
@@ -210,17 +200,27 @@ func (r *Runtime) subagentTranscript(store *task.Store, state *task.AgentState) 
 	return append(projected, tail...)
 }
 
-func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, viewingTaskID string) []tui.SubagentTaskView {
+// projectSubagentSnapshot 把 store 状态投影成面板快照:
+// 任务列表只收子 agent,后台 bash 只贡献运行中计数
+func (r *Runtime) projectSubagentSnapshot(store *task.Store, states []task.State, viewingTaskID string) tui.SubagentSnapshot {
 	tasks := make([]tui.SubagentTaskView, 0, len(states))
 	live := make(map[string]bool, len(states))
+	runningShells := 0
 	for _, state := range states {
 		if state == nil || state.Base() == nil {
 			continue
 		}
 		base := state.Base()
 		live[base.ID] = true
+		// 1.后台 bash 走独立展示路径,不进入任务列表
+		if _, isBash := state.(*task.BashState); isBash {
+			if base.Status == task.StatusRunning {
+				runningShells++
+			}
+			continue
+		}
 		view := tui.SubagentTaskView{
-			ID: base.ID, Type: string(base.Type), Status: string(base.Status),
+			ID: base.ID, Status: string(base.Status),
 			Description: base.Description, OutputFile: base.OutputFile,
 			StartTime: base.StartTime, EndTime: base.EndTime,
 			LifecycleToken: base.LifecycleToken,
@@ -248,14 +248,6 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 				}
 			}
 			view.Error = task.Error
-		case *task.BashState:
-			view.AgentType = "bash"
-			view.Description = task.Command
-			view.TotalTokens = 0
-			view.Revision = subagentTaskRevision(base, 0, 0)
-			if task.Result != nil && task.Result.Code != 0 {
-				view.Error = fmt.Sprintf("exit code %d", task.Result.Code)
-			}
 		}
 		tasks = append(tasks, view)
 	}
@@ -273,7 +265,7 @@ func (r *Runtime) projectSubagentTasks(store *task.Store, states []task.State, v
 		}
 		return left.ID < right.ID
 	})
-	return tasks
+	return tui.SubagentSnapshot{Tasks: tasks, RunningShells: runningShells, ViewingTaskID: viewingTaskID}
 }
 
 func subagentTaskRevision(base *task.StateBase, messageCount, pendingCount int) uint64 {
@@ -324,9 +316,11 @@ func projectSubagentMessages(taskID string, start int, messages []llm.Message) [
 				case llm.ToolCall:
 					// 从磁盘读到的调用参数已经完整,ArgsComplete 必须置真,
 					// 否则渲染层会把它当成"参数还在流式写入"而跳过
-					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeTaskArguments(content.Arguments), Status: tui.ToolPending, ArgsComplete: true, Round: index}
+					call := tui.ToolCallView{ID: content.ID, Name: content.Name, Arguments: encodeToolArguments(content.Arguments), Status: tui.ToolPending, ArgsComplete: true, Round: index}
 					if result, ok := results[content.ID]; ok {
-						call.Result = formatTaskToolResult(result)
+						// 与主视图一致：Details 单独走结构化字段，不混进结果正文
+						call.Result = formatToolResult(llm.ToolResult{Content: result.Content, IsError: result.IsError})
+						call.Details = encodeToolDetails(result.Details)
 						call.Status = tui.ToolSuccess
 						if result.IsError {
 							call.Status = tui.ToolError
@@ -363,30 +357,6 @@ func taskMessageContent(content []llm.Content) (string, []tui.ImageView) {
 	return text, images
 }
 
-func encodeTaskArguments(arguments map[string]any) string {
-	data, err := json.MarshalIndent(arguments, "", "  ")
-	if err != nil {
-		return fmt.Sprint(arguments)
-	}
-	return string(data)
-}
-
-func formatTaskToolResult(result llm.ToolResultMessage) string {
-	var parts []string
-	for _, content := range result.Content {
-		if text, ok := content.(llm.TextContent); ok {
-			parts = append(parts, text.Text)
-		}
-	}
-	if result.Details != nil {
-		data, err := json.MarshalIndent(result.Details, "", "  ")
-		if err == nil {
-			parts = append(parts, string(data))
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
 // messageTexts 把队列消息投影成首行文本
 func messageTexts(messages []llm.UserMessage) []string {
 	if len(messages) == 0 {
@@ -394,7 +364,7 @@ func messageTexts(messages []llm.UserMessage) []string {
 	}
 	texts := make([]string, 0, len(messages))
 	for _, message := range messages {
-		if text := taskMessageText(message); text != "" {
+		if text := llm.TextOf(message.Content); text != "" {
 			texts = append(texts, text)
 		}
 	}

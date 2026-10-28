@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -797,7 +798,7 @@ func (s *Store) prepareRestore(path string, backup Backup) (restorePlan, error) 
 	modeMatches := currentInfoErr == nil && currentInfo.Mode().Perm() == mode
 	plan.data = stored
 	plan.mode = mode
-	plan.changed = !(currentErr == nil && modeMatches && bytes.Equal(current, stored))
+	plan.changed = currentErr != nil || !modeMatches || !bytes.Equal(current, stored)
 	return plan, nil
 }
 
@@ -893,14 +894,6 @@ func ensureRestoreParent(path, expected string, create bool) error {
 	return validateRestoreParent(path, expected)
 }
 
-func (s *Store) restoreFile(path string, backup Backup) (bool, error) {
-	plan, err := s.prepareRestore(path, backup)
-	if err != nil {
-		return false, err
-	}
-	return s.applyRestore(plan)
-}
-
 func (s *Store) backupDir() string { return filepath.Join(s.root, "file-history", s.sessionID) }
 
 func backupName(path string, version int) string {
@@ -966,9 +959,7 @@ func validateLinkCount(info os.FileInfo) error {
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	copy := snapshot
 	copy.TrackedFileBackups = make(map[string]Backup, len(snapshot.TrackedFileBackups))
-	for path, backup := range snapshot.TrackedFileBackups {
-		copy.TrackedFileBackups[path] = backup
-	}
+	maps.Copy(copy.TrackedFileBackups, snapshot.TrackedFileBackups)
 	return copy
 }
 

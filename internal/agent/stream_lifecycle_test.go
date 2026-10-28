@@ -32,12 +32,12 @@ func TestSinkFailureDrainsResponsesAndClosesConnection(t *testing.T) {
 	defer server.Close()
 	sentinel := errors.New("output failed")
 	client := responses.NewClient("test", server.URL)
-	a := NewAgent(llm.AgentConfig{Model: llm.Model{ID: "test", API: llm.APIOpenAIResponses}}, llm.Context{}, client.Stream, func(event llm.AgentEvent) error {
+	a := New(Options{Config: llm.AgentConfig{Model: llm.Model{ID: "test", API: llm.APIOpenAIResponses}}, Context: llm.Context{}, Stream: client.Stream, Events: func(event llm.AgentEvent) error {
 		if _, ok := event.(llm.MessageUpdateEvent); ok {
 			return sentinel
 		}
 		return nil
-	})
+	}})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	finished := make(chan error, 1)
@@ -58,11 +58,11 @@ func TestSinkFailureDrainsResponsesAndClosesConnection(t *testing.T) {
 }
 
 func TestSilentEOFIsFailureWithoutCancellation(t *testing.T) {
-	a := NewAgent(llm.AgentConfig{}, llm.Context{}, func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a := New(Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: func(context.Context, llm.Model, llm.Context, llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		ch := make(chan llm.AssistantMessageEvent)
 		close(ch)
 		return ch, nil
-	}, nil)
+	}, Events: nil})
 	message, err := a.Run(context.Background(), "hello")
 	if err == nil || message == nil || message.StopReason != llm.StopReasonError {
 		t.Fatalf("silent EOF = %+v, %v; want model failure", message, err)

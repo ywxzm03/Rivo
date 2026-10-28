@@ -33,8 +33,8 @@ func KillAgentWithReason(taskID string, store *Store, reason StopReason) error {
 	}
 	if abort != nil {
 		abort()
-	} else if runtime != nil && runtime.Cancel != nil {
-		runtime.Cancel()
+	} else if runtime != nil && runtime.Abort() != nil {
+		runtime.Abort()()
 	} else {
 		task, ok := store.Task(taskID)
 		if ok {

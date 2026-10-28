@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -41,7 +42,7 @@ type Compactor struct {
 // Result 一次压缩的产出
 type Result struct {
 	Summary           string
-	FileLists         FileLists
+	FileLists         ctxview.FileLists
 	FirstKeptSourceID string
 	KeptMessageCount  int
 	TokensBefore      int
@@ -50,7 +51,7 @@ type Result struct {
 }
 
 // Compact 对当前上下文视图执行一次压缩，compaction entry 作为 boundary 不参与新摘要素材
-func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions string) (Result, error) {
+func (c *Compactor) Compact(ctx context.Context, view ctxview.ContextView, instructions string) (Result, error) {
 	messages := view.Messages()
 	tokensBefore := ContextTokens(messages)
 	if view.UsageStale {
@@ -63,13 +64,13 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 	}
 	result := Result{
 		FirstKeptSourceID: view.Entries[plan.CutIndex].SourceID,
-		KeptMessageCount:  MessageCount(view.Entries[plan.CutIndex:]),
+		KeptMessageCount:  ctxview.MessageCount(view.Entries[plan.CutIndex:]),
 		TokensBefore:      tokensBefore,
 		IsSplitTurn:       plan.IsSplitTurn,
 	}
 	if plan.IsSplitTurn {
-		history := SummaryMessages(view.Entries[start:plan.TurnStartIndex])
-		turnPrefix := SummaryMessages(view.Entries[plan.TurnStartIndex:plan.CutIndex])
+		history := ctxview.SummaryMessages(view.Entries[start:plan.TurnStartIndex])
+		turnPrefix := ctxview.SummaryMessages(view.Entries[plan.TurnStartIndex:plan.CutIndex])
 		if len(history) == 0 && previousSummary == "" && len(turnPrefix) == 0 {
 			return Result{}, fmt.Errorf("compaction: no compressible history range")
 		}
@@ -102,7 +103,7 @@ func (c *Compactor) Compact(ctx context.Context, view ContextView, instructions 
 		result.Usage = usage
 		return result, nil
 	}
-	conversation := SummaryMessages(view.Entries[start:plan.CutIndex])
+	conversation := ctxview.SummaryMessages(view.Entries[start:plan.CutIndex])
 	if len(conversation) == 0 {
 		return Result{}, fmt.Errorf("compaction: no compressible history range")
 	}
@@ -149,10 +150,10 @@ func combineUsage(first, second llm.Usage) llm.Usage {
 }
 
 // compactionBoundary 返回最新 compaction 后的 entry 起点和增量摘要基线
-func compactionBoundary(entries []ContextEntry) (int, string, *FileLists) {
+func compactionBoundary(entries []ctxview.ContextEntry) (int, string, *ctxview.FileLists) {
 	index := -1
 	for i, entry := range entries {
-		if entry.Kind == ContextCompaction {
+		if entry.Kind == ctxview.ContextCompaction {
 			index = i
 		}
 	}
@@ -162,7 +163,7 @@ func compactionBoundary(entries []ContextEntry) (int, string, *FileLists) {
 	return index + 1, entries[index].Summary, entries[index].Details
 }
 
-func summaryWithFileLists(summary string, previous *FileLists, regions ...[]llm.Message) (string, FileLists) {
+func summaryWithFileLists(summary string, previous *ctxview.FileLists, regions ...[]llm.Message) (string, ctxview.FileLists) {
 	ops := fileOperationsFromLists(previous)
 	for _, messages := range regions {
 		collectFileOperations(messages, &ops)

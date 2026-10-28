@@ -1,18 +1,16 @@
 package tool
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"math"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 const findDefaultLimit = 1000
@@ -81,12 +79,12 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("path not found: %s", absPath)
 		}
 		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("not a directory: %s", absPath)
 	}
 
 	// 2.查找 rg 并流式读取匹配路径
@@ -101,22 +99,31 @@ func (f *Find) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	return llm.ToolResult{Content: formatFindOutput(result, options.limit)}, nil
 }
 
-func parseFindArgs(args map[string]any) (findOptions, error) {
-	pattern, ok := args["pattern"].(string)
-	if !ok {
+// findParams 是 find 工具的参数形状
+type findParams struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+	// Limit 用指针区分「未提供」与「显式传 0」
+	Limit *int `json:"limit"`
+}
+
+func parseFindArgs(values map[string]any) (findOptions, error) {
+	params, err := toolargs.Decode[findParams](values)
+	if err != nil {
+		return findOptions{}, err
+	}
+	if params.Pattern == "" {
 		return findOptions{}, fmt.Errorf("find: missing required parameter: pattern")
 	}
-	searchPath, _ := args["path"].(string)
+	searchPath := params.Path
 	if searchPath == "" {
 		searchPath = "."
 	}
-	limit, hasLimit := argInt(args, "limit")
-	if !hasLimit {
-		limit = findDefaultLimit
-	} else if limit < 1 {
-		limit = 1
+	limit := findDefaultLimit
+	if params.Limit != nil {
+		limit = max(*params.Limit, 1)
 	}
-	return findOptions{pattern: pattern, searchPath: searchPath, limit: limit}, nil
+	return findOptions{pattern: params.Pattern, searchPath: searchPath, limit: limit}, nil
 }
 
 // buildFindRipgrepArgs 将 basename glob 转为 rg 的任意层级匹配
@@ -129,45 +136,16 @@ func buildFindRipgrepArgs(pattern string) []string {
 }
 
 func runFindRipgrep(ctx context.Context, rgPath, absPath string, options findOptions) (findResult, error) {
-	command := exec.CommandContext(ctx, rgPath, buildFindRipgrepArgs(options.pattern)...)
-	command.Dir = absPath
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return findResult{}, err
-	}
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	configureShellProcess(command)
-	if err := command.Start(); err != nil {
-		return findResult{}, err
-	}
-
 	result := findResult{paths: make([]string, 0)}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	stoppedDueToLimit := false
-	for scanner.Scan() {
-		path := scanner.Text()
+	_, err := runRipgrepStream(ctx, rgPath, absPath, buildFindRipgrepArgs(options.pattern), func(line []byte) bool {
 		if len(result.paths) >= options.limit {
 			result.limitReached = true
-			stoppedDueToLimit = true
-			killShellProcessTree(command)
-			break
+			return true
 		}
-		result.paths = append(result.paths, path)
-	}
-	if err := scanner.Err(); err != nil {
-		if !stoppedDueToLimit {
-			killShellProcessTree(command)
-		}
-		_ = command.Wait()
-		return findResult{}, err
-	}
-	waitErr := command.Wait()
-	if err := ctx.Err(); err != nil {
-		return findResult{}, err
-	}
-	if err := ripgrepExitError(waitErr, stderr.String(), stoppedDueToLimit); err != nil {
+		result.paths = append(result.paths, string(line))
+		return false
+	})
+	if err != nil {
 		return findResult{}, err
 	}
 	return result, nil

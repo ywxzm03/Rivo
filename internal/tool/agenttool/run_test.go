@@ -65,11 +65,11 @@ func TestRunWritesTranscriptAndMetadata(t *testing.T) {
 		t.Fatalf("metadata = %#v", meta)
 	}
 	// 3.runtime 必须带着可用的 agent 与 Done 通道;Cancel 由 Manager 注入
-	if runtime.Agent == nil || runtime.Done == nil {
+	if runtime.Agent == nil || runtime.DoneChan == nil {
 		t.Fatalf("runtime = %#v", runtime)
 	}
-	if runtime.Agent.WorkingDir != runner.ParentCwd {
-		t.Fatalf("agent working dir = %q, want %q", runtime.Agent.WorkingDir, runner.ParentCwd)
+	if runtime.Agent.WorkingDir() != runner.ParentCwd {
+		t.Fatalf("agent working dir = %q, want %q", runtime.Agent.WorkingDir(), runner.ParentCwd)
 	}
 }
 
@@ -91,7 +91,7 @@ func TestRunAppliesBuiltinPromptForEachType(t *testing.T) {
 			t.Fatalf("%s: %v", agentType, err)
 		}
 		// 1.内置类型必须注入对应 prompt,而不是通用兜底
-		system := llm.CurrentSystemMessage(runtime.Agent.AgentContext.Messages)
+		system := llm.CurrentSystemMessage(runtime.Agent.Context().Messages)
 		if system == nil {
 			t.Fatalf("%s: no system message", agentType)
 		}
@@ -127,7 +127,7 @@ func TestRunExploreAndPlanOmitContextInstructions(t *testing.T) {
 			}
 		}
 	}()
-	system := llm.CurrentSystemMessage(runtime.Agent.AgentContext.Messages)
+	system := llm.CurrentSystemMessage(runtime.Agent.Context().Messages)
 	if system == nil {
 		t.Fatal("no system message")
 	}
@@ -155,7 +155,7 @@ func TestRunWorkLoadsProjectContext(t *testing.T) {
 		}
 	}()
 	// work 按正常规则加载项目上下文
-	system := llm.CurrentSystemMessage(runtime.Agent.AgentContext.Messages)
+	system := llm.CurrentSystemMessage(runtime.Agent.Context().Messages)
 	if system == nil {
 		t.Fatal("no system message")
 	}
@@ -191,11 +191,11 @@ func TestRunForkReusesParentConfigAndTools(t *testing.T) {
 		}
 	}()
 	// 1.fork 继承父 model 与 thinking
-	if runtime.Agent.AgentConfig.Model.ID != "parent" || runtime.Agent.AgentConfig.ThinkingLevel != llm.ThinkingLevelHigh {
-		t.Fatalf("fork config = %#v", runtime.Agent.AgentConfig)
+	if runtime.Agent.Config().Model.ID != "parent" || runtime.Agent.Config().ThinkingLevel != llm.ThinkingLevelHigh {
+		t.Fatalf("fork config = %#v", runtime.Agent.Config())
 	}
 	// 2.父消息前缀被保留,末尾是 fork 指令
-	messages := runtime.Agent.AgentContext.Messages
+	messages := runtime.Agent.Context().Messages
 	if len(messages) < 2 {
 		t.Fatalf("fork messages = %d", len(messages))
 	}
@@ -207,7 +207,7 @@ func TestRunForkReusesParentConfigAndTools(t *testing.T) {
 		t.Fatalf("fork directive = %q", last)
 	}
 	// 3.fork 使用独立的 session ID
-	if runtime.Agent.AgentConfig.SessionID == "parent-session" {
+	if runtime.Agent.Config().SessionID == "parent-session" {
 		t.Fatal("fork reused the parent session ID")
 	}
 }
@@ -229,7 +229,7 @@ func TestRunIgnoresParentModelWhenExplicit(t *testing.T) {
 		}
 	}()
 	// 显式指定的 model 必须覆盖父 model
-	if got := runtime.Agent.AgentConfig.Model; got.Provider != "explicit" || got.ID != "chosen" {
+	if got := runtime.Agent.Config().Model; got.Provider != "explicit" || got.ID != "chosen" {
 		t.Fatalf("model = %#v, want explicit/chosen", got)
 	}
 }

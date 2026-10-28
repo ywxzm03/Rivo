@@ -3,6 +3,7 @@ package completions
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
@@ -39,22 +40,22 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (sdk.ChatComp
 			body["max_completion_tokens"] = opts.MaxTokens
 		}
 	}
+	// overrides 收集 SDK 结构体未建模的键（thinking、自定义采样参数），
+	// 它们既写进请求体，也要通过 SetExtraFields 补回被 json 丢弃的部分
+	overrides := make(map[string]any)
 	if model.Reasoning {
 		if model.Provider == "deepseek" {
-			if thinkingEnabled(opts) {
-				body["thinking"] = map[string]any{"type": "enabled"}
-			} else {
-				body["thinking"] = map[string]any{"type": "disabled"}
-			}
+			overrides["thinking"] = map[string]any{"type": thinkingMode(opts)}
 		} else {
 			body["reasoning_effort"] = string(resolveReasoningEffort(model, opts))
 		}
 	}
 	for key, value := range model.SamplingParams {
 		if !reservedParamKeys[key] {
-			body[key] = value
+			overrides[key] = value
 		}
 	}
+	maps.Copy(body, overrides)
 	data, err := json.Marshal(body)
 	if err != nil {
 		return sdk.ChatCompletionNewParams{}, fmt.Errorf("openai: marshal chat completion params: %w", err)
@@ -63,23 +64,18 @@ func BuildParams(model llm.Model, c llm.Context, opts llm.Options) (sdk.ChatComp
 	if err := json.Unmarshal(data, &params); err != nil {
 		return sdk.ChatCompletionNewParams{}, fmt.Errorf("openai: build chat completion params: %w", err)
 	}
-	extra := make(map[string]any)
-	if model.Provider == "deepseek" && model.Reasoning {
-		if thinkingEnabled(opts) {
-			extra["thinking"] = map[string]any{"type": "enabled"}
-		} else {
-			extra["thinking"] = map[string]any{"type": "disabled"}
-		}
-	}
-	for key, value := range model.SamplingParams {
-		if !reservedParamKeys[key] {
-			extra[key] = value
-		}
-	}
-	if len(extra) > 0 {
-		params.SetExtraFields(extra)
+	if len(overrides) > 0 {
+		params.SetExtraFields(overrides)
 	}
 	return params, nil
+}
+
+// thinkingMode 返回 DeepSeek thinking 字段的取值
+func thinkingMode(opts llm.Options) string {
+	if thinkingEnabled(opts) {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 var reservedParamKeys = map[string]bool{

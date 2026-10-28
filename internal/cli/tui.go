@@ -14,12 +14,12 @@ import (
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
-	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
-func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
+func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
 	var runtime *adapter.Runtime
 	// panic 会跳过所有收尾逻辑并让进程直接消失;兜住它,并把子任务一起收掉
 	defer func() {
@@ -56,17 +56,17 @@ func runTUI(cfg app.Config, target sessionTarget, initialPrompt string, stdin, s
 		Request:                 runtime.Request,
 		Status:                  runtime.Status,
 		Cancel:                  runtime.Cancel,
-		EnqueueSteering:         runtime.EnqueueSteering,
 		EnqueueSteeringMessage:  runtime.EnqueueSteeringMessage,
-		RestoreSteering:         runtime.RestoreSteering,
 		RestoreSteeringMessages: runtime.RestoreSteeringMessages,
-		EnqueueFollowUp:         runtime.EnqueueFollowUp,
 		EnqueueFollowUpMessage:  runtime.EnqueueFollowUpMessage,
 		RestoreFollowUpMessages: runtime.RestoreFollowUpMessages,
 		ClearFollowUp:           runtime.ClearFollowUp,
 		ReadClipboardData:       readClipboardData,
 		SubagentRequest:         runtime.SubagentRequest,
 		SubagentSnapshot:        runtime.SubagentSnapshot,
+		ShellList:               runtime.ShellList,
+		ShellKill:               runtime.ShellKill,
+		ShellStopAll:            runtime.ShellStopAll,
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil

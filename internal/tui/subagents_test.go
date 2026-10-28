@@ -11,7 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestSubagentRowsAndViewSwitch(t *testing.T) {
@@ -20,7 +19,7 @@ func TestSubagentRowsAndViewSwitch(t *testing.T) {
 	m := New(Snapshot{
 		Cwd: "/repo",
 		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-			ID: "agent-1", Type: "agent", AgentType: "Explore", Status: "running",
+			ID: "agent-1", AgentType: "Explore", Status: "running",
 			Description: "inspect tree", StartTime: started,
 			Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}},
 		}}},
@@ -35,21 +34,21 @@ func TestSubagentRowsAndViewSwitch(t *testing.T) {
 	}
 	press(m, tea.KeyDown)
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "agent-1" || !strings.Contains(ansi.Strip(m.View()), "child output") {
+	if m.panel.viewingTaskID != "agent-1" || !strings.Contains(ansi.Strip(m.View()), "child output") {
 		t.Fatalf("subagent view not entered: %q", ansi.Strip(m.View()))
 	}
 	if len(requests) != 1 || requests[0].Kind != "enter" || requests[0].TaskID != "agent-1" {
 		t.Fatalf("enter request = %#v", requests)
 	}
 	press(m, tea.KeyEsc)
-	if m.viewingTaskID != "agent-1" || len(requests) != 2 || requests[1].Kind != "stop" || requests[1].TaskID != "agent-1" {
-		t.Fatalf("Esc did not stop child: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "agent-1" || len(requests) != 2 || requests[1].Kind != "stop" || requests[1].TaskID != "agent-1" {
+		t.Fatalf("Esc did not stop child: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
-	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "agent-1", Type: "agent", AgentType: "Explore", Status: "killed", Description: "inspect tree", Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}}}}})
+	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "agent-1", AgentType: "Explore", Status: "killed", Description: "inspect tree", Messages: []Message{{ID: "child-1", Role: "assistant", Text: "child output"}}}}})
 	press(m, tea.KeyUp)
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "" || len(requests) != 3 || requests[2].Kind != "exit" {
-		t.Fatalf("main Enter did not exit child: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "" || len(requests) != 3 || requests[2].Kind != "exit" {
+		t.Fatalf("main Enter did not exit child: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 }
 
@@ -77,8 +76,8 @@ func TestSubagentEscapeWinsOverJumpToBottom(t *testing.T) {
 	}
 	// child view 的 Esc 优先停止当前任务,不能被 jump-to-bottom 吞掉
 	press(m, tea.KeyEsc)
-	if m.viewingTaskID != "agent-1" || len(requests) != 1 || requests[0].Kind != "stop" {
-		t.Fatalf("Escape did not stop child: viewing=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "agent-1" || len(requests) != 1 || requests[0].Kind != "stop" {
+		t.Fatalf("Escape did not stop child: viewing=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 }
 
@@ -134,7 +133,7 @@ func TestSubagentTaskSuffixIsRightAligned(t *testing.T) {
 	}}}}, Handlers{})
 	m.clock = func() time.Time { return ended }
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	for _, line := range strings.Split(ansi.Strip(m.View()), "\n") {
+	for line := range strings.SplitSeq(ansi.Strip(m.View()), "\n") {
 		if strings.Contains(line, "Explore") && strings.Contains(line, "1.2k") {
 			if !strings.HasSuffix(line, "2s  1.2k  ·2") {
 				t.Fatalf("task suffix is not right aligned: %q", line)
@@ -172,7 +171,7 @@ func TestSubagentViewSubmitsQueueAndContinuation(t *testing.T) {
 		return nil
 	}})
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	m.selectedTaskID = "agent-1"
+	m.panel.selectedTaskID = "agent-1"
 	m.enterSubagentView("agent-1")
 	typeText(m, "continue this")
 	press(m, tea.KeyEnter)
@@ -187,8 +186,8 @@ func TestSubagentViewSubmitsQueueAndContinuation(t *testing.T) {
 	if len(requests) != 2 || requests[1].Kind != "continue" || requests[1].Message == nil {
 		t.Fatalf("continuation request = %#v", requests)
 	}
-	if _, ok := requests[1].Message.Content[0].(llm.TextContent); !ok {
-		t.Fatalf("continuation message = %#v", requests[1].Message)
+	if requests[1].Message.Text == "" {
+		t.Fatalf("continuation payload = %#v, want text", requests[1].Message)
 	}
 }
 
@@ -272,8 +271,8 @@ func TestKilledTaskFillsDotWhenSelected(t *testing.T) {
 	}}}, Handlers{})
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	press(m, tea.KeyUp)
-	m.selectedTaskID = "agent-1"
-	m.mainSelected = false
+	m.panel.selectedTaskID = "agent-1"
+	m.panel.mainSelected = false
 	row := m.taskRows()[1]
 	if !strings.Contains(ansi.Strip(row), "❯ ●") {
 		t.Fatalf("selected killed task = %q, want filled dot", ansi.Strip(row))
@@ -353,7 +352,7 @@ func TestSubagentRefreshLoopIsSingleOwner(t *testing.T) {
 	if _, cmd := m.Update(subagentRefreshMsg{}); cmd != nil {
 		t.Fatal("refresh chain survived eviction of the last task")
 	}
-	if m.subagentRefreshRunning {
+	if m.panel.refreshRunning {
 		t.Fatal("refresh loop flag was left set after eviction")
 	}
 }
@@ -369,8 +368,8 @@ func TestSubagentViewHandlesRawEscape(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.enterSubagentView("agent-1")
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\x1b'}})
-	if m.viewingTaskID != "agent-1" || len(requests) != 1 || requests[0].Kind != "stop" {
-		t.Fatalf("raw Escape did not stop child: viewing=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "agent-1" || len(requests) != 1 || requests[0].Kind != "stop" {
+		t.Fatalf("raw Escape did not stop child: viewing=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 }
 
@@ -408,8 +407,8 @@ func TestSubagentViewIgnoresMainStreamRendering(t *testing.T) {
 	if m.flushPending {
 		t.Fatal("main stream scheduled a transcript flush inside the child view")
 	}
-	if len(m.mainMessages) == 0 || m.mainMessages[len(m.mainMessages)-1].ID != "main-live" {
-		t.Fatalf("main stream was not cached for later: %+v", m.mainMessages)
+	if len(m.panel.mainMessages) == 0 || m.panel.mainMessages[len(m.panel.mainMessages)-1].ID != "main-live" {
+		t.Fatalf("main stream was not cached for later: %+v", m.panel.mainMessages)
 	}
 	// 3.选中 main 后 Enter 退出,主 transcript 恢复并包含该消息
 	press(m, tea.KeyUp)
@@ -454,73 +453,19 @@ func TestSubagentViewKeepsMainMessagesAndNavigates(t *testing.T) {
 		t.Fatalf("second child selection = %q", rows)
 	}
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "agent-2" || len(requests) != 1 || requests[0].Kind != "enter" || requests[0].TaskID != "agent-2" {
-		t.Fatalf("child navigation = viewing %q requests %#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "agent-2" || len(requests) != 1 || requests[0].Kind != "enter" || requests[0].TaskID != "agent-2" {
+		t.Fatalf("child navigation = viewing %q requests %#v", m.panel.viewingTaskID, requests)
 	}
 	// 先回到 agent-1,再回到 main
 	press(m, tea.KeyUp)
 	press(m, tea.KeyUp)
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "" || len(requests) != 2 || requests[1].Kind != "exit" {
-		t.Fatalf("main Enter did not exit child = viewing %q requests %#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "" || len(requests) != 2 || requests[1].Kind != "exit" {
+		t.Fatalf("main Enter did not exit child = viewing %q requests %#v", m.panel.viewingTaskID, requests)
 	}
 	mainView := ansi.Strip(m.View())
 	if !strings.Contains(mainView, "main live response") || !strings.Contains(mainView, "main pending") || strings.Contains(mainView, "child two") {
 		t.Fatalf("main transcript after exit = %q", mainView)
-	}
-}
-
-// 详情页里输入框有内容时 x 是普通字符,不能触发 stop/evict
-func TestSubagentViewTypesXInsteadOfStoppingWhenEditorHasText(t *testing.T) {
-	var requests []SubagentRequest
-	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
-	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
-		requests = append(requests, request)
-		return nil
-	}})
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	m.enterSubagentView("agent-1")
-	typeText(m, "fi")
-	typeText(m, "x")
-	if got := m.editor.Value(); got != "fix" {
-		t.Fatalf("editor value = %q, want %q", got, "fix")
-	}
-	if len(requests) != 0 {
-		t.Fatalf("x triggered a subagent request: %#v", requests)
-	}
-	// 1.焦点移到任务列表后 x 才是 stop
-	m.editor.Reset()
-	m.setTaskFocus(true)
-	m.selectedTaskID = "agent-1"
-	m.mainSelected = false
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	if len(requests) != 1 || requests[0].Kind != "stop" || requests[0].TaskID != "agent-1" {
-		t.Fatalf("stop request = %#v", requests)
-	}
-	if got := m.editor.Value(); got != "" {
-		t.Fatalf("stop key leaked into the editor: %q", got)
-	}
-}
-
-// 主视图里输入框为空时 x 仍是 stop/evict;有内容时是普通字符
-func TestMainViewXRequiresEmptyEditor(t *testing.T) {
-	var requests []SubagentRequest
-	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{
-		ID: "agent-1", AgentType: "Work", Status: "running", Description: "edit code",
-	}}}}, Handlers{SubagentRequest: func(request SubagentRequest) tea.Cmd {
-		requests = append(requests, request)
-		return nil
-	}})
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
-	m.selectedTaskID = "agent-1"
-	typeText(m, "a")
-	typeText(m, "x")
-	if got := m.editor.Value(); got != "ax" {
-		t.Fatalf("editor value = %q, want %q", got, "ax")
-	}
-	if len(requests) != 0 {
-		t.Fatalf("x triggered a subagent request while typing: %#v", requests)
 	}
 }
 
@@ -549,7 +494,7 @@ func TestTaskRowsDoNotSwallowEditor(t *testing.T) {
 // 任务行数量增加时输入框仍要保留
 func TestManyTaskRowsKeepEditorVisible(t *testing.T) {
 	var tasks []SubagentTaskView
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		tasks = append(tasks, SubagentTaskView{ID: fmt.Sprintf("agent-%d", i), AgentType: "work", Status: "running", Description: fmt.Sprintf("task %d", i)})
 	}
 	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: tasks}}, Handlers{})
@@ -644,8 +589,8 @@ func TestTaskSelectionWorksWithNonEmptyEditor(t *testing.T) {
 	m.editor.SetValue("some draft text")
 
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if !m.taskSelector || m.selectedTaskID == "" {
-		t.Fatalf("Down with non-empty editor did not select a task: selector=%v id=%q", m.taskSelector, m.selectedTaskID)
+	if !m.panel.taskSelector || m.panel.selectedTaskID == "" {
+		t.Fatalf("Down with non-empty editor did not select a task: selector=%v id=%q", m.panel.taskSelector, m.panel.selectedTaskID)
 	}
 	if m.editor.Value() != "some draft text" {
 		t.Fatalf("editor content changed: %q", m.editor.Value())
@@ -668,7 +613,7 @@ func TestTaskSelectionRespectsCursorPosition(t *testing.T) {
 	if m.editor.Line() == before {
 		t.Fatalf("Down in the middle of a multi-line draft did not move the cursor (line=%d)", before)
 	}
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("task selector opened while the cursor was still moving")
 	}
 }
@@ -701,9 +646,9 @@ func TestSubagentViewDequeuesOwnQueue(t *testing.T) {
 func TestSubagentMessagesRestoreToEditor(t *testing.T) {
 	m := New(Snapshot{}, Handlers{})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
-	m.restoreSubagentMessages([]llm.UserMessage{
-		{Content: []llm.Content{llm.TextContent{Text: "first"}}},
-		{Content: []llm.Content{llm.TextContent{Text: "second"}}},
+	m.restoreSubagentMessages([]ComposerPayload{
+		{Text: "first"},
+		{Text: "second"},
 	})
 	if got := m.editor.Value(); !strings.Contains(got, "first") || !strings.Contains(got, "second") {
 		t.Fatalf("editor = %q, want both restored messages", got)
@@ -846,7 +791,7 @@ func TestTaskFocusReleasesOnTyping(t *testing.T) {
 	if got := m.editor.Value(); got != "draftabc" {
 		t.Fatalf("editor = %q, want draftabc", got)
 	}
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("typing should return focus to the editor")
 	}
 }
@@ -860,19 +805,19 @@ func TestTaskFocusUpDownSelectsTasks(t *testing.T) {
 	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: tasks}}, Handlers{})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.setTaskFocus(true)
-	m.mainSelected, m.selectedTaskID = true, ""
+	m.panel.mainSelected, m.panel.selectedTaskID = true, ""
 
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.mainSelected || m.selectedTaskID != "a1" {
-		t.Fatalf("after down: main=%v id=%q", m.mainSelected, m.selectedTaskID)
+	if m.panel.mainSelected || m.panel.selectedTaskID != "a1" {
+		t.Fatalf("after down: main=%v id=%q", m.panel.mainSelected, m.panel.selectedTaskID)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.selectedTaskID != "a2" {
-		t.Fatalf("after second down: id=%q", m.selectedTaskID)
+	if m.panel.selectedTaskID != "a2" {
+		t.Fatalf("after second down: id=%q", m.panel.selectedTaskID)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if m.selectedTaskID != "a1" {
-		t.Fatalf("after up: id=%q", m.selectedTaskID)
+	if m.panel.selectedTaskID != "a1" {
+		t.Fatalf("after up: id=%q", m.panel.selectedTaskID)
 	}
 	if got := m.editor.Value(); got != "" {
 		t.Fatalf("editor changed while navigating tasks: %q", got)
@@ -885,15 +830,15 @@ func TestTaskFocusEscReturnsToEditor(t *testing.T) {
 	m := New(Snapshot{Cwd: "/repo", Subagents: SubagentSnapshot{Tasks: tasks}}, Handlers{})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.setTaskFocus(true)
-	m.selectedTaskID = "a1"
+	m.panel.selectedTaskID = "a1"
 
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("esc did not leave the task list")
 	}
 	// 光标回到 main 行,列表不能出现全都没有选中的状态
-	if m.selectedTaskID != "" || !m.mainSelected {
-		t.Fatalf("selection not returned to main: main=%v id=%q", m.mainSelected, m.selectedTaskID)
+	if m.panel.selectedTaskID != "" || !m.panel.mainSelected {
+		t.Fatalf("selection not returned to main: main=%v id=%q", m.panel.mainSelected, m.panel.selectedTaskID)
 	}
 	m.View()
 	if row := m.cursorRow.Load(); row == 0 {
@@ -910,7 +855,7 @@ func TestUpFromEditorMovesFocusToTasks(t *testing.T) {
 	m.editor.CursorEnd()
 
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if !m.taskSelector {
+	if !m.panel.taskSelector {
 		t.Fatal("up from the first editor line did not focus the task list")
 	}
 	if got := m.editor.Value(); got != "hi" {
@@ -963,14 +908,14 @@ func TestSubagentViewEscStopsAndMainEnterExits(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.enterSubagentView("a1")
 	press(m, tea.KeyEsc)
-	if m.viewingTaskID != "a1" || len(requests) != 1 || requests[0].Kind != "stop" {
-		t.Fatalf("Esc did not stop child in place: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "a1" || len(requests) != 1 || requests[0].Kind != "stop" {
+		t.Fatalf("Esc did not stop child in place: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", AgentType: "work", Status: "killed", Description: "long job"}}})
 	press(m, tea.KeyUp)
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "" || len(requests) != 2 || requests[1].Kind != "exit" {
-		t.Fatalf("main Enter did not exit child: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "" || len(requests) != 2 || requests[1].Kind != "exit" {
+		t.Fatalf("main Enter did not exit child: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 }
 
@@ -1006,7 +951,7 @@ func TestSteeringDequeueWorksWhileTaskFocused(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.busy = true
 	m.state.Steering = []string{"queued"}
-	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return []ComposerPayload{textPayload("queued")} }
 	m.setTaskFocus(true)
 
 	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
@@ -1026,8 +971,8 @@ func TestFollowUpDequeueWorksWhileTaskFocused(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.busy = true
 	m.state.FollowUp = []string{"queued follow-up"}
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
+		return []ComposerPayload{textPayload("queued follow-up")}
 	}
 	m.setTaskFocus(true)
 
@@ -1075,13 +1020,13 @@ func TestSubagentViewMainEnterExitsStoppedTask(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.enterSubagentView("a1")
 	press(m, tea.KeyEsc)
-	if m.viewingTaskID != "a1" || len(requests) != 0 {
-		t.Fatalf("Esc changed stopped child view: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "a1" || len(requests) != 0 {
+		t.Fatalf("Esc changed stopped child view: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 	press(m, tea.KeyUp)
 	press(m, tea.KeyEnter)
-	if m.viewingTaskID != "" || len(requests) != 1 || requests[0].Kind != "exit" {
-		t.Fatalf("main Enter did not exit stopped child: view=%q requests=%#v", m.viewingTaskID, requests)
+	if m.panel.viewingTaskID != "" || len(requests) != 1 || requests[0].Kind != "exit" {
+		t.Fatalf("main Enter did not exit stopped child: view=%q requests=%#v", m.panel.viewingTaskID, requests)
 	}
 }
 
@@ -1127,8 +1072,8 @@ func TestEnterSubagentViewSelectsTask(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.enterSubagentView("a1")
 
-	if m.viewingTaskID != "a1" || m.selectedTaskID != "a1" || m.mainSelected || m.taskSelector || !m.editor.Focused() {
-		t.Fatalf("viewing=%q selected=%q main=%v selector=%v focused=%v", m.viewingTaskID, m.selectedTaskID, m.mainSelected, m.taskSelector, m.editor.Focused())
+	if m.panel.viewingTaskID != "a1" || m.panel.selectedTaskID != "a1" || m.panel.mainSelected || m.panel.taskSelector || !m.editor.Focused() {
+		t.Fatalf("viewing=%q selected=%q main=%v selector=%v focused=%v", m.panel.viewingTaskID, m.panel.selectedTaskID, m.panel.mainSelected, m.panel.taskSelector, m.editor.Focused())
 	}
 	rows := ansi.Strip(strings.Join(m.taskRows(), "\n"))
 	if !strings.Contains(rows, "  ⏺ explore  one") || strings.Contains(rows, "❯") {
@@ -1137,15 +1082,15 @@ func TestEnterSubagentViewSelectsTask(t *testing.T) {
 
 	// Up 进入列表并回到 main 行,这是 child view 返回主 agent 的选择路径
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if !m.taskSelector || !m.mainSelected || m.selectedTaskID != "" {
-		t.Fatalf("up did not select main: selector=%v main=%v id=%q", m.taskSelector, m.mainSelected, m.selectedTaskID)
+	if !m.panel.taskSelector || !m.panel.mainSelected || m.panel.selectedTaskID != "" {
+		t.Fatalf("up did not select main: selector=%v main=%v id=%q", m.panel.taskSelector, m.panel.mainSelected, m.panel.selectedTaskID)
 	}
 	if !strings.Contains(ansi.Strip(strings.Join(m.taskRows(), "\n")), "❯ ⏺ main") {
 		t.Fatalf("main selection row missing: %q", ansi.Strip(strings.Join(m.taskRows(), "\n")))
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.viewingTaskID != "" || m.taskSelector || len(requests) != 1 || requests[0].Kind != "exit" || requests[0].TaskID != "a1" {
-		t.Fatalf("main Enter did not return to main: view=%q selector=%v requests=%#v", m.viewingTaskID, m.taskSelector, requests)
+	if m.panel.viewingTaskID != "" || m.panel.taskSelector || len(requests) != 1 || requests[0].Kind != "exit" || requests[0].TaskID != "a1" {
+		t.Fatalf("main Enter did not return to main: view=%q selector=%v requests=%#v", m.panel.viewingTaskID, m.panel.taskSelector, requests)
 	}
 }
 
@@ -1179,12 +1124,12 @@ func TestInputRestoredWhenTaskListDisappears(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	// 1.聚焦任务列表
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if !m.taskSelector || m.editor.Focused() {
-		t.Fatalf("list focus = %v editor focus = %v", m.taskSelector, m.editor.Focused())
+	if !m.panel.taskSelector || m.editor.Focused() {
+		t.Fatalf("list focus = %v editor focus = %v", m.panel.taskSelector, m.editor.Focused())
 	}
 	// 2.任务全部被清理
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: nil})
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("task list focus survived an empty snapshot")
 	}
 	if !m.editor.Focused() {
@@ -1213,15 +1158,15 @@ func TestInputWorksAfterExitThenKill(t *testing.T) {
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", AgentType: "explore", Status: "killed", Description: "one"}}})
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.viewingTaskID != "" {
-		t.Fatalf("still viewing %q", m.viewingTaskID)
+	if m.panel.viewingTaskID != "" {
+		t.Fatalf("still viewing %q", m.panel.viewingTaskID)
 	}
 	// 后端把任务标记为 killed
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{
 		{ID: "a1", AgentType: "explore", Status: "killed", Description: "one"},
 	}})
-	if !m.editor.Focused() || m.taskSelector {
-		t.Fatalf("editor focus = %v selector = %v", m.editor.Focused(), m.taskSelector)
+	if !m.editor.Focused() || m.panel.taskSelector {
+		t.Fatalf("editor focus = %v selector = %v", m.editor.Focused(), m.panel.taskSelector)
 	}
 	typeText(m, "still typing")
 	if got := m.editor.Value(); got != "still typing" {
@@ -1242,7 +1187,7 @@ func TestPendingRowsMatchRenderedLines(t *testing.T) {
 			m.enterSubagentView("a1")
 			m.setTaskFocus(focused)
 			m.state.Steering = []string{"queued"}
-			m.state.SteeringInputs = []llm.UserMessage{textUserMessage("queued")}
+			m.state.SteeringInputs = []ComposerPayload{textPayload("queued")}
 			m.layout()
 			if got, want := m.pendingRows(), len(m.pendingLines()); got != want {
 				t.Fatalf("h=%d focused=%v pendingRows=%d lines=%d", height, focused, got, want)
@@ -1260,11 +1205,11 @@ func TestSubagentDequeueKeepsFrameFull(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 16})
 	m.enterSubagentView("a1")
 	m.state.Steering = []string{"queued steering"}
-	m.state.SteeringInputs = []llm.UserMessage{textUserMessage("queued steering")}
+	m.state.SteeringInputs = []ComposerPayload{textPayload("queued steering")}
 	m.layout()
 	before := len(splitFrameLines(m.View()))
 
-	m.restoreSubagentMessages([]llm.UserMessage{textUserMessage("queued steering")})
+	m.restoreSubagentMessages([]ComposerPayload{textPayload("queued steering")})
 	m.state.Steering = nil
 	m.state.SteeringInputs = nil
 	m.layout()
@@ -1289,7 +1234,7 @@ func TestSubagentViewFollowUpWithListFocused(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.enterSubagentView("a1")
 	m.setTaskFocus(true)
-	if !m.taskSelector {
+	if !m.panel.taskSelector {
 		t.Fatal("explicit task focus did not open the task list")
 	}
 
@@ -1319,7 +1264,7 @@ func TestDequeueRelayoutsViewport(t *testing.T) {
 		t.Fatalf("frame before dequeue = %d", len(splitFrameLines(m.View())))
 	}
 
-	m.restoreSubagentMessages([]llm.UserMessage{textUserMessage("queued")})
+	m.restoreSubagentMessages([]ComposerPayload{textPayload("queued")})
 	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{
 		{ID: "a1", AgentType: "explore", Status: "running", Description: "one"},
 	}})
@@ -1330,7 +1275,7 @@ func TestDequeueRelayoutsViewport(t *testing.T) {
 	if strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
 		t.Fatalf("tail padding after dequeue:\n%s", ansi.Strip(strings.Join(lines, "\n")))
 	}
-	if m.taskSelector {
+	if m.panel.taskSelector {
 		t.Fatal("dequeue should keep child input focus")
 	}
 }
@@ -1340,7 +1285,7 @@ func TestManyTasksKeepEditorVisible(t *testing.T) {
 	for _, count := range []int{5, 10, 20, 40} {
 		for _, focused := range []bool{false, true} {
 			var tasks []SubagentTaskView
-			for i := 0; i < count; i++ {
+			for i := range count {
 				tasks = append(tasks, SubagentTaskView{
 					ID:          fmt.Sprintf("t-%d", i),
 					AgentType:   "explore",
@@ -1376,7 +1321,7 @@ func TestManyTasksKeepEditorVisible(t *testing.T) {
 // 截断时保留最近的任务,main 行始终在
 func TestTaskListTruncationKeepsNewest(t *testing.T) {
 	var tasks []SubagentTaskView
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		tasks = append(tasks, SubagentTaskView{
 			ID:          fmt.Sprintf("t-%d", i),
 			AgentType:   "explore",
@@ -1402,14 +1347,14 @@ func TestTaskListTruncationKeepsNewest(t *testing.T) {
 func TestSubagentErrorResponseAppliesFreshSnapshot(t *testing.T) {
 	m := New(Snapshot{Subagents: SubagentSnapshot{
 		Revision: 1,
-		Tasks:    []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running", Description: "finished task"}},
+		Tasks:    []SubagentTaskView{{ID: "a1", Status: "running", Description: "finished task"}},
 	}}, Handlers{})
 	m.Update(teaWindow(100, 16))
 	m.Update(SubagentSnapshotMsg{
 		Err: errors.New("task finished before stop"),
 		Snapshot: SubagentSnapshot{
 			Revision: 2,
-			Tasks:    []SubagentTaskView{{ID: "a1", Type: "agent", Status: "completed", Description: "finished task"}},
+			Tasks:    []SubagentTaskView{{ID: "a1", Status: "completed", Description: "finished task"}},
 		},
 	})
 	task, ok := findSubagentTask(m.state.Subagents.Tasks, "a1")

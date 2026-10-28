@@ -43,7 +43,7 @@ func (t *Tool) Parameters() map[string]any {
 				"description": agentTypeEnumDescription(),
 			},
 			"worktree": map[string]any{"type": "boolean", "description": "Run the task in an isolated git worktree"},
-			"thinking": map[string]any{"type": "string", "enum": []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}},
+			"thinking": map[string]any{"type": "string", "enum": llm.ThinkingLevelNames()},
 			"model":    map[string]any{"type": "string", "description": "provider/model; ignored for forks"},
 		},
 	}

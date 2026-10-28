@@ -116,9 +116,7 @@ func TestNewSessionFailureKeepsOldApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := a.SessionID()
-	spec := a.cfg.registry[a.cfg.ProviderID]
-	spec.new = func(string, string) ([]llm.Model, llm.StreamFn) { return nil, nil }
-	a.cfg.registry[a.cfg.ProviderID] = spec
+	a.cfg = a.cfg.WithStreamForTest(a.cfg.ProviderID, nil, nil)
 	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationNew})
 	if err != nil {
 		t.Fatal(err)

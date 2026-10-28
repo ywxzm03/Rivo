@@ -132,7 +132,7 @@ func (r *markdownRenderer) render(text, role string, width int) string {
 
 func (m *Model) renderMessage(message Message) string {
 	// 每条消息独立记录命中区,避免没有工具组的消息沿用上一条的
-	m.lastMessageHits = nil
+	m.transcript.messageHits = nil
 	width := max(1, m.width-2)
 	if message.Role == "command" {
 		return colored(accentColor, ansi.Wrap(message.Text, width, ""))
@@ -151,7 +151,7 @@ func (m *Model) renderMessage(message Message) string {
 	}
 	if message.ToolGroup != nil {
 		group := m.renderToolGroup(message.ToolGroup, width)
-		m.lastMessageHits = append([]toolHit(nil), m.lastToolHits...)
+		m.transcript.messageHits = append([]toolHit(nil), m.transcript.hits...)
 		parts := []string{group}
 		if message.Text != "" {
 			parts = append(parts, indent(m.markdown.render(message.Text, "assistant", width)))
@@ -179,7 +179,7 @@ func (m *Model) renderMessage(message Message) string {
 		if skill := message.Skill; skill != nil {
 			label := "[skill] " + skill.Name
 			var parts []string
-			if m.showAllTools {
+			if m.transcript.showAllTools {
 				parts = append(parts, colored(accentColor, ansi.Wrap(label, width, "")), indent(m.markdown.render(skill.Content, "skill", width)))
 			} else {
 				parts = append(parts, colored(mutedColor, ansi.Wrap(label+" (Ctrl+O to expand)", width, "")))
@@ -229,7 +229,7 @@ func (m *Model) renderMessage(message Message) string {
 // dividerLine 输出回合结束行:最新主回合有后台任务时显示等待提示,否则显示本轮耗时
 func (m *Model) dividerLine(width int, messageID string, divider *TurnDividerView) string {
 	label := ""
-	if m.viewingTaskID == "" && !m.busy && m.isLatestDivider(messageID) {
+	if m.panel.viewingTaskID == "" && !m.busy && m.isLatestDivider(messageID) {
 		label = m.backgroundWaitingLabel()
 	}
 	if label == "" {
@@ -251,26 +251,21 @@ func (m *Model) isLatestDivider(messageID string) bool {
 	return false
 }
 
-// backgroundWaitingLabel 按 active background task 类型聚合等待文案
+// backgroundWaitingLabel 聚合运行中的子 agent 等待文案;
+// 后台 bash 走独立提示行,不参与这里的计数
 func (m *Model) backgroundWaitingLabel() string {
 	count := 0
-	allAgents, allBash := true, true
 	for _, task := range m.state.Subagents.Tasks {
-		if task.Status != "running" {
-			continue
+		if task.Status == "running" {
+			count++
 		}
-		count++
-		allAgents = allAgents && task.Type == "agent"
-		allBash = allBash && task.Type == "bash"
 	}
 	if count == 0 {
 		return ""
 	}
-	kind := "tasks"
-	if allAgents {
-		kind = "agents"
-	} else if allBash {
-		kind = "bash"
+	kind := "agents"
+	if count == 1 {
+		kind = "agent"
 	}
 	return fmt.Sprintf("Waiting for %d background %s to finish", count, kind)
 }

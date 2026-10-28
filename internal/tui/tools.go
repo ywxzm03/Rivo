@@ -19,11 +19,11 @@ func (g *ToolGroupView) Clone() *ToolGroupView {
 
 // toolRenderState 汇总当前的展开状态
 func (m *Model) toolRenderState() toolRenderState {
-	state := toolRenderState{allExpanded: m.showAllTools, showThinking: m.showThinking, hideTools: m.hideTools, groups: m.expandedGroups, calls: m.expandedCalls, thoughts: m.expandedThoughts}
+	state := toolRenderState{allExpanded: m.transcript.showAllTools, showThinking: m.transcript.showThinking, hideTools: m.transcript.hideTools, groups: m.transcript.expandedGroups, calls: m.transcript.expandedCalls, thoughts: m.transcript.expandedThoughts}
 	return state
 }
 
-// renderToolGroup 渲染一条消息里的工具组，并把点击命中记到 m.lastToolHits
+// renderToolGroup 渲染一条消息里的工具组，并把点击命中记到 m.transcript.hits
 func (m *Model) renderToolGroup(group *ToolGroupView, width int) string {
 	if group == nil {
 		return ""
@@ -33,21 +33,21 @@ func (m *Model) renderToolGroup(group *ToolGroupView, width int) string {
 		now = m.clock()
 	}
 	view, hits := renderToolRows(group, width, m.toolRenderState(), now)
-	m.lastToolHits = hits
+	m.transcript.hits = hits
 	return view
 }
 
 // expandSignature 是单击展开状态的稳定指纹，供渲染缓存判断是否需要重画
 func (m *Model) expandSignature() string {
 	var builder strings.Builder
-	keys := make([]string, 0, len(m.expandedGroups))
-	for key := range m.expandedGroups {
+	keys := make([]string, 0, len(m.transcript.expandedGroups))
+	for key := range m.transcript.expandedGroups {
 		keys = append(keys, "g"+key)
 	}
-	for key := range m.expandedCalls {
+	for key := range m.transcript.expandedCalls {
 		keys = append(keys, "c"+key)
 	}
-	for key := range m.expandedThoughts {
+	for key := range m.transcript.expandedThoughts {
 		keys = append(keys, "t"+key)
 	}
 	sort.Strings(keys)
@@ -57,17 +57,17 @@ func (m *Model) expandSignature() string {
 
 // toggleToolHit 切换屏幕上某一行对应的展开状态，返回是否命中
 func (m *Model) toggleToolHit(line int) bool {
-	for _, hit := range m.lastToolHits {
+	for _, hit := range m.transcript.hits {
 		if line < hit.Start || line > hit.End {
 			continue
 		}
 		switch hit.Kind {
 		case "group":
-			m.expandedGroups[hit.Key] = !m.expandedGroups[hit.Key]
+			m.transcript.expandedGroups[hit.Key] = !m.transcript.expandedGroups[hit.Key]
 		case "call":
-			m.expandedCalls[hit.Key] = !m.expandedCalls[hit.Key]
+			m.transcript.expandedCalls[hit.Key] = !m.transcript.expandedCalls[hit.Key]
 		case "thinking":
-			m.expandedThoughts[hit.Key] = !m.expandedThoughts[hit.Key]
+			m.transcript.expandedThoughts[hit.Key] = !m.transcript.expandedThoughts[hit.Key]
 		default:
 			return false
 		}

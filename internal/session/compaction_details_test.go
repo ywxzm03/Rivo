@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -13,7 +13,7 @@ func TestCompactionDetailsRoundTripAndContextProjection(t *testing.T) {
 	if err := m.AppendMessage(userMsg("before")); err != nil {
 		t.Fatal(err)
 	}
-	details := &compact.FileLists{
+	details := &ctxview.FileLists{
 		ReadFiles:     []string{"README.md"},
 		ModifiedFiles: []string{"main.go"},
 	}
@@ -24,7 +24,7 @@ func TestCompactionDetailsRoundTripAndContextProjection(t *testing.T) {
 	// The entry owns a snapshot instead of the caller's mutable slices.
 	details.ReadFiles[0] = "changed.md"
 	entry := m.entries[1].(*CompactionEntry)
-	want := &compact.FileLists{ReadFiles: []string{"README.md"}, ModifiedFiles: []string{"main.go"}}
+	want := &ctxview.FileLists{ReadFiles: []string{"README.md"}, ModifiedFiles: []string{"main.go"}}
 	if !reflect.DeepEqual(entry.Details, want) {
 		t.Fatalf("entry details = %+v, want %+v", entry.Details, want)
 	}
@@ -70,7 +70,7 @@ func TestAppendCompactionUsesFirstNonNilDetails(t *testing.T) {
 	if err := m.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "before"}}}); err != nil {
 		t.Fatal(err)
 	}
-	want := &compact.FileLists{ReadFiles: []string{}, ModifiedFiles: []string{"main.go"}}
+	want := &ctxview.FileLists{ReadFiles: []string{}, ModifiedFiles: []string{"main.go"}}
 	if err := m.AppendCompactionWithDetails("summary", m.leafID, 1, nil, nil, want); err != nil {
 		t.Fatal(err)
 	}

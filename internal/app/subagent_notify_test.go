@@ -10,6 +10,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
+	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
@@ -35,7 +36,7 @@ func TestIdleMainAgentWakesForTaskNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.agent.StreamFn = notifyStream("woke up")
+	a.agent.SetStream(notifyStream("woke up"))
 	store := a.SubagentStore()
 	if store == nil {
 		t.Fatal("subagent store is unavailable")
@@ -71,7 +72,7 @@ func TestNotificationReachesMainAgentContext(t *testing.T) {
 	}
 	var seen []string
 	inner := notifyStream("acknowledged")
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		for _, message := range c.Messages {
 			user, ok := message.(llm.UserMessage)
 			if !ok {
@@ -84,7 +85,7 @@ func TestNotificationReachesMainAgentContext(t *testing.T) {
 			}
 		}
 		return inner(ctx, model, c, opts)
-	}
+	})
 	store := a.SubagentStore()
 	taskID, token, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "done", AgentType: "explore"})
 	if err != nil {
@@ -124,10 +125,10 @@ func TestShutdownStopsNotificationRuns(t *testing.T) {
 	}
 	calls := atomic.Int64{}
 	inner := notifyStream("late")
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		calls.Add(1)
 		return inner(ctx, model, c, opts)
-	}
+	})
 	store := a.SubagentStore()
 	taskID, token, err := store.Register(taskpkg.RegisterSpec{Type: taskpkg.TypeAgent, Description: "late", AgentType: "explore"})
 	if err != nil {
@@ -154,7 +155,7 @@ func TestBackgroundRunEndHookFires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.agent.StreamFn = notifyStream("done")
+	a.agent.SetStream(notifyStream("done"))
 	ended := make(chan struct{}, 4)
 	a.SetBackgroundRunHook(func() { ended <- struct{}{} })
 	store := a.SubagentStore()
@@ -183,10 +184,10 @@ func TestClaudeContractStopSubagentReachesParentAgent(t *testing.T) {
 	}
 
 	started := make(chan struct{})
-	a.subagents.SetFactory(func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{
-			Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil),
-			Done:  make(chan struct{}),
+	a.subagents.SetFactory(func(context.Context, taskpkg.AgentSpec) (*subagent.AgentRuntime, error) {
+		runtime := &subagent.AgentRuntime{
+			Agent:    agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}),
+			DoneChan: make(chan struct{}),
 		}
 		runtime.Run = func(ctx context.Context, _ string) (*llm.AssistantMessage, error) {
 			close(started)
@@ -198,7 +199,7 @@ func TestClaudeContractStopSubagentReachesParentAgent(t *testing.T) {
 
 	taskIDCh := make(chan string, 1)
 	seen := make(chan string, 1)
-	a.agent.StreamFn = func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
+	a.agent.SetStream(func(ctx context.Context, model llm.Model, c llm.Context, opts llm.Options) (<-chan llm.AssistantMessageEvent, error) {
 		for _, message := range c.Messages {
 			user, ok := message.(llm.UserMessage)
 			if !ok {
@@ -218,7 +219,7 @@ func TestClaudeContractStopSubagentReachesParentAgent(t *testing.T) {
 			}
 		}
 		return notifyStream("parent noticed")(ctx, model, c, opts)
-	}
+	})
 
 	launched, err := a.subagents.Start(context.Background(), taskpkg.AgentInput{
 		Description: "background inspection",

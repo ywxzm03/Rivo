@@ -43,7 +43,7 @@ func (m *Model) layout() {
 	})
 	probe.ShowLineNumbers = false
 	probe.SetWidth(max(1, m.width))
-	for _, line := range strings.Split(m.editor.Value(), "\n") {
+	for line := range strings.SplitSeq(m.editor.Value(), "\n") {
 		// 使用编辑器自身的软换行规则，包含行尾光标与按单词换行占用的空间
 		probe.SetValue(line)
 		rows += probe.LineInfo().Height
@@ -54,28 +54,51 @@ func (m *Model) layout() {
 		refreshEditorViewport(&m.editor, targetLine, targetColumn)
 	}
 	dock := m.pendingRows() + m.editor.Height() + 2
-	if m.selector != nil {
-		m.selector.input.Width = max(1, m.width-3)
-		dock = m.selector.height(max(1, m.height-2))
+	if m.shellDialog != nil {
+		// 弹窗覆盖输入坞与状态栏,高度预算用整屏,视口只吃剩下的顶部空间
+		dock = m.shellDialogRows()
+	} else if m.composer.selector != nil {
+		m.composer.selector.input.Width = max(1, m.width-3)
+		dock = m.composer.selector.height(max(1, m.height-2))
 	} else {
 		// 视口与输入框上边框之间保留一行空白，避免长消息贴边
 		dock += m.completionRows(len(m.completionItems())) + 1
 	}
 	m.viewport.Width = m.width
-	// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
-	// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
-	// 补白就落在任务列表下方,看起来像是底部多了几行空行
-	m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
+	if m.shellDialog != nil {
+		// 弹窗贴屏幕底部,视口被压到 0 行也合法:帧总高仍等于终端高度
+		m.viewport.Height = max(0, m.height-dock)
+	} else {
+		// 任务面板占用底部空间,viewport 必须让出来,否则总行数溢出会挤掉输入框。
+		// 高度紧张时仍保留 1 行:viewport 被压到 0 会让帧比终端少一行,
+		// 补白就落在任务列表下方,看起来像是底部多了几行空行
+		m.viewport.Height = max(1, m.height-1-dock-m.subagentRows())
+	}
 	if follow {
 		m.viewport.GotoBottom()
 	}
+}
+
+// shellDialogRows 是 /ps 弹窗占用的行数,预算为整屏高度:
+// 弹窗从屏幕底部向上长出,不再给 footer 留位置
+func (m *Model) shellDialogRows() int {
+	if m.shellDialog == nil {
+		return 0
+	}
+	return m.shellDialog.height(max(1, m.height))
+}
+
+// overlayOpen 报告是否有覆盖层接管输入坞:命令选择器或 /ps 弹窗。
+// 覆盖层打开期间输入框不可编辑,鼠标与光标都要让位
+func (m *Model) overlayOpen() bool {
+	return m.composer.selector != nil || m.shellDialog != nil
 }
 
 func refreshEditorViewport(editor *textarea.Model, targetLine, targetColumn int) {
 	// textarea 在 SetHeight/SetWidth 后会保留私有视口偏移，先回到输入起点，
 	// 再走到原来的逻辑行，使光标停在用户离开的位置
 	*editor, _ = editor.Update(tea.KeyMsg{Type: tea.KeyCtrlHome})
-	for steps := 0; steps < 100000; steps++ {
+	for range 100000 {
 		line := editor.Line()
 		if line >= targetLine {
 			break
@@ -107,7 +130,7 @@ func (m *Model) view() string {
 	}
 	lines := m.frameLines()
 	if m.hasSelection() {
-		paintSelection(lines, m.selectionAnchor, m.selectionFocus)
+		paintSelection(lines, m.sel.anchor, m.sel.focus)
 	}
 	if len(lines) < m.height {
 		lines = append(lines, make([]string, m.height-len(lines))...)
@@ -128,7 +151,7 @@ func (m *Model) view() string {
 
 // jumpPillBounds 返回主 transcript 离底时覆盖的 pill 区域
 func (m *Model) jumpPillBounds() (jumpPillBounds, bool) {
-	if m.closing || m.selector != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
+	if m.closing || m.composer.selector != nil || m.shellDialog != nil || m.viewport.Height <= 0 || m.viewport.AtBottom() {
 		return jumpPillBounds{}, false
 	}
 	if rows := m.completionRows(len(m.completionItems())); rows > 0 {
@@ -149,7 +172,7 @@ func (m *Model) jumpPillVisible() bool {
 
 func (m *Model) jumpPillHovered() bool {
 	bounds, ok := m.jumpPillBounds()
-	return ok && m.mousePositionSet && m.mousePosition.y == bounds.y && m.mousePosition.x >= bounds.left && m.mousePosition.x < bounds.right
+	return ok && m.sel.mouseSet && m.sel.mouse.y == bounds.y && m.sel.mouse.x >= bounds.left && m.sel.mouse.x < bounds.right
 }
 
 // paintJumpPill 在 transcript 最后一行覆盖到底提示
@@ -192,8 +215,13 @@ func (m *Model) frameLines() []string {
 		}
 		lines = append(lines, body...)
 	}
-	if m.selector != nil {
-		lines = append(lines, splitFrameLines(m.selector.view(m.width, max(1, m.height-2)))...)
+	if m.shellDialog != nil {
+		// 弹窗覆盖输入坞与状态栏,独占屏幕底部:footer 与任务列表都不再渲染,
+		// 弹窗最后一行正好落在屏幕最后一行
+		return append(lines, splitFrameLines(m.shellDialog.view(m.width, m.shellDialogRows(), m.clock()))...)
+	}
+	if m.composer.selector != nil {
+		lines = append(lines, splitFrameLines(m.composer.selector.view(m.width, max(1, m.height-2)))...)
 	} else {
 		// 子任务视图显示该任务自己的队列;主视图显示主 agent 的
 		lines = append(lines, m.pendingLines()...)
@@ -201,6 +229,10 @@ func (m *Model) frameLines() []string {
 		// 视口已被压到 0 行时省略它,否则总行数会溢出并挤掉输入框
 		if m.viewport.Height > 0 {
 			lines = append(lines, "")
+		}
+		// 后台 shell 提示行固定在输入框上方,与任务列表分开
+		if status := backgroundShellStatusLine(m.state.Subagents.RunningShells); status != "" {
+			lines = append(lines, colored(mutedColor, ansi.Truncate(" "+status, m.width, "…")))
 		}
 		// 候选列表排在输入框上方，向上展开，输入框位置保持不变
 		if completions := m.completionView(); completions != "" {
@@ -216,12 +248,12 @@ func (m *Model) frameLines() []string {
 			label = m.status
 		}
 		// 子任务视图的输入框边框用蓝色,并在标签位置显示任务详情
-		if m.viewingTaskID != "" {
+		if m.panel.viewingTaskID != "" {
 			label = m.subagentDetailHeader()
 			borderColor = blueColor
 		}
 		border := rule(m.width, label, borderColor, false)
-		if m.copyNotice {
+		if m.sel.notice {
 			// 复制提示贴在输入框右上边框，不占用新行或覆盖运行状态
 			const notice = " copied! ──"
 			if m.width >= ansi.StringWidth(label)+ansi.StringWidth(notice)+5 {
@@ -242,7 +274,7 @@ func (m *Model) frameLines() []string {
 // pendingRows 与 pendingLines 共用同一套布局计算,避免两处公式漂移
 // 导致多出或缺少一行
 func (m *Model) pendingRows() int {
-	if m.selector != nil {
+	if m.composer.selector != nil {
 		return 0
 	}
 	return len(m.pendingLines())

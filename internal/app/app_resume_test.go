@@ -9,6 +9,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/openai"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tool"
 )
@@ -50,15 +51,15 @@ func TestOpenRestoresProjectionAndModel(t *testing.T) {
 		t.Errorf("projection model = %s/%s, want %s/%s", ctx.Provider, ctx.Model, openai.ProviderID, openai.DefaultModel)
 	}
 	// 2.运行链按投影模型装配：agent 模型即投影模型
-	if a.agent.AgentConfig.Model.ID != openai.DefaultModel {
-		t.Errorf("agent model = %q, want %q", a.agent.AgentConfig.Model.ID, openai.DefaultModel)
+	if a.agent.Config().Model.ID != openai.DefaultModel {
+		t.Errorf("agent model = %q, want %q", a.agent.Config().Model.ID, openai.DefaultModel)
 	}
 	// 2.投影消息已注入 Agent 内存上下文，恢复的会话真正接上历史
-	if len(a.agent.AgentContext.Messages) != 1 {
-		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
+	if len(a.agent.Context().Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.Context().Messages))
 	}
-	if u, ok := a.agent.AgentContext.Messages[0].(llm.UserMessage); !ok {
-		t.Errorf("agent message[0] type = %T, want UserMessage", a.agent.AgentContext.Messages[0])
+	if u, ok := a.agent.Context().Messages[0].(llm.UserMessage); !ok {
+		t.Errorf("agent message[0] type = %T, want UserMessage", a.agent.Context().Messages[0])
 	} else {
 		if text, ok := u.Content[0].(llm.TextContent); !ok || text.Text != "hello resume" {
 			t.Errorf("agent message[0] = %+v, want the restored user message", u)
@@ -121,12 +122,12 @@ func TestOpenFallsBackWhenModelUnknown(t *testing.T) {
 	if a.ModelFallbackMessage() != want {
 		t.Errorf("ModelFallbackMessage() = %q, want %q", a.ModelFallbackMessage(), want)
 	}
-	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
-		t.Errorf("agent model = %q, want fallback %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
+	if a.agent.Config().Model.ID != deepseek.DefaultModel {
+		t.Errorf("agent model = %q, want fallback %q", a.agent.Config().Model.ID, deepseek.DefaultModel)
 	}
 	// 2.模型回退不影响历史上下文注入
-	if len(a.agent.AgentContext.Messages) != 1 {
-		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
+	if len(a.agent.Context().Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.Context().Messages))
 	}
 	// 3.会话内容不受模型回退影响
 	if ctx := a.session.BuildContext(); len(ctx.Messages()) != 1 {
@@ -158,12 +159,12 @@ func TestOpenWithoutModelRecordUsesEnvConfig(t *testing.T) {
 	if a.ModelFallbackMessage() != "" {
 		t.Errorf("ModelFallbackMessage() = %q, want empty", a.ModelFallbackMessage())
 	}
-	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
-		t.Errorf("agent model = %q, want env default %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
+	if a.agent.Config().Model.ID != deepseek.DefaultModel {
+		t.Errorf("agent model = %q, want env default %q", a.agent.Config().Model.ID, deepseek.DefaultModel)
 	}
 	// 无模型记录的会话（仅有 user 消息）历史同样注入
-	if len(a.agent.AgentContext.Messages) != 1 {
-		t.Fatalf("agent messages = %d, want 1", len(a.agent.AgentContext.Messages))
+	if len(a.agent.Context().Messages) != 1 {
+		t.Fatalf("agent messages = %d, want 1", len(a.agent.Context().Messages))
 	}
 }
 
@@ -176,8 +177,8 @@ func TestOpenFallsBackToDefaultModelWhenEnvModelEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if a.agent.AgentConfig.Model.ID != deepseek.DefaultModel {
-		t.Errorf("agent model = %q, want default %q", a.agent.AgentConfig.Model.ID, deepseek.DefaultModel)
+	if a.agent.Config().Model.ID != deepseek.DefaultModel {
+		t.Errorf("agent model = %q, want default %q", a.agent.Config().Model.ID, deepseek.DefaultModel)
 	}
 	if !strings.Contains(a.ModelFallbackMessage(), "Using "+deepseek.ProviderID+"/"+deepseek.DefaultModel) {
 		t.Errorf("ModelFallbackMessage() = %q, want it to name the default model", a.ModelFallbackMessage())
@@ -199,7 +200,7 @@ func TestOpenErrorsWhenFallbackModelUnknown(t *testing.T) {
 }
 
 func TestOpenErrorsOnMissingFile(t *testing.T) {
-	_, err := Open(filepath.Join(t.TempDir(), "not-exist.jsonl"), Config{}, nil)
+	_, err := Open(filepath.Join(t.TempDir(), "not-exist.jsonl"), provider.Config{}, nil)
 	if err == nil {
 		t.Fatal("Open() error = nil, want read error")
 	}
@@ -219,8 +220,8 @@ func TestOpenRestoresExplicitOffThinkingLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if a.agent.AgentConfig.ThinkingLevel != llm.ThinkingLevelOff {
-		t.Errorf("agent ThinkingLevel = %q, want off", a.agent.AgentConfig.ThinkingLevel)
+	if a.agent.Config().ThinkingLevel != llm.ThinkingLevelOff {
+		t.Errorf("agent ThinkingLevel = %q, want off", a.agent.Config().ThinkingLevel)
 	}
 }
 

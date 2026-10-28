@@ -267,7 +267,7 @@ func toolRowCallTitle(call ToolCallView, expanded bool) string {
 func wrapToolRowTitle(dot, title string, width int) []string {
 	available := max(1, width-ansi.StringWidth(rowTitleIndent)-1)
 	var rows []string
-	for _, line := range strings.Split(title, "\n") {
+	for line := range strings.SplitSeq(title, "\n") {
 		rows = append(rows, hardWrap(line, available)...)
 	}
 	if len(rows) == 0 {
@@ -342,13 +342,13 @@ func toolRowSentence(text string, width int) []string {
 func wrapWords(text string, width int) []string {
 	width = max(1, width)
 	var rows []string
-	for _, paragraph := range strings.Split(text, "\n") {
+	for paragraph := range strings.SplitSeq(text, "\n") {
 		if paragraph == "" {
 			rows = append(rows, "")
 			continue
 		}
 		line := ""
-		for _, word := range strings.Split(paragraph, " ") {
+		for word := range strings.SplitSeq(paragraph, " ") {
 			switch {
 			case line == "":
 				line = word
@@ -379,10 +379,8 @@ func toolRowOutputWithPrefix(output string, width int, expanded bool, isError bo
 		color = redColor
 	}
 	rows := make([]string, 0, 8)
-	for _, line := range strings.Split(text, "\n") {
-		for _, wrapped := range hardWrap(colored(color, line), max(1, width-ansi.StringWidth(rowIndent))) {
-			rows = append(rows, wrapped)
-		}
+	for line := range strings.SplitSeq(text, "\n") {
+		rows = append(rows, hardWrap(colored(color, line), max(1, width-ansi.StringWidth(rowIndent)))...)
 	}
 	hidden := 0
 	if !expanded && len(rows) > rowOutputRows+1 {

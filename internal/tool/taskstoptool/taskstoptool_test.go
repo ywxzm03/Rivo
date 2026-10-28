@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/subagent"
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 )
 
@@ -33,14 +34,14 @@ func TestToolMetadata(t *testing.T) {
 
 func TestExecuteStopsAgentTask(t *testing.T) {
 	store := taskpkg.NewStore()
-	cancelled := make(chan struct{})
+	canceled := make(chan struct{})
 	id, _, err := store.Register(taskpkg.RegisterSpec{
 		Type:        taskpkg.TypeAgent,
 		Description: "long task",
 		AgentType:   "Work",
-		Runtime: &taskpkg.AgentRuntime{
-			Cancel: func() { close(cancelled) },
-			Done:   make(chan struct{}),
+		Runtime: &subagent.AgentRuntime{
+			Cancel:   func() { close(canceled) },
+			DoneChan: make(chan struct{}),
 		},
 	})
 	if err != nil {
@@ -52,7 +53,7 @@ func TestExecuteStopsAgentTask(t *testing.T) {
 	}
 	// 1.执行面必须真正取消任务,而不只是改状态
 	select {
-	case <-cancelled:
+	case <-canceled:
 	default:
 		t.Fatal("TaskStop did not cancel the task runtime")
 	}

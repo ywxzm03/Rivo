@@ -43,19 +43,14 @@ func TestDividerUsesBackgroundWaitingLabel(t *testing.T) {
 	}{
 		{name: "no background task", want: "Worked for 19s"},
 		{name: "agents", tasks: []SubagentTaskView{
-			{ID: "a1", Type: "agent", Status: "running"},
-			{ID: "a2", Type: "agent", Status: "running"},
+			{ID: "a1", Status: "running"},
+			{ID: "a2", Status: "running"},
 		}, want: "Waiting for 2 background agents to finish"},
-		{name: "bash", tasks: []SubagentTaskView{
-			{ID: "b1", Type: "bash", Status: "running"},
-			{ID: "b2", Type: "bash", Status: "running"},
-		}, want: "Waiting for 2 background bash to finish"},
-		{name: "mixed", tasks: []SubagentTaskView{
-			{ID: "a1", Type: "agent", Status: "running"},
-			{ID: "b1", Type: "bash", Status: "running"},
-		}, want: "Waiting for 2 background tasks to finish"},
+		{name: "single agent", tasks: []SubagentTaskView{
+			{ID: "a1", Status: "running"},
+		}, want: "Waiting for 1 background agent to finish"},
 		{name: "terminal tasks do not wait", tasks: []SubagentTaskView{
-			{ID: "a1", Type: "agent", Status: "completed"},
+			{ID: "a1", Status: "completed"},
 		}, want: "Worked for 19s"},
 	}
 	for _, test := range cases {
@@ -76,13 +71,13 @@ func TestDividerUsesBackgroundWaitingLabel(t *testing.T) {
 func TestDividerReturnsToWorkedAfterBackgroundTasksFinish(t *testing.T) {
 	m := New(Snapshot{
 		Messages:  []Message{{ID: "answer", Role: "assistant", Text: "done", Divider: &TurnDividerView{Elapsed: 19 * time.Second}}},
-		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running"}}},
+		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Status: "running"}}},
 	}, Handlers{})
 	m.Update(teaWindow(100, 16))
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "Waiting for 1 background agents to finish") {
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "Waiting for 1 background agent to finish") {
 		t.Fatalf("running divider = %q", view)
 	}
-	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "completed"}}})
+	m.applySubagentSnapshot(SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Status: "completed"}}})
 	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "Worked for 19s") || strings.Contains(view, "Waiting for") {
 		t.Fatalf("finished divider = %q", view)
@@ -95,7 +90,7 @@ func TestOnlyLatestDividerUsesBackgroundWaitingLabel(t *testing.T) {
 			{ID: "old", Role: "assistant", Text: "old", Divider: &TurnDividerView{Elapsed: time.Second}},
 			{ID: "new", Role: "assistant", Text: "new", Divider: &TurnDividerView{Elapsed: 2 * time.Second}},
 		},
-		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running"}}},
+		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Status: "running"}}},
 	}, Handlers{})
 	m.Update(teaWindow(100, 16))
 	old := ansi.Strip(m.renderMessage(m.state.Messages[0]))
@@ -103,7 +98,7 @@ func TestOnlyLatestDividerUsesBackgroundWaitingLabel(t *testing.T) {
 	if strings.Contains(old, "Waiting for") || !strings.Contains(old, "Worked for 1s") {
 		t.Fatalf("old divider = %q", old)
 	}
-	if !strings.Contains(latest, "Waiting for 1 background agents to finish") {
+	if !strings.Contains(latest, "Waiting for 1 background agent to finish") {
 		t.Fatalf("latest divider = %q", latest)
 	}
 }
@@ -111,7 +106,7 @@ func TestOnlyLatestDividerUsesBackgroundWaitingLabel(t *testing.T) {
 func TestBusyMainAgentKeepsWorkingDivider(t *testing.T) {
 	m := New(Snapshot{
 		Messages:  []Message{{ID: "answer", Role: "assistant", Text: "done", Divider: &TurnDividerView{Elapsed: 19 * time.Second}}},
-		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running"}}},
+		Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Status: "running"}}},
 	}, Handlers{})
 	m.Update(teaWindow(100, 16))
 	m.busy = true
@@ -124,10 +119,10 @@ func TestBusyMainAgentKeepsWorkingDivider(t *testing.T) {
 func TestOperationDoneStartsSubagentRefreshForRunningTasks(t *testing.T) {
 	m := New(Snapshot{}, Handlers{SubagentSnapshot: func() tea.Cmd { return nil }})
 	m.Update(teaWindow(100, 16))
-	running := Snapshot{Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Type: "agent", Status: "running"}}}}
+	running := Snapshot{Subagents: SubagentSnapshot{Tasks: []SubagentTaskView{{ID: "a1", Status: "running"}}}}
 	_, cmd := m.Update(OperationDoneMsg{Snapshot: &running})
-	if cmd == nil || !m.subagentRefreshRunning {
-		t.Fatalf("refresh state = %v, cmd nil=%v", m.subagentRefreshRunning, cmd == nil)
+	if cmd == nil || !m.panel.refreshRunning {
+		t.Fatalf("refresh state = %v, cmd nil=%v", m.panel.refreshRunning, cmd == nil)
 	}
 }
 
@@ -140,8 +135,8 @@ func TestRunStartsSubagentRefreshAndShowsRowsWhileBusy(t *testing.T) {
 		SubagentSnapshot: func() tea.Cmd { snapshots++; return nil },
 	})
 	m.Update(teaWindow(120, 24))
-	if cmd := m.dispatch("run", "start subagents"); cmd == nil || !m.subagentRefreshRunning {
-		t.Fatalf("run did not start subagent refresh: cmd=%v running=%v", cmd != nil, m.subagentRefreshRunning)
+	if cmd := m.dispatch("run", "start subagents"); cmd == nil || !m.panel.refreshRunning {
+		t.Fatalf("run did not start subagent refresh: cmd=%v running=%v", cmd != nil, m.panel.refreshRunning)
 	}
 	m.applySubagentSnapshot(SubagentSnapshot{Revision: 1, Tasks: []SubagentTaskView{
 		{ID: "a1", AgentType: "work", Status: "running", Description: "gin-demo"},

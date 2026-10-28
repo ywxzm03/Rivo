@@ -22,8 +22,7 @@ func TestAbortedEmptyPartialEntersProjection(t *testing.T) {
 		ErrorMessage: "Operation aborted",
 	}})
 	// dispatch 收尾
-	var partial *tui.Message
-	partial = runtime.partialAssistantLocked()
+	partial := runtime.partialAssistantLocked()
 	runtime.replaceMessagesLocked(testContext([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
 	}))

@@ -4,11 +4,10 @@ package sendmessagetool
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/subagent"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 // Messenger 是工具需要的投递面,由 subagent.Manager 满足
@@ -52,11 +51,11 @@ func (t *Tool) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if t.messenger == nil {
 		return llm.ToolResult{}, errMissingMessenger
 	}
-	to, err := requiredString(args, "to")
+	to, err := toolargs.RequiredString(args, "SendMessage", "to")
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	message, err := requiredString(args, "message")
+	message, err := toolargs.RequiredString(args, "SendMessage", "message")
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -65,14 +64,6 @@ func (t *Tool) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: result.Message}}, Details: result}, nil
-}
-
-func requiredString(args map[string]any, key string) (string, error) {
-	value, ok := args[key].(string)
-	if !ok || strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("SendMessage: %s is required", key)
-	}
-	return value, nil
 }
 
 var errMissingMessenger = errors.New("SendMessage: messenger is unavailable")

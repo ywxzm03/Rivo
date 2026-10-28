@@ -12,10 +12,10 @@ import (
 
 // Claude 的 LocalAgentTask.killAsyncAgent 契约:停止必须让父 agent 看见一次带明确原因的 killed 通知
 func TestClaudeContractKillingAsyncAgentNotifiesParentAsStopped(t *testing.T) {
-	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{
-			Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil),
-			Done:  make(chan struct{}),
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*AgentRuntime, error) {
+		runtime := &AgentRuntime{
+			Agent:    agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}),
+			DoneChan: make(chan struct{}),
 		}
 		runtime.Run = func(ctx context.Context, _ string) (*llm.AssistantMessage, error) {
 			<-ctx.Done()
@@ -64,12 +64,12 @@ func TestClaudeContractKillDuringLaunchStillNotifiesParent(t *testing.T) {
 	factoryEntered := make(chan string, 1)
 	releaseFactory := make(chan struct{})
 	startResult := make(chan error, 1)
-	manager := NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+	manager := NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*AgentRuntime, error) {
 		factoryEntered <- spec.ID
 		<-releaseFactory
-		return &taskpkg.AgentRuntime{
-			Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil),
-			Done:  make(chan struct{}),
+		return &AgentRuntime{
+			Agent:    agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}),
+			DoneChan: make(chan struct{}),
 		}, nil
 	})
 
@@ -110,17 +110,17 @@ func TestClaudeContractKillDuringLaunchStillNotifiesParent(t *testing.T) {
 
 // runtime 返回 context.Canceled 时仍是 killed 终态,但通知原因必须与用户主动 stop 区分
 func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
-	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{
-			Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil),
-			Done:  make(chan struct{}),
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*AgentRuntime, error) {
+		runtime := &AgentRuntime{
+			Agent:    agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}),
+			DoneChan: make(chan struct{}),
 		}
 		runtime.Run = func(_ context.Context, _ string) (*llm.AssistantMessage, error) {
 			return nil, context.Canceled
 		}
 		return runtime, nil
 	})
-	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "cancelled work", Prompt: "wait"})
+	launched, err := manager.Start(context.Background(), taskpkg.AgentInput{Description: "canceled work", Prompt: "wait"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
 		notifications := manager.Store().PeekNotifications()
 		if len(notifications) == 1 {
 			notification := notifications[0]
-			if notification.Reason != taskpkg.StopReasonAborted || notification.Summary != `Agent "cancelled work" was aborted` {
+			if notification.Reason != taskpkg.StopReasonAborted || notification.Summary != `Agent "canceled work" was aborted` {
 				t.Fatalf("cancellation notification = %#v", notification)
 			}
 			return
@@ -143,15 +143,12 @@ func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
 
 // 子任务事件流必须同步更新任务 progress,否则后台行永远显示问号和空活动
 func TestClaudeContractWorkerEventsUpdateProgressProjection(t *testing.T) {
-	manager := NewManager(taskpkg.NewStore(), func(_ context.Context, _ taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	manager := NewManager(taskpkg.NewStore(), func(_ context.Context, _ taskpkg.AgentSpec) (*AgentRuntime, error) {
+		runtime := &AgentRuntime{Agent: agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}), DoneChan: make(chan struct{})}
 		runtime.Run = func(_ context.Context, _ string) (*llm.AssistantMessage, error) {
-			if runtime.Agent.OnEvent == nil {
-				t.Fatal("worker event sink was not installed")
-			}
-			_ = runtime.Agent.OnEvent(llm.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "read", Arguments: map[string]any{"path": "a.go"}})
-			_ = runtime.Agent.OnEvent(llm.MessageEndEvent{Message: llm.AssistantMessage{Usage: llm.Usage{OutputTokens: 11}}})
-			_ = runtime.Agent.OnEvent(llm.TurnEndEvent{})
+			_ = runtime.Agent.Emit(llm.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "read", Arguments: map[string]any{"path": "a.go"}})
+			_ = runtime.Agent.Emit(llm.MessageEndEvent{Message: llm.AssistantMessage{Usage: llm.Usage{OutputTokens: 11}}})
+			_ = runtime.Agent.Emit(llm.TurnEndEvent{})
 			return &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}}, nil
 		}
 		return runtime, nil

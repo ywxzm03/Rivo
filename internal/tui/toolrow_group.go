@@ -210,9 +210,9 @@ func renderToolRowThinking(blocks []ThinkingBlockView, key string, width int, st
 	}
 	available := max(1, width-ansi.StringWidth(rowIndent))
 	for _, block := range blocks {
-		for _, row := range strings.Split(strings.TrimRight(block.Text, "\n"), "\n") {
+		for row := range strings.SplitSeq(strings.TrimRight(block.Text, "\n"), "\n") {
 			// 每一行都带缩进，换行后的续行也要保持同一列
-			for _, wrapped := range strings.Split(ansi.Hardwrap(row, available, true), "\n") {
+			for wrapped := range strings.SplitSeq(ansi.Hardwrap(row, available, true), "\n") {
 				lines = append(lines, rowIndent+colored(thinkingColor, wrapped))
 			}
 		}

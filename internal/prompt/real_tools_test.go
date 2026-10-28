@@ -73,9 +73,9 @@ func TestRealToolsPromptGuidelines(t *testing.T) {
 		"Show file paths clearly when working with files",
 	}
 	var got []string
-	for _, line := range strings.Split(rules, "\n") {
-		if strings.HasPrefix(line, "- ") {
-			got = append(got, strings.TrimPrefix(line, "- "))
+	for line := range strings.SplitSeq(rules, "\n") {
+		if after, ok := strings.CutPrefix(line, "- "); ok {
+			got = append(got, after)
 		}
 	}
 	if len(got) != len(want) {

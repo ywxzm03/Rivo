@@ -6,32 +6,70 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-// panelGracePeriod 是终态任务在根投影中保留的时长,
+// defaultGracePeriod 是终态任务在根投影中保留的默认时长,
 // 让 TUI 面板有机会展示结束状态后再自动驱逐
-const panelGracePeriod = 30 * time.Second
+const defaultGracePeriod = 30 * time.Second
+
+// nextTaskSeq 是进程级任务序号，保证同一进程内不同 Store 生成的 ID 不重复
+var nextTaskSeq atomic.Uint64
 
 // Store 是任务状态、lifecycle runtime 句柄和通知的唯一所有者
 type Store struct {
 	mu            sync.Mutex
 	tasks         map[string]State
-	runtimes      map[string]*AgentRuntime
+	runtimes      map[string]Runtime
 	notifications []Notification
-	nextID        uint64
 	nextToken     uint64
 	viewingTaskID string
 	// notify 是通知入队时的唤醒回调。主 agent 空闲时靠它启动消费通知的 run,
 	// 否则通知要等用户下次输入才投递
 	notify func()
+	// readTranscript 按字节偏移增量读取 sidechain transcript。
+	// 由上层注入,避免任务层反向依赖会话持久化层
+	readTranscript func(path string, offset int64) ([]llm.Message, int64, error)
+
+	// GracePeriod 是终态任务的驱逐宽限期，零值表示用 defaultGracePeriod。
+	// 测试注入毫秒级宽限期，避免真等 30 秒
+	GracePeriod time.Duration
+
+	// 下面三组子结构不持有独立锁，复用 Store 的锁与状态，
+	// 只是把平铺方法按职责分组
+	Notifications NotificationQueue
+	Pending       PendingQueues
+	Views         TaskViews
 }
 
 func NewStore() *Store {
-	return &Store{tasks: make(map[string]State), runtimes: make(map[string]*AgentRuntime)}
+	store := &Store{tasks: make(map[string]State), runtimes: make(map[string]Runtime)}
+	store.Notifications = NotificationQueue{store: store}
+	store.Pending = PendingQueues{store: store}
+	store.Views = TaskViews{store: store}
+	return store
+}
+
+// gracePeriod 返回生效的宽限期，零值时用默认值
+func (s *Store) gracePeriod() time.Duration {
+	if s.GracePeriod > 0 {
+		return s.GracePeriod
+	}
+	return defaultGracePeriod
+}
+
+// tokenOf 返回任务当前的 lifecycle token，供子结构复用既有入口
+func (s *Store) tokenOf(id string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[id]
+	if !ok {
+		return 0
+	}
+	return task.Base().LifecycleToken
 }
 
 // SetNotifyHook 安装通知入队回调。回调在锁外执行,避免宿主侧逻辑与 store 锁互等
@@ -54,7 +92,7 @@ type RegisterSpec struct {
 	Thinking     llm.ThinkingLevel
 	WorktreePath string
 	Worktree     bool
-	Runtime      *AgentRuntime
+	Runtime      Runtime
 	BashState    *BashState
 	AgentState   *AgentState
 }
@@ -67,11 +105,11 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	}
 	id := spec.ID
 	if id == "" {
-		s.nextID++
 		// task ID 同时也是 sidechain transcript 的文件名。加入进程时间分量,
 		// 新起的 Rivo 进程就不会重开旧的 agent-1.jsonl 并在首次启动时
-		// 因 O_EXCL 失败。
-		id = fmt.Sprintf("%s-%d-%d", spec.Type, time.Now().UnixNano(), s.nextID)
+		// 因 O_EXCL 失败。序号取进程级计数器,同一进程内多个 Store
+		// (每次 /new 都新建一个)才不会在同一纳秒撞出相同 ID
+		id = fmt.Sprintf("%s-%d-%d", spec.Type, time.Now().UnixNano(), nextTaskSeq.Add(1))
 	} else if existing, exists := s.tasks[id]; exists {
 		if existing.Base().Status == StatusRunning {
 			return "", 0, fmt.Errorf("subagent: task %s is already running", id)
@@ -97,7 +135,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 		spec.AgentState.AgentID = id
 		spec.AgentState.Prompt = spec.Prompt
 		spec.AgentState.AgentType = spec.AgentType
-		spec.AgentState.Model = cloneModel(spec.Model)
+		spec.AgentState.Model = cloneModelPtr(spec.Model)
 		spec.AgentState.Thinking = spec.Thinking
 		spec.AgentState.WorktreePath = spec.WorktreePath
 		spec.AgentState.Worktree = spec.Worktree
@@ -105,7 +143,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	}
 	s.tasks[id] = state
 	if spec.Runtime != nil {
-		spec.Runtime.LifecycleToken = token
+		spec.Runtime.SetToken(token)
 		s.runtimes[id] = spec.Runtime
 	}
 	return id, token, nil
@@ -147,7 +185,7 @@ func (s *Store) EnterView(id string) bool {
 	if previous, ok := s.tasks[s.viewingTaskID].(*AgentState); ok && previous != task {
 		previous.Retain = false
 		if previous.Base().Status.Terminal() {
-			setEvictAfter(&previous.StateBase, false, time.Now())
+			setEvictAfter(&previous.StateBase, false, time.Now(), s.gracePeriod())
 		}
 	}
 	s.viewingTaskID = id
@@ -169,7 +207,7 @@ func (s *Store) ExitView() {
 		}
 		task.Retain = false
 		if task.Base().Status.Terminal() {
-			setEvictAfter(&task.StateBase, false, time.Now())
+			setEvictAfter(&task.StateBase, false, time.Now(), s.gracePeriod())
 		}
 	}
 }
@@ -178,6 +216,13 @@ func (s *Store) ViewingTaskID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.viewingTaskID
+}
+
+// SetTranscriptReader 注入 sidechain transcript 的读取实现
+func (s *Store) SetTranscriptReader(read func(path string, offset int64) ([]llm.Message, int64, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readTranscript = read
 }
 
 // ReadTaskMessages 从任务的 sidechain transcript 按字节偏移增量读取消息,
@@ -196,7 +241,10 @@ func (s *Store) ReadTaskMessages(id string, offset int64) ([]llm.Message, int64,
 	if path == "" {
 		return nil, offset, nil
 	}
-	messages, next, err := session.ReadMessages(path, offset)
+	if s.readTranscript == nil {
+		return nil, offset, errors.New("subagent: transcript reader is not configured")
+	}
+	messages, next, err := s.readTranscript(path, offset)
 	if errors.Is(err, os.ErrNotExist) {
 		// transcript 在首条消息落盘前还不存在,按空增量处理
 		return nil, offset, nil
@@ -225,13 +273,27 @@ func (s *Store) Evict(id string) bool {
 
 // EvictExpired 驱逐宽限期已过、且通知已投递过的终态任务,返回驱逐数量。
 // bash 与 agent 共用同一套策略:终态 + 已通知 + 过了宽限期
+// HasEvictionWork 报告是否有等待宽限期的终态任务。
+// 驱逐循环据此在空闲时停止轮询，而不是每秒空转
+func (s *Store) HasEvictionWork() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, state := range s.tasks {
+		base := state.Base()
+		if base.Status.Terminal() && base.NotificationDelivered && base.EvictAfter != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) EvictExpired() int {
 	s.mu.Lock()
 	now := time.Now()
 	evicted := 0
 	for id, state := range s.tasks {
 		base := state.Base()
-		if !base.Status.Terminal() || !base.Notified {
+		if !base.Status.Terminal() || !base.NotificationDelivered {
 			continue
 		}
 		// 用户正在查看的 transcript 永不自动回收,否则面板会在阅读中途消失
@@ -266,7 +328,7 @@ func (s *Store) KillAllRunningTasks() int {
 			bashIDs = append(bashIDs, id)
 		}
 	}
-	runtimes := make([]*AgentRuntime, 0, len(agentIDs))
+	runtimes := make([]Runtime, 0, len(agentIDs))
 	for _, id := range agentIDs {
 		runtimes = append(runtimes, s.runtimes[id])
 	}
@@ -280,9 +342,9 @@ func (s *Store) KillAllRunningTasks() int {
 	// 取消只发信号。等 lifecycle 真正收尾,子 agent 才会在退出前
 	// 走完工具层的进程树清理
 	for _, runtime := range runtimes {
-		if runtime != nil && runtime.Done != nil {
+		if runtime != nil {
 			select {
-			case <-runtime.Done:
+			case <-runtime.Done():
 			case <-time.After(shutdownWait):
 			}
 		}
@@ -297,6 +359,27 @@ func (s *Store) KillAllRunningTasks() int {
 
 // shutdownWait 是退出时等待子任务收尾的上限
 const shutdownWait = 3 * time.Second
+
+// KillAllRunningBashTasks 终止全部运行中的后台 bash 任务,返回成功终止的数量。
+// /stop 只停 shell:子 agent 有自己的取消链路,不能被这条用户命令连带终止
+func (s *Store) KillAllRunningBashTasks() int {
+	s.mu.Lock()
+	var ids []string
+	for id, state := range s.tasks {
+		if _, ok := state.(*BashState); !ok || state.Base().Status != StatusRunning {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	killed := 0
+	for _, id := range ids {
+		if err := KillBash(id, s); err == nil {
+			killed++
+		}
+	}
+	return killed
+}
 
 // KillBashTasksForAgent 终止某子 agent 启动且仍在运行的后台 bash 任务,
 // 返回成功终止的数量。子 agent 结束后它的 query loop 不再运行,
@@ -345,6 +428,8 @@ func (s *Store) EnqueueNotification(id string, token uint64, notification Notifi
 		s.mu.Unlock()
 		return false
 	}
+	// Notified 只做入队去重;能否驱逐看 NotificationDelivered,
+	// 它在通知真正落盘后才置位,任务行因此能保留到送达之后
 	task.Base().Notified = true
 	s.notifications = append(s.notifications, notification)
 	notify := s.notify
@@ -369,6 +454,32 @@ func (s *Store) PeekNotifications() []Notification {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Notification(nil), s.notifications...)
+}
+
+// ClaimResult 是一次通知认领的结果
+type ClaimResult struct {
+	Notifications []Notification
+	Count         int
+}
+
+// ClaimNotifications 认领当前队列里的全部通知但不移除,
+// 供调用方在落盘成功后再 AckNotifications。落盘失败时通知仍在队列里
+func (s *Store) ClaimNotifications() ClaimResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claimed := append([]Notification(nil), s.notifications...)
+	return ClaimResult{Notifications: claimed, Count: len(claimed)}
+}
+
+// MarkNotified 把指定任务标记为通知已落盘送达,之后才允许被 EvictExpired 回收
+func (s *Store) MarkNotified(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		if task, ok := s.tasks[id]; ok {
+			task.Base().NotificationDelivered = true
+		}
+	}
 }
 
 // AckNotifications 确认前 count 条通知已被模型消费。
@@ -585,7 +696,7 @@ func (s *Store) completeAgent(id string, token uint64, result *AgentResult, err 
 	now := time.Now()
 	task.Base().EndTime = &now
 	task.Abort = nil
-	setEvictAfter(&task.StateBase, task.Retain, now)
+	setEvictAfter(&task.StateBase, task.Retain, now, s.gracePeriod())
 	if err != nil {
 		task.Base().Status = StatusFailed
 		task.Error = err.Error()
@@ -613,11 +724,11 @@ func (s *Store) completeBash(id string, token uint64, result *BashResult, err er
 	}
 	task.Result = result
 	// bash 与 agent 共用面板宽限期,通知投递后由 EvictExpired 回收
-	setEvictAfter(&task.StateBase, false, now)
+	setEvictAfter(&task.StateBase, false, now, s.gracePeriod())
 	return true
 }
 
-func (s *Store) beginAgentKill(id string, reason StopReason) (*AgentRuntime, context.CancelFunc, uint64, error) {
+func (s *Store) beginAgentKill(id string, reason StopReason) (Runtime, context.CancelFunc, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -635,23 +746,28 @@ func (s *Store) beginAgentKill(id string, reason StopReason) (*AgentRuntime, con
 	task.Abort = nil
 	task.PendingSteering = nil
 	task.PendingFollowUp = nil
-	setEvictAfter(&task.StateBase, task.Retain, now)
+	// 启动窗口内没有 runtime 时不会有通知入队,直接视为已送达,
+	// 否则任务行永远不会被回收
+	if runtime == nil {
+		task.Base().NotificationDelivered = true
+	}
+	setEvictAfter(&task.StateBase, task.Retain, now, s.gracePeriod())
 	return runtime, abort, token, nil
 }
 
 // setEvictAfter 在终态转移时写入面板宽限期;Retain 任务永不驱逐
-func setEvictAfter(base *StateBase, retain bool, now time.Time) {
+func setEvictAfter(base *StateBase, retain bool, now time.Time, gracePeriod time.Duration) {
 	if retain {
 		base.EvictAfter = nil
 		return
 	}
-	deadline := now.Add(panelGracePeriod)
+	deadline := now.Add(gracePeriod)
 	base.EvictAfter = &deadline
 }
 
 // ContinuationRuntime 返回当前 runtime 和 token,调用方据此取消它
 // 并在替换任务状态前等待 Done。
-func (s *Store) ContinuationRuntime(id string) (*AgentRuntime, uint64, error) {
+func (s *Store) ContinuationRuntime(id string) (Runtime, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -670,7 +786,7 @@ func (s *Store) ContinuationRuntime(id string) (*AgentRuntime, uint64, error) {
 
 // RegisterContinuation 替换任务的运行中 lifecycle,同时保留稳定 task ID
 // 和 Claude 风格的 UI/transcript 字段。
-func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
+func (s *Store) RegisterContinuation(id string, runtime Runtime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.tasks[id].(*AgentState)
@@ -696,7 +812,7 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 		AgentID:      old.AgentID,
 		Prompt:       prompt,
 		AgentType:    old.AgentType,
-		Model:        cloneModel(old.Model),
+		Model:        cloneModelPtr(old.Model),
 		Thinking:     old.Thinking,
 		WorktreePath: old.WorktreePath,
 		Worktree:     old.Worktree,
@@ -706,7 +822,7 @@ func (s *Store) RegisterContinuation(id string, runtime *AgentRuntime, prompt st
 	}
 	s.tasks[id] = state
 	if runtime != nil {
-		runtime.LifecycleToken = token
+		runtime.SetToken(token)
 		s.runtimes[id] = runtime
 	}
 	return token, nil
@@ -721,31 +837,6 @@ func CloneUserMessages(messages []llm.UserMessage) []llm.UserMessage {
 }
 
 // cloneModel 深拷贝模型配置,隔离可变 map 与指针字段
-func cloneModel(model *llm.Model) *llm.Model {
-	if model == nil {
-		return nil
-	}
-	copy := *model
-	if model.Cost != nil {
-		cost := *model.Cost
-		copy.Cost = &cost
-	}
-	if model.ThinkingLevelMap != nil {
-		copy.ThinkingLevelMap = make(map[llm.ThinkingLevel]*llm.ReasoningEffort, len(model.ThinkingLevelMap))
-		for level, effort := range model.ThinkingLevelMap {
-			if effort == nil {
-				copy.ThinkingLevelMap[level] = nil
-				continue
-			}
-			value := *effort
-			copy.ThinkingLevelMap[level] = &value
-		}
-	}
-	if model.SamplingParams != nil {
-		copy.SamplingParams = cloneAnyMap(model.SamplingParams)
-	}
-	return &copy
-}
 
 func (s *Store) beginBashKill(id string) (*BashState, BashProcess, uint64, error) {
 	s.mu.Lock()
@@ -762,7 +853,7 @@ func (s *Store) beginBashKill(id string) (*BashState, BashProcess, uint64, error
 	task.Base().Notified = true
 	task.Result = &BashResult{Code: 137, Interrupted: true}
 	task.Process = nil
-	setEvictAfter(&task.StateBase, false, now)
+	setEvictAfter(&task.StateBase, false, now, s.gracePeriod())
 	return task, process, token, nil
 }
 
@@ -790,7 +881,7 @@ func (s *Store) RemoveRuntime(id string, token uint64) {
 	}
 }
 
-func (s *Store) AttachAgentRuntime(id string, runtime *AgentRuntime, prompt string) (uint64, error) {
+func (s *Store) AttachAgentRuntime(id string, runtime Runtime, prompt string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
@@ -798,23 +889,23 @@ func (s *Store) AttachAgentRuntime(id string, runtime *AgentRuntime, prompt stri
 		return 0, errors.New("subagent: task is not running")
 	}
 	task.Prompt = prompt
-	task.Abort = runtime.Cancel
+	task.Abort = runtime.Abort()
 	s.runtimes[id] = runtime
 	return task.Base().LifecycleToken, nil
 }
 
-func (s *Store) SetRuntimeMetadata(id string, token uint64, runtime *AgentRuntime) bool {
+func (s *Store) SetRuntimeMetadata(id string, token uint64, runtime Runtime) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task, ok := s.tasks[id].(*AgentState)
 	if !ok || task.Base().LifecycleToken != token {
 		return false
 	}
-	if runtime.OutputFile != "" {
-		task.Base().OutputFile = runtime.OutputFile
+	if path := runtime.OutputPath(); path != "" {
+		task.Base().OutputFile = path
 	}
-	if runtime.WorktreePath != "" {
-		task.WorktreePath = runtime.WorktreePath
+	if path := runtime.Worktree(); path != "" {
+		task.WorktreePath = path
 	}
 	return true
 }
@@ -841,33 +932,6 @@ func (s *Store) DiscardReserved(id string) bool {
 	delete(s.tasks, id)
 	delete(s.runtimes, id)
 	return true
-}
-
-// cloneAnyMap 递归复制 map[string]any,隔离 provider 参数里的嵌套容器
-func cloneAnyMap(source map[string]any) map[string]any {
-	if source == nil {
-		return nil
-	}
-	result := make(map[string]any, len(source))
-	for key, value := range source {
-		result[key] = cloneAnyValue(value)
-	}
-	return result
-}
-
-func cloneAnyValue(value any) any {
-	switch value := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(value)
-	case []any:
-		cloned := make([]any, len(value))
-		for i, item := range value {
-			cloned[i] = cloneAnyValue(item)
-		}
-		return cloned
-	default:
-		return value
-	}
 }
 
 // cloneDeadline 隔离驱逐截止时间指针
@@ -916,7 +980,7 @@ func cloneTaskState(task State) State {
 			result.Usage = cloneUsage(state.Result.Usage)
 			copy.Result = &result
 		}
-		copy.Model = cloneModel(state.Model)
+		copy.Model = cloneModelPtr(state.Model)
 		if state.Progress != nil {
 			progress := *state.Progress
 			progress.RecentActivities = append([]ToolActivity(nil), state.Progress.RecentActivities...)
@@ -930,4 +994,13 @@ func cloneTaskState(task State) State {
 	default:
 		return task
 	}
+}
+
+// cloneModelPtr 复制模型指针，nil 原样返回
+func cloneModelPtr(model *llm.Model) *llm.Model {
+	if model == nil {
+		return nil
+	}
+	cloned := model.Clone()
+	return &cloned
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -54,17 +53,20 @@ func StoppedAgentSummary(description string, reason StopReason) string {
 
 // StateBase 是 BashState 与 AgentState 共享的公共 lifecycle 状态
 type StateBase struct {
-	ID             string
-	Type           Type
-	Status         Status
-	Description    string
-	ToolUseID      string
-	StartTime      time.Time
-	EndTime        *time.Time
-	OutputFile     string
-	Notified       bool
-	LifecycleToken uint64
-	StopReason     StopReason
+	ID          string
+	Type        Type
+	Status      Status
+	Description string
+	ToolUseID   string
+	StartTime   time.Time
+	EndTime     *time.Time
+	OutputFile  string
+	// Notified 表示通知已入队,用于去重
+	Notified bool
+	// NotificationDelivered 表示通知已落盘进主会话,此后才允许驱逐任务行
+	NotificationDelivered bool
+	LifecycleToken        uint64
+	StopReason            StopReason
 
 	// EvictAfter 是终态任务的驱逐截止时间。nil 表示通知投递后立即可驱逐;
 	// agent 任务用它实现面板宽限期
@@ -144,18 +146,20 @@ type AgentState struct {
 func (*AgentState) taskState()         {}
 func (s *AgentState) Base() *StateBase { return &s.StateBase }
 
-type AgentRuntime struct {
-	Agent           *agent.Agent
-	Cancel          context.CancelFunc
-	Done            chan struct{}
-	LifecycleToken  uint64
-	OutputFile      string
-	WorktreePath    string
-	WorktreeCleanup func() bool
-	Run             func(context.Context, string) (*llm.AssistantMessage, error)
-	// MessageStart 是本 lifecycle 起始的消息下标。fork 会继承父 transcript,
-	// 统计用量时必须从这里开始,否则会把父对话算进子任务
-	MessageStart int
+// Runtime 是任务存储持有的运行时句柄。
+// store 只用它做取消、存活等待与元数据回填，不认识具体 agent 类型，
+// 具体实现在 subagent 包，避免 task 反向依赖 agent
+type Runtime interface {
+	// Abort 返回取消函数，store 挂到 AgentState.Abort 上供后续 kill 使用
+	Abort() context.CancelFunc
+	// Done 在 lifecycle 收尾时关闭，供 Shutdown 等待
+	Done() <-chan struct{}
+	// SetToken 由 store 在注册时回写 lifecycle token
+	SetToken(token uint64)
+	// OutputPath 是 sidechain transcript 落盘路径
+	OutputPath() string
+	// Worktree 是子 agent 的工作树路径，未启用时为空
+	Worktree() string
 }
 
 type AgentInput struct {
@@ -184,6 +188,10 @@ type AgentLaunched struct {
 	OutputFile   string `json:"outputFile"`
 	WorktreePath string `json:"worktreePath,omitempty"`
 }
+
+func (AgentLaunched) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[AgentLaunched]("agentId") }
 
 type AgentResult struct {
 	AgentID           string      `json:"agentId"`
@@ -220,6 +228,10 @@ type StopOutput struct {
 	Type    Type   `json:"task_type"`
 	Command string `json:"command"`
 }
+
+func (StopOutput) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[StopOutput]("task_type") }
 
 type StopTaskError struct {
 	Code    string

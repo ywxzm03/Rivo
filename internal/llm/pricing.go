@@ -34,17 +34,17 @@ const cnyToUSD = 0.14
 var builtinPricing = map[string]modelPricing{
 	"openai/gpt-6-astra": {
 		standard:         costRates{input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5},
-		longContext:      ptrCostRates(costRates{input: 20, output: 75, cacheRead: 2, cacheWrite: 25}),
+		longContext:      new(costRates{input: 20, output: 75, cacheRead: 2, cacheWrite: 25}),
 		longContextLimit: 272000,
 	},
 	"openai/gpt-6.1-sol": {
 		standard:         costRates{input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5},
-		longContext:      ptrCostRates(costRates{input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5}),
+		longContext:      new(costRates{input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5}),
 		longContextLimit: 272000,
 	},
 	"openai/gpt-6-luna": {
 		standard:         costRates{input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125},
-		longContext:      ptrCostRates(costRates{input: 0.2, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25}),
+		longContext:      new(costRates{input: 0.2, output: 0.75, cacheRead: 0.02, cacheWrite: 0.25}),
 		longContextLimit: 272000,
 	},
 	"deepseek/deepseek-flash": {
@@ -63,7 +63,7 @@ var builtinPricing = map[string]modelPricing{
 	},
 }
 
-func ptrCostRates(rates costRates) *costRates { return &rates }
+//go:fix inline
 
 // PriceUsage 根据模型与 usage 计算一次美元费用；OpenAI 长上下文价格
 // 按整次请求的 prompt token 总量选择
@@ -91,10 +91,7 @@ func PriceUsage(model Model, usage Usage) *Cost {
 		longContext = pricing.longContext
 		longContextLimit = pricing.longContextLimit
 	}
-	cacheWriteTokens := usage.CacheWriteTokens
-	if cacheWriteTokens < usage.CacheWrite1HTokens {
-		cacheWriteTokens = usage.CacheWrite1HTokens
-	}
+	cacheWriteTokens := max(usage.CacheWriteTokens, usage.CacheWrite1HTokens)
 	promptTokens := usage.InputTokens + usage.CacheReadTokens + cacheWriteTokens
 	if longContext != nil && promptTokens > longContextLimit {
 		rates = *longContext

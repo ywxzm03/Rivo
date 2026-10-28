@@ -4,14 +4,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
-
-// FileLists 记录摘要历史中读过的文件与改动过的文件
-type FileLists struct {
-	ReadFiles     []string `json:"readFiles"`
-	ModifiedFiles []string `json:"modifiedFiles"`
-}
 
 type fileOperations struct {
 	read    map[string]struct{}
@@ -27,7 +22,7 @@ func newFileOperations() fileOperations {
 	}
 }
 
-func fileOperationsFromLists(lists *FileLists) fileOperations {
+func fileOperationsFromLists(lists *ctxview.FileLists) fileOperations {
 	ops := newFileOperations()
 	if lists == nil {
 		return ops
@@ -68,7 +63,7 @@ func collectFileOperations(messages []llm.Message, ops *fileOperations) {
 	}
 }
 
-func computeFileLists(ops fileOperations) FileLists {
+func computeFileLists(ops fileOperations) ctxview.FileLists {
 	modified := make(map[string]struct{}, len(ops.written)+len(ops.edited))
 	for path := range ops.written {
 		modified[path] = struct{}{}
@@ -88,10 +83,10 @@ func computeFileLists(ops fileOperations) FileLists {
 	}
 	sort.Strings(readFiles)
 	sort.Strings(modifiedFiles)
-	return FileLists{ReadFiles: readFiles, ModifiedFiles: modifiedFiles}
+	return ctxview.FileLists{ReadFiles: readFiles, ModifiedFiles: modifiedFiles}
 }
 
-func formatFileOperations(lists FileLists) string {
+func formatFileOperations(lists ctxview.FileLists) string {
 	sections := make([]string, 0, 2)
 	if len(lists.ReadFiles) > 0 {
 		sections = append(sections, "<read-files>\n"+strings.Join(lists.ReadFiles, "\n")+"\n</read-files>")

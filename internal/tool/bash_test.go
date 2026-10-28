@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
 func runBash(t *testing.T, ctx context.Context, args map[string]any) (llm.ToolResult, error) {
@@ -104,7 +105,7 @@ func TestBashEnvironmentAndSanitization(t *testing.T) {
 	if got, want := bashText(result), "red\nAB"; got != want {
 		t.Errorf("sanitized output = %q, want %q", got, want)
 	}
-	if !strings.Contains(strings.Join(shellEnvironment(), "\n"), binDir) {
+	if !strings.Contains(strings.Join(shell.Environment(), "\n"), binDir) {
 		t.Errorf("bash environment does not include cache bin %q", binDir)
 	}
 }
@@ -119,13 +120,13 @@ func TestBashTailTruncationAndFullOutput(t *testing.T) {
 	if !strings.HasPrefix(output, "101\n102\n") || !strings.Contains(output, "2100") || strings.Contains(output, "\n100\n") {
 		t.Errorf("tail output has unexpected content")
 	}
-	details, ok := result.Details.(map[string]any)
+	details, ok := result.Details.(ShellDetails)
 	if !ok {
-		t.Fatalf("Details = %T, want map[string]any", result.Details)
+		t.Fatalf("Details = %T, want ShellDetails", result.Details)
 	}
-	path, ok := details["fullOutputPath"].(string)
-	if !ok || path == "" {
-		t.Fatalf("fullOutputPath = %#v", details["fullOutputPath"])
+	path := details.FullOutputPath
+	if path == "" {
+		t.Fatalf("fullOutputPath = %#v", path)
 	}
 	full, err := os.ReadFile(path)
 	if err != nil {
@@ -145,12 +146,11 @@ func TestBashByteTruncation(t *testing.T) {
 	if !strings.Contains(bashText(result), "Showing last 50.0KB of line") {
 		t.Errorf("output missing partial-line truncation note")
 	}
-	details := result.Details.(map[string]any)
-	truncation := details["truncation"].(map[string]any)
-	if truncation["truncatedBy"] != truncatedByBytes {
-		t.Errorf("truncatedBy = %#v, want bytes", truncation["truncatedBy"])
+	details := result.Details.(ShellDetails)
+	if details.Truncation == nil || details.Truncation.TruncatedBy != truncatedByBytes {
+		t.Errorf("truncatedBy = %#v, want bytes", details.Truncation)
 	}
-	_ = os.Remove(details["fullOutputPath"].(string))
+	_ = os.Remove(details.FullOutputPath)
 }
 
 func TestTruncateBashTailAllowsPartialFinalLine(t *testing.T) {

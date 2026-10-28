@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -179,7 +180,7 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			return result
 		}
 		result.Replayed = true
-		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.pendingRecovery {
+		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.compaction.pendingRecovery {
 			resume := previous != nil && equalOperationRequest(*previous, request) && request.Kind == OperationRun
 			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
 			if result.Err != nil || resume {
@@ -252,7 +253,11 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	case OperationCompact:
 		result.Err = a.coordinator.Compact(ctx, request.Value)
 	case OperationModel:
-		provider, model, _ := strings.Cut(request.Value, "/")
+		provider, model, ok := strings.Cut(request.Value, "/")
+		if !ok {
+			result.Err = fmt.Errorf("app: model switch value %q must be provider/model", request.Value)
+			break
+		}
 		result.Err = a.setModel(provider, model)
 	case OperationThinking:
 		result.Err = a.setThinkingLevel(llm.ThinkingLevel(request.Value))
@@ -308,8 +313,8 @@ func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult
 	for result.Err == nil && ctx.Err() == nil {
 		a.operationMu.Lock()
 		open := a.active != nil && !a.active.closing
-		steering := open && a.agent.HasSteering()
-		followUp := open && !steering && a.agent.HasFollowUp()
+		steering := open && a.agent.Len(agent.QueueSteering) > 0
+		followUp := open && !steering && a.agent.Len(agent.QueueFollowUp) > 0
 		notified := open && !steering && !followUp && a.hasPendingNotification()
 		if !steering && !followUp && !notified {
 			// 最终队列检查与关闭收尾窗口必须同处一个临界区，
@@ -359,12 +364,12 @@ func (a *App) acknowledgePendingQueued(messages []llm.Message) {
 		if !ok {
 			continue
 		}
-		if a.agent.AcknowledgePendingMessage(user) {
+		if a.agent.AcknowledgePending(agent.PayloadFromMessage(user)) {
 			continue
 		}
 		if len(user.Content) == 1 {
 			if text, ok := user.Content[0].(llm.TextContent); ok {
-				a.agent.AcknowledgePending(text.Text)
+				a.agent.AcknowledgePendingText(text.Text)
 			}
 		}
 	}
@@ -460,13 +465,12 @@ func (a *App) restoreBranchSettings() error {
 	}
 	if provider != "" {
 		if model == "" {
-			spec, err := a.cfg.lookupProvider(provider)
-			if err != nil {
-				return err
+			model = a.cfg.DefaultModelID(provider)
+			if model == "" {
+				return fmt.Errorf("unknown provider %q", provider)
 			}
-			model = spec.defaultModel
 		}
-		if err := a.applyModel(provider, model, false); err != nil {
+		if err := a.switchModel(provider, model); err != nil {
 			return err
 		}
 	}
@@ -477,19 +481,19 @@ func (a *App) restoreBranchSettings() error {
 	if level == "" {
 		level = llm.ThinkingLevelOff
 	}
-	a.agent.AgentConfig.ThinkingLevel = level
+	a.agent.SetThinkingLevel(level)
 	return nil
 }
 
 func (a *App) restoreCommittedSettings() error {
 	view := a.session.BuildContext()
 	if view.Provider != "" && view.Model != "" {
-		if err := a.applyModel(view.Provider, view.Model, false); err != nil {
+		if err := a.switchModel(view.Provider, view.Model); err != nil {
 			return err
 		}
 	}
 	if view.HasThinkingLevel {
-		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(view.ThinkingLevel)
+		a.agent.SetThinkingLevel(llm.ThinkingLevel(view.ThinkingLevel))
 	}
 	a.agent.ReplaceMessages(view.Messages())
 	return nil

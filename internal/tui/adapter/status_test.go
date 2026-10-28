@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 func TestStatusReportsModelUsageAndSessionIdentity(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestStatusWithoutAppReportsError(t *testing.T) {
 
 func TestStatusTranscriptUsesPendingPathBeforeFirstMessage(t *testing.T) {
 	setupAdapterEnv(t)
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

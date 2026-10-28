@@ -29,7 +29,9 @@ func TestContextUsageUsesNormalizedTotal(t *testing.T) {
 
 func TestContextUsageUnavailableWithoutWindow(t *testing.T) {
 	a := operationApp(t, nil, nil)
-	a.agent.AgentConfig.Model.ContextWindow = 0
+	model := a.agent.Config().Model
+	model.ContextWindow = 0
+	a.agent.SetModel(model)
 	if usage := a.ContextUsage(); usage.Available || usage.ContextWindow != 0 {
 		t.Fatalf("ContextUsage = %+v, want unavailable", usage)
 	}

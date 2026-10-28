@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/muesli/termenv"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestMain(m *testing.M) {
@@ -53,10 +52,10 @@ func TestSelectorTinyBudgetKeepsFixedUI(t *testing.T) {
 	m := testModel(80, 8)
 	m.openSelector("model", "")
 	for _, budget := range []int{3, 6} {
-		view := m.selector.view(80, budget)
+		view := m.composer.selector.view(80, budget)
 		lines := strings.Split(view, "\n")
-		if len(lines) != m.selector.height(budget) {
-			t.Fatalf("budget=%d rendered=%d measured=%d", budget, len(lines), m.selector.height(budget))
+		if len(lines) != m.composer.selector.height(budget) {
+			t.Fatalf("budget=%d rendered=%d measured=%d", budget, len(lines), m.composer.selector.height(budget))
 		}
 		plain := ansi.Strip(view)
 		if !strings.Contains(plain, "Select Model") || !strings.Contains(plain, "> ") {
@@ -72,19 +71,19 @@ func TestToolHitsAreStableAcrossRenders(t *testing.T) {
 	group := &ToolGroupView{ID: "group", Calls: []ToolCallView{{ID: "call", Name: "bash", Arguments: `{"command":"echo hi"}`, Result: "hi", Status: ToolSuccess, ArgsComplete: true}}}
 	m.state.Messages = []Message{{ID: "tools", Role: "assistant", ToolGroup: group}}
 	m.refreshTranscript()
-	first := len(m.lastToolHits)
+	first := len(m.transcript.hits)
 	if first != 1 {
 		t.Fatalf("hits = %d, want 1", first)
 	}
 	m.refreshTranscript()
-	if len(m.lastToolHits) != first || m.lastToolHits[0] != m.cache["tools"].hits[0] {
-		t.Fatalf("hits changed between renders: %+v", m.lastToolHits)
+	if len(m.transcript.hits) != first || m.transcript.hits[0] != m.cache["tools"].hits[0] {
+		t.Fatalf("hits changed between renders: %+v", m.transcript.hits)
 	}
 }
 
 func testState() Snapshot {
 	s := Snapshot{Cwd: "/project/Rivo", Branch: "feat(tui)/fullscreen-tui", Thinking: "high"}
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		s.Models = append(s.Models, ModelOption{ID: fmt.Sprintf("model-%02d", i), Provider: fmt.Sprintf("provider-%d", i%2), Name: fmt.Sprintf("Model %d", i), ContextWindow: 1000000, Levels: []string{"off", "low", "high"}})
 	}
 	s.ModelKey, s.DefaultModelKey = s.Models[0].Key(), s.Models[1].Key()
@@ -115,11 +114,11 @@ func press(m *Model, key tea.KeyType) tea.Cmd {
 func assertFrame(t *testing.T, m *Model) {
 	t.Helper()
 	dock := 1 + m.pendingRows() + m.editor.Height() + 2 + m.completionRows(len(m.completionItems())) + m.subagentRows()
-	if m.selector != nil {
-		selectorRows := len(strings.Split(m.selector.view(m.width, m.height-2), "\n"))
+	if m.composer.selector != nil {
+		selectorRows := len(strings.Split(m.composer.selector.view(m.width, m.height-2), "\n"))
 		dock = 1 + selectorRows + m.subagentRows()
-		if selectorRows != m.selector.height(m.height-2) {
-			t.Fatalf("selector measured %d, rendered %d", m.selector.height(m.height-2), selectorRows)
+		if selectorRows != m.composer.selector.height(m.height-2) {
+			t.Fatalf("selector measured %d, rendered %d", m.composer.selector.height(m.height-2), selectorRows)
 		}
 	} else {
 		// 输入态在视口与输入框之间固定留一行空白
@@ -170,7 +169,7 @@ func TestLayout(t *testing.T) {
 			if m.completionRows(len(m.completionItems())) != 5 {
 				t.Fatal("slash must show five command rows")
 			}
-			for _, kind := range []string{"model", "thinking", "resume"} {
+			for _, kind := range []RequestKind{RequestModel, RequestThinking, RequestResume} {
 				m.openSelector(kind, "")
 				assertFrame(t, m)
 				typeText(m, "no-such-match-xyz")
@@ -215,16 +214,16 @@ func TestEditorWrapHistoryAndBusyDraft(t *testing.T) {
 
 func TestBusySubmitRoutesPlainTextToSteering(t *testing.T) {
 	m := testModel(60, 15)
-	var request Request
-	m.handlers.Request = func(got Request) tea.Cmd {
-		request = got
+	var steered []ComposerPayload
+	m.handlers.EnqueueSteeringMessage = func(value ComposerPayload) error {
+		steered = append(steered, value)
 		return nil
 	}
 	m.busy, m.status = true, "Working"
 	typeText(m, "steer this run")
 	press(m, tea.KeyEnter)
-	if request.Kind != "steer" || request.Value != "steer this run" {
-		t.Fatalf("request = %+v, want steering request", request)
+	if len(steered) != 1 || steered[0].Text != "steer this run" {
+		t.Fatalf("steered = %+v, want one steering payload", steered)
 	}
 	if m.editor.Value() != "" || !m.busy {
 		t.Fatal("steering submission cleared busy state incorrectly")
@@ -233,16 +232,16 @@ func TestBusySubmitRoutesPlainTextToSteering(t *testing.T) {
 
 func TestBusyTabRoutesPlainTextToFollowUp(t *testing.T) {
 	m := testModel(60, 15)
-	var request Request
-	m.handlers.Request = func(got Request) tea.Cmd {
-		request = got
+	var followed []ComposerPayload
+	m.handlers.EnqueueFollowUpMessage = func(value ComposerPayload) error {
+		followed = append(followed, value)
 		return nil
 	}
 	m.busy, m.status = true, "Working"
 	typeText(m, "follow up this run")
 	press(m, tea.KeyTab)
-	if request.Kind != "follow-up" || request.Value != "follow up this run" {
-		t.Fatalf("request = %+v, want follow-up request", request)
+	if len(followed) != 1 || followed[0].Text != "follow up this run" {
+		t.Fatalf("followed = %+v, want one follow-up payload", followed)
 	}
 	if m.editor.Value() != "" || !m.busy {
 		t.Fatal("follow-up submission cleared busy state incorrectly")
@@ -253,7 +252,7 @@ func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
 	m := testModel(60, 15)
 	m.busy, m.status = true, "Working"
 	m.state.FollowUp = []string{"follow-up"}
-	m.state.FollowUpInputs = []llm.UserMessage{textUserMessage("follow-up")}
+	m.state.FollowUpInputs = []ComposerPayload{textPayload("follow-up")}
 	typeText(m, "/clear-follow-up")
 	press(m, tea.KeyEnter)
 	if len(m.state.FollowUp) != 0 || len(m.state.FollowUpInputs) != 0 {
@@ -267,12 +266,12 @@ func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
 func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
 	m := testModel(60, 15)
 	var routed []string
-	m.handlers.EnqueueSteeringMessage = func(message llm.UserMessage) error {
-		routed = append(routed, "steering:"+userMessageText(message))
+	m.handlers.EnqueueSteeringMessage = func(message ComposerPayload) error {
+		routed = append(routed, "steering:"+payloadText(message))
 		return nil
 	}
-	m.handlers.EnqueueFollowUpMessage = func(message llm.UserMessage) error {
-		routed = append(routed, "follow-up:"+userMessageText(message))
+	m.handlers.EnqueueFollowUpMessage = func(message ComposerPayload) error {
+		routed = append(routed, "follow-up:"+payloadText(message))
 		return nil
 	}
 	m.busy, m.compacting = true, true
@@ -299,34 +298,27 @@ func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
 // 回填图片 follow-up 后必须仍可组装出原图片，验证 marker 与 images 表同步
 func TestRestoreFollowUpKeepsImageAttached(t *testing.T) {
 	m := testModel(60, 15)
-	image := llm.ImageContent{Data: "aGk=", MIMEType: "image/png"}
-	queued := llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "look"}, image}}
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage { return []llm.UserMessage{queued} }
+	queued := ComposerPayload{Text: "look", Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload { return []ComposerPayload{queued} }
 	m.busy = true
 	if restored := m.restoreQueuedFollowUp(); restored != 1 {
 		t.Fatalf("restored = %d, want 1", restored)
 	}
-	built, ok := m.buildUserMessage()
+	built, ok := m.buildPayload()
 	if !ok {
-		t.Fatal("restored editor produced no message")
+		t.Fatal("restored editor produced no payload")
 	}
-	var images int
-	for _, content := range built.Content {
-		if got, ok := content.(llm.ImageContent); ok {
-			images++
-			if got != image {
-				t.Fatalf("image = %+v, want %+v", got, image)
-			}
-		}
+	if built.Text != "look" || len(built.Images) != 1 {
+		t.Fatalf("payload = %+v, want text look with one image", built)
 	}
-	if images != 1 {
-		t.Fatalf("image content count = %d, want 1", images)
+	if built.Images[0] != (ImagePart{Data: "aGk=", MIMEType: "image/png"}) {
+		t.Fatalf("image = %+v, want original attachment", built.Images[0])
 	}
 }
 
 func TestCompactionFailureRestoresStagedInput(t *testing.T) {
 	m := testModel(60, 15)
-	m.handlers.EnqueueSteeringMessage = func(llm.UserMessage) error { return fmt.Errorf("queue unavailable") }
+	m.handlers.EnqueueSteeringMessage = func(ComposerPayload) error { return fmt.Errorf("queue unavailable") }
 	m.busy, m.compacting = true, true
 	typeText(m, "restore after compact failure")
 	press(m, tea.KeyEnter)
@@ -346,9 +338,9 @@ func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 		requests = append(requests, request)
 		return nil
 	}
-	m.handlers.RestoreSteering = func() []string {
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload {
 		restored++
-		return []string{"queued message"}
+		return []ComposerPayload{textPayload("queued message")}
 	}
 	m.busy, m.status = true, "Working"
 	typeText(m, "draft")
@@ -372,13 +364,13 @@ func TestAltUpRestoresSteeringWithoutResubmitting(t *testing.T) {
 
 func TestAltUpDoesNotDuplicateSubmittedSteering(t *testing.T) {
 	m := testModel(80, 24)
-	queued := make([]string, 0, 1)
-	m.handlers.EnqueueSteering = func(value string) error {
+	queued := make([]ComposerPayload, 0, 1)
+	m.handlers.EnqueueSteeringMessage = func(value ComposerPayload) error {
 		queued = append(queued, value)
 		return nil
 	}
-	m.handlers.RestoreSteering = func() []string {
-		messages := append([]string(nil), queued...)
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload {
+		messages := append([]ComposerPayload(nil), queued...)
 		queued = nil
 		return messages
 	}
@@ -401,7 +393,7 @@ func TestOperationDonePreservesSteeringWithdrawalAgainstStaleSnapshot(t *testing
 	m := testModel(80, 24)
 	m.busy = true
 	m.state.Steering = []string{"queued"}
-	m.handlers.RestoreSteering = func() []string { return []string{"queued"} }
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return []ComposerPayload{textPayload("queued")} }
 	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "queued" {
 		t.Fatalf("editor = %q, want queued message", got)
@@ -442,9 +434,9 @@ func TestDequeueKeyLabels(t *testing.T) {
 func TestShiftRightRestoresFollowUpWithoutTouchingSteering(t *testing.T) {
 	m := testModel(80, 24)
 	restored := 0
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
 		restored++
-		return []llm.UserMessage{textUserMessage("queued follow-up")}
+		return []ComposerPayload{textPayload("queued follow-up")}
 	}
 	m.busy, m.status = true, "Working"
 	m.state.Steering = []string{"keep steering"}
@@ -483,9 +475,9 @@ func TestFollowUpDequeueKeyVariants(t *testing.T) {
 func TestPlainDownWithoutFollowUpNavigatesHistory(t *testing.T) {
 	m := testModel(80, 24)
 	restored := 0
-	m.handlers.RestoreFollowUpMessages = func() []llm.UserMessage {
+	m.handlers.RestoreFollowUpMessages = func() []ComposerPayload {
 		restored++
-		return []llm.UserMessage{textUserMessage("queued")}
+		return []ComposerPayload{textPayload("queued")}
 	}
 	typeText(m, "draft")
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -511,55 +503,16 @@ func TestPendingSteeringViewUsesOnlyTheFirstLine(t *testing.T) {
 
 func TestEscapeRestoresSteeringBeforeCancel(t *testing.T) {
 	m := testModel(80, 24)
-	cancelled := 0
-	m.handlers.RestoreSteering = func() []string { return []string{"queued message"} }
-	m.handlers.Cancel = func() { cancelled++ }
+	canceled := 0
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return []ComposerPayload{textPayload("queued message")} }
+	m.handlers.Cancel = func() { canceled++ }
 	m.busy = true
 	press(m, tea.KeyEsc)
-	if cancelled != 1 {
-		t.Fatalf("cancelled = %d, want one cancellation", cancelled)
+	if canceled != 1 {
+		t.Fatalf("canceled = %d, want one cancellation", canceled)
 	}
 	if got, want := m.editor.Value(), "queued message"; got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
-	}
-}
-
-func TestRejectedSteeringRestoresInputAfterOperationEnds(t *testing.T) {
-	m := testModel(60, 15)
-	m.handlers.Request = func(Request) tea.Cmd { return nil }
-	m.busy, m.status = true, "Working"
-	typeText(m, "late steering")
-	press(m, tea.KeyEnter)
-	m.Update(OperationDoneMsg{ID: m.operationID})
-	m.Update(SteeringResultMsg{ID: m.operationID, Value: "late steering", Err: fmt.Errorf("operation ended")})
-	if m.editor.Value() != "late steering" {
-		t.Fatalf("restored editor = %q, want late steering", m.editor.Value())
-	}
-}
-
-func TestRejectedSteeringDoesNotOverwriteNewDraft(t *testing.T) {
-	m := testModel(60, 15)
-	m.busy = true
-	typeText(m, "new draft")
-	m.Update(SteeringResultMsg{Value: "late steering", Err: fmt.Errorf("operation ended")})
-	if got := m.editor.Value(); got != "new draft" {
-		t.Fatalf("draft = %q, want new draft", got)
-	}
-}
-
-func TestSteeringSnapshotsIgnoreOutOfOrderUpdates(t *testing.T) {
-	m := testModel(60, 15)
-	m.busy = true
-	m.Update(SteeringResultMsg{Value: "new", Revision: 2})
-	m.Update(SteeringStateMsg{Messages: nil, Revision: 1})
-	if got := m.state.Steering; len(got) != 1 || got[0] != "new" {
-		t.Fatalf("stale snapshot cleared steering = %v", got)
-	}
-
-	m.Update(SteeringStateMsg{Messages: nil, Revision: 3})
-	m.Update(SteeringResultMsg{Value: "stale", Revision: 2})
-	if len(m.state.Steering) != 0 {
-		t.Fatalf("stale result appended steering = %v", m.state.Steering)
 	}
 }
 
@@ -567,8 +520,8 @@ func TestEmptySteeringRestoreKeepsSnapshotWithoutReplayingIt(t *testing.T) {
 	m := testModel(60, 15)
 	m.busy = true
 	m.state.Steering = []string{"already consumed"}
-	m.state.SteeringInputs = []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "already consumed"}}}}
-	m.handlers.RestoreSteeringMessages = func() []llm.UserMessage { return nil }
+	m.state.SteeringInputs = []ComposerPayload{{Text: "already consumed"}}
+	m.handlers.RestoreSteeringMessages = func() []ComposerPayload { return nil }
 	m.Update(tea.KeyMsg{Type: tea.KeyShiftLeft})
 	if got := m.editor.Value(); got != "" {
 		t.Fatalf("editor = %q, want no stale replay", got)
@@ -596,40 +549,40 @@ func TestCompletionAndSelectors(t *testing.T) {
 	m.handlers.Request = func(r Request) tea.Cmd { requests = append(requests, r); return nil }
 	typeText(m, "/mod")
 	press(m, tea.KeyTab)
-	if m.editor.Value() != "/model " || m.selector != nil {
+	if m.editor.Value() != "/model " || m.composer.selector != nil {
 		t.Fatal("Tab must only complete")
 	}
 	press(m, tea.KeyEnter)
-	if m.selector == nil || m.editor.Focused() {
+	if m.composer.selector == nil || m.editor.Focused() {
 		t.Fatal("selector did not take focus")
 	}
 	typeText(m, "model-07")
-	if len(m.selector.filtered) != 1 {
+	if len(m.composer.selector.filtered) != 1 {
 		t.Fatal("model search did not filter")
 	}
 	press(m, tea.KeyEnter)
-	if m.selector != nil || !m.editor.Focused() || len(requests) != 1 || requests[0].Value != "provider-1/model-07" {
+	if m.composer.selector != nil || !m.editor.Focused() || len(requests) != 1 || requests[0].Value != "provider-1/model-07" {
 		t.Fatalf("selection: %+v", requests)
 	}
 	m.Update(OperationDoneMsg{})
 	typeText(m, "/model model-03")
 	press(m, tea.KeyEnter)
-	if len(requests) != 2 || requests[1].Value != "provider-1/model-03" || m.selector != nil {
+	if len(requests) != 2 || requests[1].Value != "provider-1/model-03" || m.composer.selector != nil {
 		t.Fatal("exact model match must switch directly")
 	}
 	m.Update(OperationDoneMsg{})
 	m.openSelector("model", "absent-model")
 	press(m, tea.KeyEnter)
-	if m.selector == nil || len(requests) != 2 {
+	if m.composer.selector == nil || len(requests) != 2 {
 		t.Fatal("empty selection dispatched")
 	}
 	press(m, tea.KeyCtrlC)
-	if m.selector != nil || !m.editor.Focused() || m.closing {
+	if m.composer.selector != nil || !m.editor.Focused() || m.closing {
 		t.Fatal("Ctrl+C should cancel selector")
 	}
 	typeText(m, "/eff")
 	press(m, tea.KeyEnter)
-	if m.selector == nil || m.selector.kind != "thinking" {
+	if m.composer.selector == nil || m.composer.selector.kind != "thinking" {
 		t.Fatal("Enter must complete and execute")
 	}
 }
@@ -640,12 +593,12 @@ func TestNonTreeSelectorForwardsHorizontalCursorKeys(t *testing.T) {
 	typeText(m, "abc")
 	press(m, tea.KeyLeft)
 	typeText(m, "X")
-	if got, want := m.selector.input.Value(), "abXc"; got != want {
+	if got, want := m.composer.selector.input.Value(), "abXc"; got != want {
 		t.Fatalf("left cursor movement = %q, want %q", got, want)
 	}
 	press(m, tea.KeyRight)
 	typeText(m, "Y")
-	if got, want := m.selector.input.Value(), "abXcY"; got != want {
+	if got, want := m.composer.selector.input.Value(), "abXcY"; got != want {
 		t.Fatalf("right cursor movement = %q, want %q", got, want)
 	}
 }
@@ -665,93 +618,93 @@ func TestTreeSelectorUsesUserNodesAndRestoresEditor(t *testing.T) {
 		return nil
 	}
 	m.openSelector("tree", "")
-	if m.selector == nil || m.selector.title != "Conversation tree" || len(m.selector.filtered) != 5 {
-		t.Fatalf("tree selector = %+v", m.selector)
+	if m.composer.selector == nil || m.composer.selector.title != "Conversation tree" || len(m.composer.selector.filtered) != 5 {
+		t.Fatalf("tree selector = %+v", m.composer.selector)
 	}
-	if !strings.Contains(m.selector.filtered[1].label, "├─ second line") {
-		t.Fatalf("tree connector missing: %q", m.selector.filtered[1].label)
+	if !strings.Contains(m.composer.selector.filtered[1].label, "├─ second line") {
+		t.Fatalf("tree connector missing: %q", m.composer.selector.filtered[1].label)
 	}
-	view := ansi.Strip(m.selector.view(m.width, m.height-2))
+	view := ansi.Strip(m.composer.selector.view(m.width, m.height-2))
 	if strings.Count(view, "second line") != 1 {
 		t.Fatalf("selected tree text repeated in selector: %q", view)
 	}
-	if got, want := len(strings.Split(view, "\n")), m.selector.height(m.height-2); got != want {
+	if got, want := len(strings.Split(view, "\n")), m.composer.selector.height(m.height-2); got != want {
 		t.Fatalf("tree selector height = %d, want %d", got, want)
 	}
 	press(m, tea.KeyUp)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u1" {
 		t.Fatalf("first sibling up navigation = %q, want root u1", got)
 	}
 	press(m, tea.KeyRight)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u2" {
 		t.Fatalf("root right navigation = %q, want first child u2", got)
 	}
 	press(m, tea.KeyDown)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u3" {
 		t.Fatalf("same-level navigation = %q, want sibling u3", got)
 	}
 	press(m, tea.KeyRight)
-	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "child-3" {
 		t.Fatalf("last sibling right navigation = %q, want child child-3", got)
 	}
 	press(m, tea.KeyLeft)
 	press(m, tea.KeyDown)
-	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "child-3" {
 		t.Fatalf("last sibling down navigation = %q, want child child-3", got)
 	}
 	press(m, tea.KeyLeft)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u3" {
 		t.Fatalf("left navigation = %q, want parent u3", got)
 	}
 	press(m, tea.KeyUp)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u2" {
 		t.Fatalf("sibling up navigation = %q, want first child u2", got)
 	}
 	press(m, tea.KeyRight)
-	if got := m.selector.filtered[m.selector.selected].value; got != "child" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "child" {
 		t.Fatalf("right child navigation = %q, want child", got)
 	}
 	press(m, tea.KeyLeft)
 	press(m, tea.KeyUp)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u1" {
 		t.Fatalf("root parent navigation = %q, want root u1", got)
 	}
 	press(m, tea.KeyUp)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u3" {
 		t.Fatalf("root up navigation = %q, want last child u3", got)
 	}
 	press(m, tea.KeyDown)
-	if got := m.selector.filtered[m.selector.selected].value; got != "child-3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "child-3" {
 		t.Fatalf("last child down navigation = %q, want nested child child-3", got)
 	}
 	press(m, tea.KeyLeft)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u3" {
 		t.Fatalf("child parent navigation = %q, want u3", got)
 	}
 	press(m, tea.KeyLeft)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u1" {
 		t.Fatalf("root left navigation = %q, want root u1", got)
 	}
 	press(m, tea.KeyDown)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u2" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u2" {
 		t.Fatalf("root down navigation = %q, want first child u2", got)
 	}
 	press(m, tea.KeyLeft)
 	press(m, tea.KeyLeft)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u3" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u3" {
 		t.Fatalf("root left navigation = %q, want last child u3", got)
 	}
 	press(m, tea.KeyLeft)
-	if got := m.selector.filtered[m.selector.selected].value; got != "u1" {
+	if got := m.composer.selector.filtered[m.composer.selector.selected].value; got != "u1" {
 		t.Fatalf("last child parent navigation = %q, want root u1", got)
 	}
 	press(m, tea.KeyEnter)
-	if len(requests) != 0 || m.selector == nil || m.selector.kind != "tree_restore" || m.selector.treeRestoreTarget != "u1" || m.selector.filtered[0].label != "Restore conversation" {
-		t.Fatalf("tree request = %+v selector=%v", requests, m.selector)
+	if len(requests) != 0 || m.composer.selector == nil || m.composer.selector.kind != "tree_restore" || m.composer.selector.treeRestoreTarget != "u1" || m.composer.selector.filtered[0].label != "Restore conversation" {
+		t.Fatalf("tree request = %+v selector=%v", requests, m.composer.selector)
 	}
 	press(m, tea.KeyEnter)
-	if len(requests) != 1 || requests[0].Kind != "tree" || requests[0].Value != "u1" || requests[0].RestoreMode != "context" || m.selector != nil {
-		t.Fatalf("tree request = %+v selector=%v", requests, m.selector)
+	if len(requests) != 1 || requests[0].Kind != "tree" || requests[0].Value != "u1" || requests[0].RestoreMode != "context" || m.composer.selector != nil {
+		t.Fatalf("tree request = %+v selector=%v", requests, m.composer.selector)
 	}
 	m.Update(OperationDoneMsg{Snapshot: &Snapshot{Tree: m.state.Tree}, RestoreEditor: true, EditorValue: "first"})
 	if m.editor.Value() != "first" {
@@ -763,7 +716,7 @@ func TestTreeSelectorRejectsBusyOperation(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
 	m.openSelector("tree", "")
-	if m.selector != nil {
+	if m.composer.selector != nil {
 		t.Fatal("tree selector opened while busy")
 	}
 	if len(m.state.Messages) == 0 || !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Wait for the current operation") {
@@ -788,8 +741,8 @@ func TestTreeRestoreSelectorDispatchesCodeMode(t *testing.T) {
 	}
 	m.openSelector("tree", "")
 	press(m, tea.KeyEnter)
-	if m.selector == nil || m.selector.kind != "tree_restore" || len(m.selector.filtered) != 3 || m.selector.filtered[2].label != "Restore code and conversation" {
-		t.Fatalf("restore selector = %+v, want three choices", m.selector)
+	if m.composer.selector == nil || m.composer.selector.kind != "tree_restore" || len(m.composer.selector.filtered) != 3 || m.composer.selector.filtered[2].label != "Restore code and conversation" {
+		t.Fatalf("restore selector = %+v, want three choices", m.composer.selector)
 	}
 	press(m, tea.KeyDown)
 	press(m, tea.KeyEnter)
@@ -800,16 +753,16 @@ func TestTreeRestoreSelectorDispatchesCodeMode(t *testing.T) {
 
 func TestCancelAndExit(t *testing.T) {
 	m := testModel(80, 24)
-	cancelled := 0
-	m.handlers.Cancel = func() { cancelled++ }
+	canceled := 0
+	m.handlers.Cancel = func() { canceled++ }
 	m.busy = true
 	typeText(m, "/")
 	press(m, tea.KeyEsc)
-	if cancelled != 0 || len(m.completionItems()) != 0 {
+	if canceled != 0 || len(m.completionItems()) != 0 {
 		t.Fatal("first Escape must dismiss completion")
 	}
 	press(m, tea.KeyEsc)
-	if cancelled != 1 || !m.busy {
+	if canceled != 1 || !m.busy {
 		t.Fatal("cancel should signal and await operation completion")
 	}
 	typeText(m, "draft")
@@ -820,12 +773,12 @@ func TestCancelAndExit(t *testing.T) {
 	now := time.Unix(1000, 0)
 	m.clock = func() time.Time { return now }
 	press(m, tea.KeyCtrlC)
-	if m.editor.Value() != "" || cancelled != 1 {
+	if m.editor.Value() != "" || canceled != 1 {
 		t.Fatal("first Ctrl+C should clear only")
 	}
 	now = now.Add(200 * time.Millisecond)
 	cmd := press(m, tea.KeyCtrlC)
-	if !m.closing || cancelled != 2 {
+	if !m.closing || canceled != 2 {
 		t.Fatal("second Ctrl+C must exit even while busy")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
@@ -840,7 +793,7 @@ func TestCancelAndExit(t *testing.T) {
 func TestStreamingUpsertFlushAndScroll(t *testing.T) {
 	m := testModel(80, 24)
 	m.busy = true
-	for i := 0; i < 35; i++ {
+	for i := range 35 {
 		m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprint(i), Role: "assistant", Text: fmt.Sprintf("History line %d", i)})
 	}
 	m.refreshTranscript()
@@ -976,7 +929,7 @@ func TestFrameFitsVerySmallTerminal(t *testing.T) {
 
 func TestTerminalMouseAndClipboardInput(t *testing.T) {
 	m := testModel(60, 18)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		m.state.Messages = append(m.state.Messages, Message{ID: fmt.Sprint(i), Role: "assistant", Text: "scrollable line"})
 	}
 	m.refreshTranscript()
@@ -1052,7 +1005,7 @@ func TestDoubleClickCopiesWord(t *testing.T) {
 		t.Fatalf("copy confirmation must be on the right beside working status: %q", border)
 	}
 	assertFrame(t, m)
-	m.Update(clearCopyNoticeMsg(m.copyNoticeSeq))
+	m.Update(clearCopyNoticeMsg(m.sel.noticeSeq))
 	if strings.Contains(ansi.Strip(m.View()), "copied!") || m.status != "Working" {
 		t.Fatal("clearing copy confirmation changed the operation status")
 	}

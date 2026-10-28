@@ -12,8 +12,8 @@ import (
 
 func sendMessageManager(t *testing.T) *Manager {
 	t.Helper()
-	return NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	return NewManager(taskpkg.NewStore(), func(_ context.Context, spec taskpkg.AgentSpec) (*AgentRuntime, error) {
+		runtime := &AgentRuntime{Agent: agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}), DoneChan: make(chan struct{})}
 		runtime.Run = func(context.Context, string) (*llm.AssistantMessage, error) {
 			return &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: spec.Prompt}}}, nil
 		}
@@ -24,8 +24,8 @@ func sendMessageManager(t *testing.T) *Manager {
 func TestSendMessageQueuesForRunningTask(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
-	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
-		runtime := &taskpkg.AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	manager := NewManager(taskpkg.NewStore(), func(context.Context, taskpkg.AgentSpec) (*AgentRuntime, error) {
+		runtime := &AgentRuntime{Agent: agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil}), DoneChan: make(chan struct{})}
 		runtime.Run = func(ctx context.Context, _ string) (*llm.AssistantMessage, error) {
 			close(started)
 			<-release
@@ -80,7 +80,7 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 	manager := sendMessageManager(t)
 	var factorySpec taskpkg.AgentSpec
 	base := manager.factory
-	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*AgentRuntime, error) {
 		factorySpec = spec
 		return base(ctx, spec)
 	})
@@ -113,7 +113,7 @@ func TestSendMessageResumeKeepsOwnedWorktree(t *testing.T) {
 	manager := sendMessageManager(t)
 	var factorySpec taskpkg.AgentSpec
 	base := manager.factory
-	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*taskpkg.AgentRuntime, error) {
+	manager.SetFactory(func(ctx context.Context, spec taskpkg.AgentSpec) (*AgentRuntime, error) {
 		factorySpec = spec
 		return base(ctx, spec)
 	})
@@ -149,5 +149,12 @@ func TestSendMessageRejectsEmptyInput(t *testing.T) {
 	}
 	if _, err := manager.SendMessage(context.Background(), "agent-1", "  "); err == nil {
 		t.Fatal("empty message was accepted")
+	}
+}
+
+func TestLatestAssistantWithoutMessages(t *testing.T) {
+	runtime := agent.New(agent.Options{Config: llm.AgentConfig{}, Context: llm.Context{}, Stream: nil, Events: nil})
+	if got := latestAssistant(runtime); got != nil {
+		t.Fatalf("latestAssistant(empty) = %#v, want nil", got)
 	}
 }

@@ -193,6 +193,8 @@ func (e2eDoubleTool) Description() string { return "Doubles a number and returns
 func (e2eDoubleTool) ExecutionMode() llm.ToolExecutionMode {
 	return llm.ToolExecutionSequential
 }
+func (e2eDoubleTool) PromptSnippet() string      { return "" }
+func (e2eDoubleTool) PromptGuidelines() []string { return nil }
 func (e2eDoubleTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",

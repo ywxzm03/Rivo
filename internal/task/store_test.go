@@ -5,10 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
@@ -39,9 +39,9 @@ func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 	if !store.EnqueueNotification(id, token, notification) || store.EnqueueNotification(id, token, notification) {
 		t.Fatal("notification should be enqueued once")
 	}
-	got := store.DrainNotifications()
-	if len(got) != 1 || got[0].TaskID != id {
-		t.Fatalf("notifications = %#v, want one notification", got)
+	claimed := store.ClaimNotifications()
+	if claimed.Count != 1 || claimed.Notifications[0].TaskID != id {
+		t.Fatalf("notifications = %#v, want one notification", claimed.Notifications)
 	}
 }
 
@@ -73,18 +73,56 @@ func TestRecordAgentMessagesTracksCommittedCountOnly(t *testing.T) {
 }
 
 func TestFreshStoresDoNotReuseTaskIDs(t *testing.T) {
-	first := NewStore()
-	second := NewStore()
-	id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
-	if err != nil {
-		t.Fatal(err)
+	// 单轮几乎撞不上：两个 Store 的实例内计数器都从 1 开始，
+	// 只有同一纳秒注册才会碰撞，所以必须多轮才有意义
+	seen := make(map[string]struct{}, 500)
+	for i := range 500 {
+		first, second := NewStore(), NewStore()
+		id1, _, err := first.Register(RegisterSpec{Type: TypeAgent, Description: "first", AgentType: "Explore"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id2, _, err := second.Register(RegisterSpec{Type: TypeAgent, Description: "second", AgentType: "Explore"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id1 == id2 {
+			t.Fatalf("fresh stores reused task ID %q on iteration %d", id1, i)
+		}
+		seen[id1] = struct{}{}
+		seen[id2] = struct{}{}
 	}
-	id2, _, err := second.Register(RegisterSpec{Type: TypeAgent, Description: "second", AgentType: "Explore"})
-	if err != nil {
-		t.Fatal(err)
+	if len(seen) != 1000 {
+		t.Fatalf("generated %d unique IDs, want 1000", len(seen))
 	}
-	if id1 == id2 {
-		t.Fatalf("fresh stores reused task ID %q", id1)
+}
+
+// 并发注册到不同 Store 时 ID 同样不能重复
+func TestConcurrentStoresDoNotReuseTaskIDs(t *testing.T) {
+	const workers = 8
+	ids := make(chan string, workers*20)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			store := NewStore()
+			for range 20 {
+				id, _, err := store.Register(RegisterSpec{Type: TypeBash, Description: "bg"})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				ids <- id
+			}
+		})
+	}
+	wg.Wait()
+	close(ids)
+	seen := make(map[string]struct{}, workers*20)
+	for id := range ids {
+		if _, dup := seen[id]; dup {
+			t.Fatalf("duplicate task ID %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 
@@ -97,7 +135,7 @@ func TestRegisterContinuationRejectsStaleLifecycleCallbacks(t *testing.T) {
 	if !store.CompleteAgent(id, oldToken, &AgentResult{AgentID: id}) {
 		t.Fatal("initial completion failed")
 	}
-	runtime := &AgentRuntime{Agent: agent.NewAgent(llm.AgentConfig{}, llm.Context{}, nil, nil), Done: make(chan struct{})}
+	runtime := &fakeRuntime{done: make(chan struct{})}
 	newToken, err := store.RegisterContinuation(id, runtime, "continue")
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +158,7 @@ func TestAgentTaskStopLeavesNotificationForPartialResult(t *testing.T) {
 		Type:        TypeAgent,
 		Description: "long task",
 		AgentType:   "Work",
-		Runtime:     &AgentRuntime{Cancel: cancel, Done: make(chan struct{})},
+		Runtime:     &fakeRuntime{abort: cancel, done: make(chan struct{})},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +186,7 @@ func TestContinuationWaitsForOldRuntime(t *testing.T) {
 	}
 	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
 	done := make(chan struct{})
-	runtime := &AgentRuntime{Done: done}
+	runtime := &fakeRuntime{done: done}
 	store.mu.Lock()
 	store.runtimes[id] = runtime
 	store.mu.Unlock()
@@ -194,6 +232,7 @@ func TestStoreReadTaskMessagesIsIncremental(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewStore()
+	store.SetTranscriptReader(session.ReadMessages)
 	id, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "view", AgentType: "Work", OutputFile: path})
 	if err != nil {
 		t.Fatal(err)
@@ -269,14 +308,17 @@ func TestStoreEvictExpiredReclaimsTerminalTaskAfterGracePeriod(t *testing.T) {
 	if evictAfter == nil {
 		t.Fatal("terminal task has no eviction deadline")
 	}
-	if got := evictAfter.Sub(*task.Base().EndTime); got != panelGracePeriod {
-		t.Fatalf("grace period = %v, want %v", got, panelGracePeriod)
+	if got := evictAfter.Sub(*task.Base().EndTime); got != defaultGracePeriod {
+		t.Fatalf("grace period = %v, want %v", got, defaultGracePeriod)
 	}
 	// 1.宽限期内不驱逐
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d tasks inside the grace period, want 0", evicted)
 	}
-	// 2.宽限期结束后驱逐,通知仍留在队列中
+	// 2.通知送达后再过期驱逐;未送达时任务行必须保留
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past := time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].(*AgentState).EvictAfter = &past
@@ -287,8 +329,8 @@ func TestStoreEvictExpiredReclaimsTerminalTaskAfterGracePeriod(t *testing.T) {
 	if _, ok := store.Task(id); ok {
 		t.Fatal("expired task is still tracked")
 	}
-	if got := store.DrainNotifications(); len(got) != 1 || got[0].TaskID != id {
-		t.Fatalf("notifications after expiry = %#v, want the undelivered notification", got)
+	if got := store.ClaimNotifications(); got.Count != 0 {
+		t.Fatalf("notifications after ack = %#v, want none", got.Notifications)
 	}
 }
 
@@ -353,6 +395,10 @@ func TestStoreEvictExpiredSkipsViewedTask(t *testing.T) {
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d tasks right after leaving the view, want 0", evicted)
 	}
+	// 通知送达后才允许回收
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past = time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].Base().EvictAfter = &past
@@ -390,11 +436,11 @@ func TestAgentTaskStopDuringLaunchWindowTransitionsToKilled(t *testing.T) {
 		t.Fatal("killed task has no eviction deadline")
 	}
 	// 没有 lifecycle 就没有通知可投递,直接视为已通知,否则该任务永远无法回收
-	if !task.Base().Notified {
-		t.Fatal("launch-window kill must be marked notified so it can be reclaimed")
+	if !task.Base().NotificationDelivered {
+		t.Fatal("launch-window kill must be marked delivered so it can be reclaimed")
 	}
 	// 迟到的 AttachAgentRuntime 必须失败,不能把已停止的任务拉回运行态
-	if _, err := store.AttachAgentRuntime(id, &AgentRuntime{Cancel: func() {}}, "late"); err == nil {
+	if _, err := store.AttachAgentRuntime(id, &fakeRuntime{abort: func() {}}, "late"); err == nil {
 		t.Fatal("late runtime attach succeeded after the task was stopped")
 	}
 }
@@ -411,6 +457,10 @@ func TestStoreEvictExpiredReclaimsTerminalBashTask(t *testing.T) {
 	if evicted := store.EvictExpired(); evicted != 0 {
 		t.Fatalf("evicted %d during the grace period, want 0", evicted)
 	}
+	// 通知送达后才允许回收
+	claimed := store.ClaimNotifications()
+	store.AckNotifications(claimed.Count)
+	store.MarkNotified([]string{id})
 	past := time.Now().Add(-time.Second)
 	store.mu.Lock()
 	store.tasks[id].Base().EvictAfter = &past
@@ -712,6 +762,58 @@ func TestStoreKillAllRunningTasks(t *testing.T) {
 	}
 }
 
+// /stop 只停后台 shell,不能碰子 agent
+func TestKillAllRunningBashTasksStopsAllBash(t *testing.T) {
+	store := NewStore()
+	var bashIDs []string
+	for _, command := range []string{"sleep 120", "tail -f log"} {
+		id, _, err := store.Register(RegisterSpec{
+			Type: TypeBash, Description: command, BashState: &BashState{Command: command},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bashIDs = append(bashIDs, id)
+	}
+
+	if killed := store.KillAllRunningBashTasks(); killed != 2 {
+		t.Fatalf("killed %d bash tasks, want 2", killed)
+	}
+	for _, id := range bashIDs {
+		state, ok := store.Task(id)
+		if !ok || state.Base().Status == StatusRunning {
+			t.Fatalf("bash %s still running", id)
+		}
+	}
+}
+
+// 只停 bash 时子 agent 必须继续运行
+func TestKillAllRunningBashTasksLeavesAgents(t *testing.T) {
+	store := NewStore()
+	agentID, _, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bashID, _, err := store.Register(RegisterSpec{
+		Type: TypeBash, Description: "sleep 120", BashState: &BashState{Command: "sleep 120"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if killed := store.KillAllRunningBashTasks(); killed != 1 {
+		t.Fatalf("killed %d tasks, want 1", killed)
+	}
+	agent, _ := store.Task(agentID)
+	if agent.Base().Status != StatusRunning {
+		t.Fatalf("agent status = %v, want running", agent.Base().Status)
+	}
+	bash, _ := store.Task(bashID)
+	if bash.Base().Status == StatusRunning {
+		t.Fatal("bash still running")
+	}
+}
+
 // 子任务的 steering 与 follow-up 是两条独立队列
 func TestStoreSubagentHasTwoQueues(t *testing.T) {
 	store := NewStore()
@@ -761,3 +863,167 @@ func textOf(message llm.UserMessage) string {
 	}
 	return ""
 }
+
+// newAgentTask 注册一个运行中的 agent 任务,返回 ID 与 lifecycle token
+func newAgentTask(t *testing.T, store *Store, description string) (string, uint64) {
+	t.Helper()
+	id, token, err := store.Register(RegisterSpec{Type: TypeAgent, Description: description, AgentType: "explore"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id, token
+}
+
+// 通知入队必须原子去重:同一 lifecycle 只能投递一次
+
+func TestEnqueueNotificationDeduplicates(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+		t.Fatal("complete failed")
+	}
+	if !store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {
+		t.Fatal("first enqueue rejected")
+	}
+	if store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {
+		t.Fatal("duplicate enqueue accepted")
+	}
+	if got := len(store.PeekNotifications()); got != 1 {
+		t.Fatalf("notifications = %d, want 1", got)
+	}
+}
+
+// 过期 token 的回调不能污染新一轮 lifecycle
+
+func TestEnqueueNotificationRejectsStaleToken(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+		t.Fatal("complete failed")
+	}
+	if store.EnqueueNotification(id, token+1, Notification{TaskID: id, Status: StatusCompleted}) {
+		t.Fatal("stale token accepted")
+	}
+	if got := len(store.PeekNotifications()); got != 0 {
+		t.Fatalf("notifications = %d, want 0", got)
+	}
+}
+
+// 仍在运行的任务没有终态通知资格
+
+func TestEnqueueNotificationRejectsRunningTask(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {
+		t.Fatal("running task accepted a notification")
+	}
+}
+
+// 通知入队必须触发唤醒回调,且回调在锁外执行
+
+func TestEnqueueNotificationInvokesHookOutsideLock(t *testing.T) {
+	store := NewStore()
+	woke := make(chan struct{}, 1)
+	store.SetNotifyHook(func() {
+		// 回调里能再次拿锁,说明它确实在锁外执行
+		store.PeekNotifications()
+		woke <- struct{}{}
+	})
+	id, token := newAgentTask(t, store, "child")
+	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+		t.Fatal("complete failed")
+	}
+	if !store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {
+		t.Fatal("enqueue failed")
+	}
+	select {
+	case <-woke:
+	case <-time.After(time.Second):
+		t.Fatal("notify hook was not invoked")
+	}
+}
+
+// follow-up 队列必须独立于 steering 队列
+
+func TestDrainPendingFollowUpMessages(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if err := store.EnqueueFollowUpMessage(id, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "later"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.DrainPendingMessages(id, token); len(got) != 0 {
+		t.Fatalf("steering drain returned %d, want 0", len(got))
+	}
+	got := store.DrainPendingFollowUpMessages(id, token)
+	if len(got) != 1 {
+		t.Fatalf("follow-up drain returned %d, want 1", len(got))
+	}
+	// 取走后队列必须为空
+	if again := store.DrainPendingFollowUpMessages(id, token); len(again) != 0 {
+		t.Fatalf("second drain returned %d, want 0", len(again))
+	}
+}
+
+// 撤回操作必须清空对应队列
+
+func TestClearSteeringMessages(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if err := store.EnqueuePendingMessage(id, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "steer"}}}); err != nil {
+		t.Fatal(err)
+	}
+	store.ClearSteeringMessages(id)
+	if got := store.DrainPendingMessages(id, token); len(got) != 0 {
+		t.Fatalf("steering = %d after clear, want 0", len(got))
+	}
+}
+
+// 未投递消息回队必须放在队首,保证顺序
+
+func TestRequeuePendingMessagesFront(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if err := store.EnqueuePendingMessage(id, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "second"}}}); err != nil {
+		t.Fatal(err)
+	}
+	requeued := []llm.UserMessage{{Content: []llm.Content{llm.TextContent{Text: "first"}}}}
+	if !store.RequeuePendingMessagesFront(id, token, requeued) {
+		t.Fatal("requeue rejected")
+	}
+	got := store.DrainPendingMessages(id, token)
+	if len(got) != 2 {
+		t.Fatalf("messages = %d, want 2", len(got))
+	}
+	if text, ok := got[0].Content[0].(llm.TextContent); !ok || text.Text != "first" {
+		t.Fatalf("first message = %#v, want requeued front", got[0])
+	}
+}
+
+// 过期 token 的回队请求必须被拒绝
+
+func TestRequeuePendingMessagesRejectsStaleToken(t *testing.T) {
+	store := NewStore()
+	id, token := newAgentTask(t, store, "child")
+	if store.RequeuePendingMessagesFront(id, token+1, []llm.UserMessage{{}}) {
+		t.Fatal("stale token requeue accepted")
+	}
+	if store.RequeuePendingFollowUpMessagesFront(id, token+1, []llm.UserMessage{{}}) {
+		t.Fatal("stale token follow-up requeue accepted")
+	}
+}
+
+// bash 输出统计必须按 token 校验
+
+// bash 失败必须转 failed 并保留错误结果
+
+// runtime 元数据只写入非空字段,不覆盖已有值
+
+// worktree 路径清理后必须为空,过期 token 拒绝
+
+// 启动失败占位的任务必须能整条丢弃,不留终态记录
+
+// RemoveRuntime 只删除匹配 token 的 runtime 句柄
+
+// AttachAgentRuntime 拒绝非运行态任务
+
+// Error 在失败任务上返回错误文本,正常任务返回空

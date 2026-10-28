@@ -49,3 +49,12 @@ type Options struct {
 	// SessionID 用于 provider 缓存路由
 	SessionID string
 }
+
+// ThinkingLevelNames 返回全部等级的名字，供帮助文本与错误提示使用
+func ThinkingLevelNames() []string {
+	names := make([]string, len(ThinkingLevels))
+	for i, level := range ThinkingLevels {
+		names[i] = string(level)
+	}
+	return names
+}

@@ -61,20 +61,20 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		// abortPartial 返回终止时携带已收到内容的 partial
 		partial := &llm.AssistantMessage{API: model.API, Provider: model.Provider, Model: model.ID}
 		abortPartial := func(reason llm.StopReason) *llm.AssistantMessage {
-			snapshot := assistantMessageSnapshot(partial)
+			snapshot := llm.CloneMessage(partial)
 			snapshot.StopReason = reason
 			return snapshot
 		}
 		// 终止事件用阻塞式发送保证必达，普通事件保留 select 以便取消时及时退出
 		abort := func(cause error) {
-			reason := classifyTerminalReason(ctx, cause)
-			sendTerminal(events, llm.AssistantMessageErrorEvent{
+			reason := llm.StopReasonForError(ctx, cause)
+			llm.SendTerminal(events, llm.AssistantMessageErrorEvent{
 				Reason:  reason,
 				Err:     cause,
 				Partial: abortPartial(reason),
 			})
 		}
-		if !sendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: assistantMessageSnapshot(partial)}) {
+		if !llm.SendEvent(ctx, events, llm.AssistantMessageStartEvent{Partial: llm.CloneMessage(partial)}) {
 			// Start 事件被取消拦截时同样要送达终止事件，否则消费端只见通道关闭
 			cause := ctx.Err()
 			if cause == nil {
@@ -86,107 +86,14 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 		slots := map[outputSlotKey]outputSlot{}
 		terminal := false
 		send := func(event llm.AssistantMessageEvent) bool {
-			if eventPartial(event) == nil {
-				event = withEventPartial(event, assistantMessageSnapshot(partial))
+			if llm.EventPartial(event) == nil {
+				event = llm.WithPartial(event, llm.CloneMessage(partial))
 			}
-			return sendEvent(ctx, events, event)
+			return llm.SendEvent(ctx, events, event)
 		}
 		for stream.Next() {
 			ev := stream.Current()
-			switch ev.Type {
-			case "response.created":
-				partial.ResponseID = ev.Response.ID
-			case "response.output_item.added":
-				if !addOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
-					return
-				}
-			case "response.content_part.added":
-				if !addContentPartSlot(partial, slots, ev.OutputIndex, ev.ContentIndex, ev.Part.Type, send) {
-					return
-				}
-			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
-				if !ok {
-					slot, ok = slots[outputSlotKey{outputIndex: ev.OutputIndex}]
-				}
-				if !ok || slot.kind != llm.EventThinkingStart {
-					continue
-				}
-				appendThinking(partial, slot.contentIdx, ev.Delta)
-				if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
-					return
-				}
-			case "response.reasoning_summary_part.done":
-				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
-				if !ok || slot.kind != llm.EventThinkingStart {
-					continue
-				}
-				appendThinking(partial, slot.contentIdx, "\n\n")
-				if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: "\n\n"}) {
-					return
-				}
-			case "response.output_text.delta", "response.refusal.delta":
-				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
-				if !ok || slot.kind != llm.EventTextStart {
-					continue
-				}
-				appendText(partial, slot.contentIdx, ev.Delta)
-				if !send(llm.AssistantMessageTextDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
-					return
-				}
-			case "response.function_call_arguments.delta":
-				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
-				if !ok || slot.kind != llm.EventToolCallStart {
-					continue
-				}
-				slot.arguments += ev.Delta
-				slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
-				updateToolArguments(partial, slot.contentIdx, slot.arguments)
-				if !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
-					return
-				}
-			case "response.function_call_arguments.done":
-				slot, ok := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
-				if !ok || slot.kind != llm.EventToolCallStart {
-					continue
-				}
-				previous := slot.arguments
-				slot.arguments = ev.Arguments
-				slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
-				updateToolArguments(partial, slot.contentIdx, slot.arguments)
-				if strings.HasPrefix(ev.Arguments, previous) {
-					delta := ev.Arguments[len(previous):]
-					if delta != "" && !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: delta}) {
-						return
-					}
-				}
-			case "response.output_item.done":
-				if !finishOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
-					return
-				}
-			case "response.completed", "response.incomplete":
-				terminal = true
-				msg, _, err := BuildAssistantMessage(ev.Response)
-				if err != nil {
-					send(llm.AssistantMessageErrorEvent{Err: err})
-					return
-				}
-				if err := incompleteResponseError(ev.Response); err != nil {
-					send(llm.AssistantMessageErrorEvent{Err: err})
-					return
-				}
-				if !send(llm.AssistantMessageDoneEvent{Message: msg}) {
-					return
-				}
-				return
-			case "response.failed":
-				terminal = true
-				errResp := ev.Response.Error
-				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai: request failed", string(errResp.Code), errResp.Message)})
-				return
-			case "error":
-				terminal = true
-				send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai", ev.Code, ev.Message)})
+			if !handleResponseEvent(ev, partial, slots, send, &terminal) {
 				return
 			}
 		}
@@ -201,106 +108,106 @@ func (cl *Client) Stream(ctx context.Context, model llm.Model, c llm.Context, op
 	return events, nil
 }
 
-// sendTerminal 以阻塞发送保证终止事件必达
-func sendTerminal(events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) {
-	events <- event
-}
-
-// classifyTerminalReason 判断终止原因：取消/超时属于 aborted，其余按真实错误
-func classifyTerminalReason(ctx context.Context, err error) llm.StopReason {
-	if ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
-		return llm.StopReasonAborted
-	}
-	return llm.StopReasonError
-}
-
-func sendEvent(ctx context.Context, events chan<- llm.AssistantMessageEvent, event llm.AssistantMessageEvent) bool {
-	select {
-	case events <- event:
-		return true
-	case <-ctx.Done():
+// handleResponseEvent 处理一个 SSE 事件。
+// done 为真表示流已终止、调用方应直接返回
+func handleResponseEvent(ev responses.ResponseStreamEventUnion, partial *llm.AssistantMessage, slots map[outputSlotKey]outputSlot, send func(llm.AssistantMessageEvent) bool, terminal *bool) bool {
+	switch ev.Type {
+	case "response.created":
+		partial.ResponseID = ev.Response.ID
+	case "response.output_item.added":
+		if !addOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
+			return false
+		}
+	case "response.content_part.added":
+		if !addContentPartSlot(partial, slots, ev.OutputIndex, ev.ContentIndex, ev.Part.Type, send) {
+			return false
+		}
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		slot, found := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
+		if !found {
+			slot, found = slots[outputSlotKey{outputIndex: ev.OutputIndex}]
+		}
+		if !found || slot.kind != llm.EventThinkingStart {
+			return true
+		}
+		llm.AppendThinking(partial, slot.contentIdx, ev.Delta)
+		if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+			return false
+		}
+	case "response.reasoning_summary_part.done":
+		slot, found := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
+		if !found || slot.kind != llm.EventThinkingStart {
+			return true
+		}
+		llm.AppendThinking(partial, slot.contentIdx, "\n\n")
+		if !send(llm.AssistantMessageThinkingDeltaEvent{ContentIndex: slot.contentIdx, Delta: "\n\n"}) {
+			return false
+		}
+	case "response.output_text.delta", "response.refusal.delta":
+		slot, found := slots[outputSlotKey{outputIndex: ev.OutputIndex, contentIndex: ev.ContentIndex}]
+		if !found || slot.kind != llm.EventTextStart {
+			return true
+		}
+		llm.AppendText(partial, slot.contentIdx, ev.Delta)
+		if !send(llm.AssistantMessageTextDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+			return false
+		}
+	case "response.function_call_arguments.delta":
+		slot, found := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
+		if !found || slot.kind != llm.EventToolCallStart {
+			return true
+		}
+		slot.arguments += ev.Delta
+		slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
+		updateToolArguments(partial, slot.contentIdx, slot.arguments)
+		if !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: ev.Delta}) {
+			return false
+		}
+	case "response.function_call_arguments.done":
+		slot, found := slots[outputSlotKey{outputIndex: ev.OutputIndex}]
+		if !found || slot.kind != llm.EventToolCallStart {
+			return true
+		}
+		previous := slot.arguments
+		slot.arguments = ev.Arguments
+		slots[outputSlotKey{outputIndex: ev.OutputIndex}] = slot
+		updateToolArguments(partial, slot.contentIdx, slot.arguments)
+		if strings.HasPrefix(ev.Arguments, previous) {
+			delta := ev.Arguments[len(previous):]
+			if delta != "" && !send(llm.AssistantMessageToolCallDeltaEvent{ContentIndex: slot.contentIdx, Delta: delta}) {
+				return false
+			}
+		}
+	case "response.output_item.done":
+		if !finishOutputSlot(partial, slots, ev.OutputIndex, ev.Item, send) {
+			return false
+		}
+	case "response.completed", "response.incomplete":
+		*terminal = true
+		msg, _, err := BuildAssistantMessage(ev.Response)
+		if err != nil {
+			send(llm.AssistantMessageErrorEvent{Err: err})
+			return false
+		}
+		if err := incompleteResponseError(ev.Response); err != nil {
+			send(llm.AssistantMessageErrorEvent{Err: err})
+			return false
+		}
+		if !send(llm.AssistantMessageDoneEvent{Message: msg}) {
+			return false
+		}
+		return false
+	case "response.failed":
+		*terminal = true
+		errResp := ev.Response.Error
+		send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai: request failed", string(errResp.Code), errResp.Message)})
+		return false
+	case "error":
+		*terminal = true
+		send(llm.AssistantMessageErrorEvent{Err: classifyAPIError("openai", ev.Code, ev.Message)})
 		return false
 	}
-}
-
-func eventPartial(event llm.AssistantMessageEvent) *llm.AssistantMessage {
-	switch event := event.(type) {
-	case llm.AssistantMessageStartEvent:
-		return event.Partial
-	case llm.AssistantMessageTextStartEvent:
-		return event.Partial
-	case llm.AssistantMessageTextDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageTextEndEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingStartEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageThinkingEndEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallStartEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallDeltaEvent:
-		return event.Partial
-	case llm.AssistantMessageToolCallEndEvent:
-		return event.Partial
-	case llm.AssistantMessageDoneEvent:
-		return event.Partial
-	case llm.AssistantMessageErrorEvent:
-		return event.Partial
-	}
-	return nil
-}
-
-func withEventPartial(event llm.AssistantMessageEvent, partial *llm.AssistantMessage) llm.AssistantMessageEvent {
-	switch event := event.(type) {
-	case llm.AssistantMessageStartEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageTextStartEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageTextDeltaEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageTextEndEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageThinkingStartEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageThinkingDeltaEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageThinkingEndEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageToolCallStartEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageToolCallDeltaEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageToolCallEndEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageDoneEvent:
-		event.Partial = partial
-		return event
-	case llm.AssistantMessageErrorEvent:
-		event.Partial = partial
-		return event
-	default:
-		return event
-	}
-}
-
-// assistantMessageSnapshot 复制消息结构，避免消费者读取生产中的消息
-func assistantMessageSnapshot(message *llm.AssistantMessage) *llm.AssistantMessage {
-	snapshot := *message
-	snapshot.Content = append([]llm.Content(nil), message.Content...)
-	return &snapshot
+	return true
 }
 
 func incompleteResponseError(response responses.Response) error {
@@ -373,26 +280,9 @@ func finishOutputSlot(partial *llm.AssistantMessage, slots map[outputSlotKey]out
 	}
 	switch item.Type {
 	case "reasoning":
-		reasoning := item.AsReasoning()
-		var thinking string
-		for i, part := range reasoning.Summary {
-			if i > 0 {
-				thinking += "\n\n"
-			}
-			thinking += part.Text
-		}
-		if thinking == "" {
-			for i, part := range reasoning.Content {
-				if i > 0 {
-					thinking += "\n\n"
-				}
-				thinking += part.Text
-			}
-		}
-		signature := reasoning.RawJSON()
-		if signature == "" {
-			data, _ := json.Marshal(reasoning)
-			signature = string(data)
+		thinking, signature, err := reasoningThinking(item)
+		if err != nil {
+			return send(llm.AssistantMessageErrorEvent{Reason: llm.StopReasonError, Err: err})
 		}
 		partial.Content[slot.contentIdx] = llm.ThinkingContent{Thinking: thinking, ThinkingSignature: signature}
 		delete(slots, outputSlotKey{outputIndex: outputIndex})
@@ -443,22 +333,6 @@ func finishMessageSlots(partial *llm.AssistantMessage, slots map[outputSlotKey]o
 		}
 	}
 	return true
-}
-
-func appendThinking(message *llm.AssistantMessage, index int, delta string) {
-	content, ok := message.Content[index].(llm.ThinkingContent)
-	if ok {
-		content.Thinking += delta
-		message.Content[index] = content
-	}
-}
-
-func appendText(message *llm.AssistantMessage, index int, delta string) {
-	content, ok := message.Content[index].(llm.TextContent)
-	if ok {
-		content.Text += delta
-		message.Content[index] = content
-	}
 }
 
 func updateToolArguments(message *llm.AssistantMessage, index int, raw string) {
