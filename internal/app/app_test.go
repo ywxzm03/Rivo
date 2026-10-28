@@ -23,15 +23,17 @@ func TestNewAcceptsDefaultModel(t *testing.T) {
 	if a == nil {
 		t.Fatal("New() app = nil, want non-nil")
 	}
+	tools := a.agent.Context().Tools
 	wantTools := 10
 	if runtime.GOOS == "windows" {
 		wantTools = 11
 	}
-	if len(a.agent.Context().Tools) != wantTools || a.agent.Context().Tools[4].Name() != "bash" || a.agent.Context().Tools[6].Name() != "edit" {
-		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(a.agent.Context().Tools), wantTools)
+	if len(tools) != wantTools || tools[4].Name() != "bash" || tools[6].Name() != "edit" {
+		t.Errorf("registered tools = %d, want %d tools with bash and edit", len(tools), wantTools)
 	}
-	if runtime.GOOS == "windows" && a.agent.Context().Tools[8].Name() != "powershell" {
-		t.Errorf("last registered tool = %q, want powershell", a.agent.Context().Tools[8].Name())
+	// PowerShell 由 registry 追加在末尾，不能按固定下标断言
+	if runtime.GOOS == "windows" && tools[len(tools)-1].Name() != "powershell" {
+		t.Errorf("last registered tool = %q, want powershell", tools[len(tools)-1].Name())
 	}
 }
 
