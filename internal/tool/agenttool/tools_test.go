@@ -197,7 +197,7 @@ type recordingLauncher struct{ input taskpkg.AgentInput }
 
 func (l *recordingLauncher) Start(_ context.Context, input taskpkg.AgentInput) (taskpkg.AgentLaunched, error) {
 	l.input = input
-	return taskpkg.AgentLaunched{AgentID: "agent-1"}, nil
+	return taskpkg.AgentLaunched{TaskID: "agent-1"}, nil
 }
 
 // thinking 等级必须校验,避免非法值透传给 provider

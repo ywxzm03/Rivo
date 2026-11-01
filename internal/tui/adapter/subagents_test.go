@@ -12,7 +12,10 @@ import (
 // 详情页的 transcript 从磁盘增量投影:首帧读全量,后续快照只消费新增部分
 func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
-	manager := session.NewAt("/project", path)
+	manager, err := session.NewAt("/project", path, "child-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "on disk"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +50,10 @@ func TestProjectSubagentTasksReadsTranscriptIncrementally(t *testing.T) {
 // 未被查看的任务不读 transcript,内存里也不保留
 func TestProjectSubagentTasksSkipsUnviewedTranscript(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
-	manager := session.NewAt("/project", path)
+	manager, err := session.NewAt("/project", path, "child-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "on disk"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +75,10 @@ func TestProjectSubagentTasksSkipsUnviewedTranscript(t *testing.T) {
 // 尾部 tool call 在结果落盘前先投影,结果到达后同一消息 ID 被补齐,不重复
 func TestProjectSubagentTasksReProjectsPendingToolCall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
-	manager := session.NewAt("/project", path)
+	manager, err := session.NewAt("/project", path, "child-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := task.NewStore()
 	store.SetTranscriptReader(session.ReadMessages)
 	if _, _, err := store.Register(task.RegisterSpec{ID: "agent-1", Type: task.TypeAgent, AgentType: "Work", OutputFile: path}); err != nil {
@@ -104,7 +113,10 @@ func TestProjectSubagentTasksReProjectsPendingToolCall(t *testing.T) {
 // 终态任务不会再补 tool result,残留尾部必须整体投影,不能永久卡在 pending
 func TestProjectSubagentTasksSealsTerminalTail(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
-	manager := session.NewAt("/project", path)
+	manager, err := session.NewAt("/project", path, "child-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.AppendMessage(llm.AssistantMessage{Content: []llm.Content{
 		llm.ToolCall{ID: "call-1", Name: "read", Arguments: map[string]any{"path": "a.go"}},
 	}}); err != nil {
@@ -116,7 +128,7 @@ func TestProjectSubagentTasksSealsTerminalTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(id, token, &task.AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, token, &task.AgentResult{}) {
 		t.Fatal("completion failed")
 	}
 	r := &Runtime{}

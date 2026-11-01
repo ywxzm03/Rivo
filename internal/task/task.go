@@ -57,7 +57,6 @@ type StateBase struct {
 	Type        Type
 	Status      Status
 	Description string
-	ToolUseID   string
 	StartTime   time.Time
 	EndTime     *time.Time
 	OutputFile  string
@@ -94,9 +93,9 @@ type BashState struct {
 	Command string
 	Result  *BashResult
 	Process BashProcess
-	// ParentAgentID 是发起该后台任务的子 agent,主 agent 留空。
+	// ParentTaskID 是发起该后台任务的子 agent,主 agent 留空。
 	// 子 agent 结束时按它回收孤儿进程
-	ParentAgentID   string
+	ParentTaskID    string
 	OutputTruncated bool
 	OutputBytes     int
 }
@@ -122,7 +121,6 @@ type ToolActivity struct {
 
 type AgentState struct {
 	StateBase
-	AgentID      string
 	Prompt       string
 	AgentType    string
 	Model        *llm.Model
@@ -180,7 +178,7 @@ type TextBlock struct {
 
 type AgentLaunched struct {
 	Status       string `json:"status"`
-	AgentID      string `json:"agentId"`
+	TaskID       string `json:"task_id"`
 	Description  string `json:"description"`
 	Prompt       string `json:"prompt"`
 	SubagentType string `json:"subagentType"`
@@ -191,10 +189,9 @@ type AgentLaunched struct {
 
 func (AgentLaunched) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[AgentLaunched]("agentId") }
+func init() { llm.RegisterToolDetails[AgentLaunched]("agent", "task_id") }
 
 type AgentResult struct {
-	AgentID           string      `json:"agentId"`
 	Content           []TextBlock `json:"content"`
 	TotalToolUseCount int         `json:"totalToolUseCount"`
 	TotalDurationMs   int64       `json:"totalDurationMs"`
@@ -204,7 +201,6 @@ type AgentResult struct {
 
 type Notification struct {
 	TaskID          string     `json:"task_id"`
-	ToolUseID       string     `json:"tool_use_id,omitempty"`
 	Reason          StopReason `json:"reason,omitempty"`
 	Status          Status     `json:"status"`
 	OutputFile      string     `json:"output_file"`
@@ -231,7 +227,7 @@ type StopOutput struct {
 
 func (StopOutput) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[StopOutput]("task_type") }
+func init() { llm.RegisterToolDetails[StopOutput]("TaskStop", "task_type") }
 
 type StopTaskError struct {
 	Code    string
@@ -242,7 +238,6 @@ func (e *StopTaskError) Error() string { return e.Message }
 
 // ResumeSource 是磁盘侧描述,指向已不在易失 store 中的任务
 type ResumeSource struct {
-	ID           string
 	AgentType    string
 	Description  string
 	OutputFile   string

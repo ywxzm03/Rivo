@@ -90,12 +90,15 @@ func newWithID(cwd, dir, id string) *SessionManager {
 	}
 }
 
-// NewAt creates a session manager whose JSONL path is selected by the caller.
-// Subagent sidechains use this to keep one stable file per task.
-func NewAt(cwd, path string) *SessionManager {
-	m := New(cwd, filepath.Dir(path))
+// NewAt 创建调用方指定路径与 ID 的会话。子任务用它把任务号同时作为会话号,
+// 不再额外生成一份随机标识
+func NewAt(cwd, path, id string) (*SessionManager, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	m := newWithID(cwd, filepath.Dir(path), id)
 	m.sessionFile = path
-	return m
+	return m, nil
 }
 
 // Open 加载指定会话文件，加载成功即视为已完成首次 flush；
@@ -111,6 +114,34 @@ func Open(path, cwd string) (*SessionManager, error) {
 		_ = os.Remove(path)
 		return m, nil
 	}
+	return openData(path, data)
+}
+
+// OpenWithID 打开必须已存在且身份匹配的会话。
+// 空白文件、缺失会话头与 ID 不匹配都拒绝,不能退回新建或删除文件
+func OpenWithID(path, expectedID string) (*SessionManager, error) {
+	if err := ValidateID(expectedID); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("session: failed to read session file: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, fmt.Errorf("session: %s is empty and cannot be reopened as %s", path, expectedID)
+	}
+	m, err := openData(path, data)
+	if err != nil {
+		return nil, err
+	}
+	if m.header.ID != expectedID {
+		return nil, fmt.Errorf("session: %s belongs to %s, want %s", path, m.header.ID, expectedID)
+	}
+	return m, nil
+}
+
+// openData 从已读入的文件内容重建会话,调用方负责空文件与身份校验
+func openData(path string, data []byte) (*SessionManager, error) {
 	header, entries, records, warnings, err := parseFileWithRecords(data)
 	if err != nil {
 		return nil, err

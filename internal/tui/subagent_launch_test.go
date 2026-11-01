@@ -14,7 +14,7 @@ func TestAgentToolRowLaunchFeedback(t *testing.T) {
 		Name:         "agent",
 		Arguments:    `{"description":"Run sleep 120","subagent_type":"explore"}`,
 		Result:       "Started subagent agent-123",
-		Details:      `{"status":"async_launched","agentId":"agent-123","description":"Run sleep 120","subagentType":"explore","state":"running","outputFile":"/tmp/x.jsonl"}`,
+		Details:      `{"status":"async_launched","task_id":"agent-123","description":"Run sleep 120","subagentType":"explore","state":"running","outputFile":"/tmp/x.jsonl"}`,
 		Status:       ToolSuccess,
 		ArgsComplete: true,
 	}
@@ -33,7 +33,7 @@ func TestAgentToolRowForkLaunchFeedback(t *testing.T) {
 		Name:         "agent",
 		Arguments:    `{"description":"Scan callers","prompt":"find callers"}`,
 		Result:       "Started subagent agent-9",
-		Details:      `{"status":"async_launched","agentId":"agent-9","description":"Scan callers","subagentType":"fork","state":"running","outputFile":"/tmp/y.jsonl"}`,
+		Details:      `{"status":"async_launched","task_id":"agent-9","description":"Scan callers","subagentType":"fork","state":"running","outputFile":"/tmp/y.jsonl"}`,
 		Status:       ToolSuccess,
 		ArgsComplete: true,
 	}

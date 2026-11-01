@@ -333,7 +333,6 @@ func renderNotification(notification taskpkg.Notification) string {
 	var b strings.Builder
 	b.WriteString(llm.TaskNotificationOpenTag + "\n")
 	writeNotificationTag(&b, "task-id", notification.TaskID)
-	writeNotificationTag(&b, "tool-use-id", notification.ToolUseID)
 	writeNotificationTag(&b, "output-file", notification.OutputFile)
 	writeNotificationTag(&b, "status", string(notification.Status))
 	writeNotificationTag(&b, "reason", string(notification.Reason))

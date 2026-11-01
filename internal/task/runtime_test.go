@@ -199,7 +199,7 @@ func TestRemoveRuntime(t *testing.T) {
 func TestAttachAgentRuntimeRejectsTerminalTask(t *testing.T) {
 	store := NewStore()
 	id, token := newAgentTask(t, store, "child")
-	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, token, &AgentResult{}) {
 		t.Fatal("complete failed")
 	}
 	if _, err := store.AttachAgentRuntime(id, &fakeRuntime{}, "prompt"); err == nil {

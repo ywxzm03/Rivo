@@ -39,7 +39,7 @@ func TestEvictionLoopEvictsWithoutUserInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	// 通知先入队,任务才具备驱逐资格
@@ -100,7 +100,7 @@ func TestNotificationInjectedDuringActiveRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "mid run"}) {
@@ -143,7 +143,7 @@ func TestStartRejectedRetriesNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "queued"}) {
@@ -167,7 +167,6 @@ func TestStartRejectedRetriesNotification(t *testing.T) {
 func TestNotificationXMLShape(t *testing.T) {
 	messages := subagentNotificationMessages([]taskpkg.Notification{{
 		TaskID:       "agent-1",
-		ToolUseID:    "call-9",
 		Status:       taskpkg.StatusCompleted,
 		OutputFile:   "/tmp/agent-1.jsonl",
 		Summary:      "Write gin demo",
@@ -184,7 +183,6 @@ func TestNotificationXMLShape(t *testing.T) {
 	for _, want := range []string{
 		"<task-notification>", "</task-notification>",
 		"<task-id>agent-1</task-id>",
-		"<tool-use-id>call-9</tool-use-id>",
 		"<output-file>/tmp/agent-1.jsonl</output-file>",
 		"<status>completed</status>",
 		"<summary>Write gin demo</summary>",
