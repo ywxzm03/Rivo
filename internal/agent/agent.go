@@ -610,6 +610,7 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 
 		// 3.把待投递的子任务通知落盘进主会话,模型后续轮次仍能回看;
 		// 落盘成功才 ack,失败时通知留在队列等下次唤醒
+		// 上下文追加由 commitMessages 统一负责,这里不能重复 append
 		if claimNotifications != nil {
 			messages, ack := claimNotifications()
 			if len(messages) > 0 {
@@ -617,7 +618,6 @@ func (a *Agent) runLoop(ctx context.Context, cancel context.CancelFunc, firstMes
 					cancel()
 					return nil, err
 				}
-				a.ctx.Messages = append(a.ctx.Messages, messages...)
 				if ack != nil {
 					ack()
 				}
