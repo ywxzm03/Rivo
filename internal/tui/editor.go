@@ -123,22 +123,12 @@ func (m *Model) handleCompletionKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) 
 
 // handleTaskListKey 处理任务列表聚焦时的方向键与选择；handled=false 表示继续主按键路径
 func (m *Model) handleTaskListKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
-	if len(m.state.Subagents.Tasks) > 0 && (m.panel.taskSelector || strings.TrimSpace(m.editor.Value()) == "") {
+	if len(m.state.Subagents.Tasks) > 0 && m.panel.taskSelector {
 		switch msg.String() {
 		case "up":
-			wasFocused := m.panel.taskSelector
-			if !wasFocused {
-				m.setTaskFocus(true)
-			}
-			// 主视图第一次 Up 只进入列表;child view 则以当前任务为锚点上移
-			if wasFocused || m.panel.viewingTaskID != "" {
-				m.selectSubagent(-1)
-			}
+			m.selectSubagent(-1)
 			return true, nil
 		case "down":
-			if !m.panel.taskSelector {
-				m.setTaskFocus(true)
-			}
 			m.selectSubagent(1)
 			return true, nil
 		case "enter":
@@ -162,6 +152,8 @@ func (m *Model) handleTaskListKey(msg tea.KeyMsg) (handled bool, cmd tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	beforeHistory := m.historyEditorStamp()
+	defer m.finishHistoryKey(beforeHistory)
 	if m.closing {
 		return nil
 	}
@@ -200,11 +192,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.quit()
 		}
 		m.lastCtrlC = now
-		m.editor.Reset()
-		m.resetPastes()
-		m.composer.completionHidden = true
-		m.layout()
-		return nil
+		var cmd tea.Cmd
+		if text := m.editor.Value(); text != "" {
+			m.rememberHistory(ComposerHistoryEntry{Draft: m.snapshotComposerDraft(text, false)})
+			origin := m.nextInputOrigin(text)
+			if m.handlers.History.RecordCleared != nil {
+				cmd = m.handlers.History.RecordCleared(*origin)
+			}
+		}
+		m.clearComposerInput()
+		return cmd
 	case "ctrl+d":
 		if m.editor.Value() == "" {
 			return m.quit()
@@ -277,32 +274,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.layout()
 			return nil
 		}
-	case "up":
-		if m.editor.Line() == 0 && m.editor.LineInfo().RowOffset == 0 {
-			// 输入框首行的 Up 把焦点上移到任务列表,不插入字符也不翻历史。
-			// 队列撤回改用 Shift+Left,不再占用 Up
-			if len(m.state.Subagents.Tasks) > 0 {
-				m.setTaskFocus(true)
-				if !m.panel.mainSelected || m.panel.selectedTaskID != "" {
-					m.selectSubagent(-1)
-				}
-				return nil
-			}
-			m.browseHistory(-1)
+	case "left":
+		if m.canFocusHistoryTasks() {
+			m.setTaskFocus(true)
 			return nil
 		}
-	case "down":
-		line := m.editor.LineInfo()
-		if m.editor.Line() == m.editor.LineCount()-1 && line.RowOffset == line.Height-1 {
-			// 输入框末行的 Down 把焦点下移到任务列表。
-			// 队列撤回改用 Shift+Right,不再占用 Down
-			if len(m.state.Subagents.Tasks) > 0 {
-				m.setTaskFocus(true)
-				m.selectSubagent(1)
-				return nil
-			}
-			m.browseHistory(1)
-			return nil
+	case "up", "down":
+		direction := -1
+		if msg.String() == "down" {
+			direction = 1
+		}
+		if cmd, handled := m.browseHistory(direction); handled {
+			return cmd
 		}
 	}
 	// 兜底前先自愈:历史路径可能只改了 taskSelector 而漏了编辑器焦点
@@ -327,60 +310,19 @@ func (m *Model) quit() tea.Cmd {
 	return tea.Quit
 }
 
-func (m *Model) browseHistory(direction int) {
-	if len(m.composer.history) == 0 {
-		return
-	}
-	if m.composer.historyPos == len(m.composer.history) {
-		m.composer.draft = m.editor.Value()
-		if message, ok := m.buildPayload(); ok {
-			copy := clonePayload(message)
-			m.composer.draftMessage = &copy
-		} else {
-			m.composer.draftMessage = nil
-		}
-	}
-	m.composer.historyPos = max(0, min(len(m.composer.history), m.composer.historyPos+direction))
-	m.resetPastes()
-	if m.composer.historyPos < len(m.composer.historyMessages) {
-		m.editor.SetValue(m.editorTextForPayload(m.composer.historyMessages[m.composer.historyPos]))
-	} else if m.composer.draftMessage != nil {
-		m.editor.SetValue(m.editorTextForPayload(*m.composer.draftMessage))
-	} else {
-		m.editor.SetValue(m.composer.draft)
-	}
-	m.editor.CursorEnd()
-	m.composer.completionHidden = true
-	m.layout()
-}
-
-// recordSubmission 把一次提交记入历史并清空编辑器
-func (m *Model) recordSubmission(input string, message ComposerPayload) {
-	m.composer.history = append(m.composer.history, input)
-	m.composer.historyMessages = append(m.composer.historyMessages, message)
-	m.composer.historyPos = len(m.composer.history)
-	m.composer.draft = ""
-	m.composer.draftMessage = nil
-	m.editor.Reset()
-	m.resetPastes()
-	m.composer.completionHidden = true
-	m.layout()
-}
-
 func (m *Model) submit() tea.Cmd { return m.submitWithQueue(queuedSteering) }
 
 func (m *Model) submitFollowUp() tea.Cmd { return m.submitWithQueue(queuedFollowUp) }
 
 // submitToSubagent 把输入交给当前正在查看的子任务：
 // 运行中的任务进队列，终态任务只能 continue
-func (m *Model) submitToSubagent(message ComposerPayload, followUp bool) tea.Cmd {
+func (m *Model) submitToSubagent(input string, message ComposerPayload, followUp bool) tea.Cmd {
 	if m.panel.viewingTaskID == "" {
 		return nil
 	}
 	if m.handlers.SubagentRequest == nil {
 		return nil
 	}
-	messageCopy := clonePayload(message)
 	task, ok := findSubagentTask(m.state.Subagents.Tasks, m.panel.viewingTaskID)
 	if !ok {
 		m.notice("Subagent task is no longer available")
@@ -395,9 +337,8 @@ func (m *Model) submitToSubagent(message ComposerPayload, followUp bool) tea.Cmd
 			kind = "followup"
 		}
 	}
-	m.editor.Reset()
-	m.resetPastes()
-	m.layout()
+	message = m.recordSubmission(input, message)
+	messageCopy := clonePayload(message)
 	return m.handlers.SubagentRequest(SubagentRequest{Kind: kind, TaskID: task.ID, Message: &messageCopy})
 }
 
@@ -412,7 +353,7 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 		return nil
 	}
 	if m.panel.viewingTaskID != "" {
-		return m.submitToSubagent(message, kind == queuedFollowUp)
+		return m.submitToSubagent(input, message, kind == queuedFollowUp)
 	}
 	if hasImages && !m.currentModel().SupportsImages {
 		m.notice("The current model does not support image input.")
@@ -421,6 +362,27 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 	if hasImages && strings.HasPrefix(input, "/") {
 		m.notice("Commands cannot include image attachments.")
 		return nil
+	}
+	name, arg := input, ""
+	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
+		name, arg = input[:index], strings.TrimSpace(input[index:])
+	}
+	management := strings.HasPrefix(name, "/") && !strings.HasPrefix(name, "/skill:")
+	if management {
+		known := false
+		for _, command := range commands {
+			if name == "/"+command.name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			m.notice("Unknown command: " + name)
+			return nil
+		}
+		if name != "/clear" {
+			m.rememberHistory(ComposerHistoryEntry{Draft: m.snapshotComposerDraft(input, true)})
+		}
 	}
 	if m.busy && input != "/exit" {
 		if m.canceling {
@@ -448,41 +410,21 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 			if !m.canQueue(kind) {
 				return nil
 			}
-			m.recordSubmission(input, message)
-			return m.dispatchQueued(kind, input, &message, hasImages)
+			message = m.recordSubmission(input, message)
+			return m.dispatchQueued(kind, input, &message)
 		}
 	}
-	if !m.busy && m.handlers.Request == nil && m.handlers.Status == nil {
-		if hasImages {
-			return nil
-		}
-		m.composer.history = append(m.composer.history, input)
-		m.composer.historyMessages = append(m.composer.historyMessages, message)
-		m.composer.historyPos = len(m.composer.history)
-		m.composer.draft = ""
-		m.composer.draftMessage = nil
-		m.editor.Reset()
-		m.resetPastes()
-		m.composer.completionHidden = true
-		m.layout()
-		return nil
-	}
-	m.recordSubmission(input, message)
-	if !strings.HasPrefix(input, "/") {
+	if !management {
+		message = m.recordSubmission(input, message)
 		m.viewport.GotoBottom()
-		if hasImages {
-			return m.dispatchMessage(RequestRun, input, &message)
-		}
-		return m.dispatch(RequestRun, input)
+		return m.dispatchMessage(RequestRun, input, &message)
 	}
-	name, arg := input, ""
-	if index := strings.IndexFunc(input, unicode.IsSpace); index >= 0 {
-		name, arg = input[:index], strings.TrimSpace(input[index:])
-	}
-	if strings.HasPrefix(name, "/skill:") {
-		m.viewport.GotoBottom()
-		return m.dispatch(RequestRun, input)
-	}
+	m.clearComposerInput()
+	return m.submitCommand(name, arg)
+}
+
+// submitCommand 分发已确认的管理命令，不把它们写入全局输入历史
+func (m *Model) submitCommand(name, arg string) tea.Cmd {
 	switch name {
 	case "/exit":
 		return m.quit()
@@ -580,29 +522,22 @@ func (m *Model) canQueue(kind queuedKind) bool {
 }
 
 // dispatchQueued 按种类把输入交给对应队列，带图时走结构化入口
-func (m *Model) dispatchQueued(kind queuedKind, input string, message *ComposerPayload, hasImages bool) tea.Cmd {
+func (m *Model) dispatchQueued(kind queuedKind, input string, message *ComposerPayload) tea.Cmd {
 	if kind == queuedFollowUp {
-		if hasImages {
-			return m.dispatchFollowUpMessage(input, message)
-		}
-		return m.dispatchFollowUp(input)
+		return m.dispatchFollowUpMessage(input, message)
 	}
-	if hasImages {
-		return m.dispatchSteeringMessage(input, message)
-	}
-	return m.dispatchSteering(input)
+	return m.dispatchSteeringMessage(input, message)
 }
 
 // handleOverlayKey 处理 Esc 关闭类按键与选择器、粘贴、补全的拦截
 func (m *Model) handleOverlayKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	// child view 的 Esc 停止当前 subagent,视图保持打开;选中 main 后 Enter 才退出
-	if msg.String() == "esc" && m.panel.viewingTaskID != "" {
-		return true, m.stopViewedSubagent()
-	}
-	// 列表聚焦时 Esc 先退出列表
+	// 列表 Esc 先回输入框，child 输入框 Esc 再沿既有规则停止任务
 	if msg.String() == "esc" && m.panel.taskSelector {
 		m.setTaskFocus(false)
 		return true, nil
+	}
+	if msg.String() == "esc" && m.panel.viewingTaskID != "" {
+		return true, m.stopViewedSubagent()
 	}
 	if msg.String() == "esc" && m.jumpPillVisible() && (!m.busy || len(m.state.Steering) == 0) {
 		m.jumpToBottom()
@@ -647,8 +582,7 @@ func (m *Model) handleDequeueKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 // 焦点在任务列表时该键是命令键,输入框内容不参与判定
 func (m *Model) handleTaskKillKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	focused := m.panel.taskSelector
-	// 1.未聚焦列表时 x 仍是普通字符,输入框非空就不拦截
-	if !focused && strings.TrimSpace(m.editor.Value()) != "" {
+	if !focused {
 		return nil, false
 	}
 	if msg.Type != tea.KeyRunes || msg.Paste || msg.String() != "x" {
@@ -689,15 +623,8 @@ func isQueueControlCommand(input string) bool {
 }
 
 func (m *Model) stageCompactionMessage(input string, message ComposerPayload, kind queuedKind) tea.Cmd {
+	message = m.recordSubmission(input, message)
 	m.compactionQueuedMessages = append(m.compactionQueuedMessages, compactionQueuedMessage{message: clonePayload(message), kind: kind})
-	m.composer.history = append(m.composer.history, input)
-	m.composer.historyMessages = append(m.composer.historyMessages, clonePayload(message))
-	m.composer.historyPos = len(m.composer.history)
-	m.composer.draft = ""
-	m.composer.draftMessage = nil
-	m.editor.Reset()
-	m.resetPastes()
-	m.composer.completionHidden = true
 	m.status = "Compacting context…"
 	m.layout()
 	return nil

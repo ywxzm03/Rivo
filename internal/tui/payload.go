@@ -11,6 +11,7 @@ type ImagePart struct {
 type ComposerPayload struct {
 	Text   string
 	Images []ImagePart
+	Origin *InputOrigin // 直接输入来源，排队与重试期间保持不变
 }
 
 // RestoreKind 是树恢复方式，与领域层的恢复模式一一对应

@@ -174,8 +174,8 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		if result.Err = a.session.RetryPending(); result.Err != nil {
 			return result
 		}
+		a.acknowledgePendingInputs(messages)
 		a.pendingRequest = nil
-		a.acknowledgePendingQueued(messages)
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
@@ -281,6 +281,9 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}
+	if result.Err == nil && result.Next != nil {
+		result.Next.BindInputHistory(a.boundInputHistory())
+	}
 	return result
 }
 
@@ -303,7 +306,13 @@ func pendingMessagesHaveImages(messages []llm.Message) bool {
 }
 
 func equalOperationRequest(left, right OperationRequest) bool {
-	return reflect.DeepEqual(left, right)
+	if left.Kind != right.Kind || left.Value != right.Value || left.RestoreMode != right.RestoreMode || left.NotificationOnly != right.NotificationOnly {
+		return false
+	}
+	if left.Message == nil || right.Message == nil {
+		return left.Message == nil && right.Message == nil
+	}
+	return left.Message.Hidden == right.Message.Hidden && reflect.DeepEqual(left.Message.Content, right.Message.Content)
 }
 
 // continueQueuedSteering 在释放操作所有权前完成收尾：steering 优先，follow-up 后继，
@@ -356,12 +365,11 @@ func (a *App) hasPendingNotification() bool {
 	return store != nil && len(store.PeekNotifications()) > 0
 }
 
-// acknowledgePendingQueued 只确认最近一次 commit 失败恢复的那条队列项；
-// 不按文本跨队列删除，避免同文本 steering/follow-up 互相误删
-func (a *App) acknowledgePendingQueued(messages []llm.Message) {
+// acknowledgePendingInputs 使用补写批次保留的来源，先确认实际移除的队列项。
+func (a *App) acknowledgePendingInputs(messages []llm.Message) {
 	for _, message := range messages {
 		user, ok := message.(llm.UserMessage)
-		if !ok {
+		if !ok || user.Hidden {
 			continue
 		}
 		if a.agent.AcknowledgePending(agent.PayloadFromMessage(user)) {
@@ -369,8 +377,13 @@ func (a *App) acknowledgePendingQueued(messages []llm.Message) {
 		}
 		if len(user.Content) == 1 {
 			if text, ok := user.Content[0].(llm.TextContent); ok {
-				a.agent.AcknowledgePendingText(text.Text)
+				if a.agent.AcknowledgePendingText(text.Text) {
+					continue
+				}
 			}
+		}
+		if user.Origin != nil {
+			a.inputAccepted(*user.Origin)
 		}
 	}
 }

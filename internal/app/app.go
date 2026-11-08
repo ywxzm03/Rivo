@@ -56,6 +56,9 @@ type App struct {
 	// backgroundEnd 是后台 run 结束的兜底回调,由显示层安装
 	backgroundMu  sync.Mutex
 	backgroundEnd func()
+	// history 由进程组合根持有，独立锁避免接纳回调重入 stateMu。
+	historyMu    sync.RWMutex
+	inputHistory *InputHistory
 }
 
 // ModelFallbackMessage 返回恢复时的模型回退警告，未发生回退时为空
@@ -250,27 +253,7 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 		ContextFiles: loader.ContextFiles(),
 		Skills:       loader.Skills(),
 	}))
-	ag := agent.New(agent.Options{
-		Config:     llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel, SessionID: sm.ID()},
-		Context:    llm.Context{Tools: tools},
-		Stream:     streamFn,
-		Events:     coord.Handle,
-		WorkingDir: cwd,
-		Hooks:      agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
-	})
-	coord.Agent = ag
-	registry.BuildRunner(registry.RunnerDeps{
-		ParentCwd:   cwd,
-		SessionDir:  filepath.Dir(sm.Path()),
-		AgentDir:    agentDir,
-		Thinking:    cfg.ThinkingLevel,
-		ParentTools: tools,
-		Store:       manager.Store(),
-		Model:       model,
-		Stream:      streamFn,
-	}, manager)
 	app := &App{
-		agent:       ag,
 		session:     sm,
 		coordinator: coord,
 		cfg:         cfg,
@@ -281,6 +264,28 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 		tools:       tools,
 		lifecycle:   newLifecycle(),
 	}
+	inputAccepted := app.inputAccepted
+	ag := agent.New(agent.Options{
+		Config:     llm.AgentConfig{Model: model, ThinkingLevel: cfg.ThinkingLevel, SessionID: sm.ID()},
+		Context:    llm.Context{Tools: tools},
+		Stream:     streamFn,
+		Events:     coord.Handle,
+		WorkingDir: cwd,
+		Hooks:      agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages, InputAccepted: inputAccepted},
+	})
+	coord.Agent = ag
+	app.agent = ag
+	registry.BuildRunner(registry.RunnerDeps{
+		ParentCwd:     cwd,
+		SessionDir:    filepath.Dir(sm.Path()),
+		AgentDir:      agentDir,
+		Thinking:      cfg.ThinkingLevel,
+		ParentTools:   tools,
+		Store:         manager.Store(),
+		Model:         model,
+		Stream:        streamFn,
+		InputAccepted: inputAccepted,
+	}, manager)
 	// 主 agent 空闲时靠这条回调消费通知;运行中的操作会在收尾阶段自行检查队列
 	manager.Store().SetNotifyHook(app.lifecycle.wake)
 	go app.lifecycle.runNotifications(app)
@@ -449,11 +454,11 @@ func (a *App) StopSubagent(taskID string) error {
 }
 
 // ContinueSubagent 用同一个稳定任务 ID 恢复终态子任务
-func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string) (taskpkg.AgentLaunched, error) {
+func (a *App) ContinueSubagent(ctx context.Context, taskID, prompt string, origin *llm.UserInputOrigin) (taskpkg.AgentLaunched, error) {
 	if a.subagents == nil {
 		return taskpkg.AgentLaunched{}, fmt.Errorf("app: subagent manager is unavailable")
 	}
-	return a.subagents.Continue(ctx, taskID, prompt)
+	return a.subagents.Continue(ctx, taskID, prompt, origin)
 }
 
 // QueueSubagentMessage 把输入排进运行中子任务的队列。

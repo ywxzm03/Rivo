@@ -161,12 +161,13 @@ type Runtime interface {
 }
 
 type AgentInput struct {
-	Description  string             `json:"description"`
-	Prompt       string             `json:"prompt"`
-	SubagentType *string            `json:"subagent_type,omitempty"`
-	Worktree     *bool              `json:"worktree,omitempty"`
-	Thinking     *llm.ThinkingLevel `json:"thinking,omitempty"`
-	Model        *llm.Model         `json:"model,omitempty"`
+	Description  string               `json:"description"`
+	Prompt       string               `json:"prompt"`
+	SubagentType *string              `json:"subagent_type,omitempty"`
+	Worktree     *bool                `json:"worktree,omitempty"`
+	Thinking     *llm.ThinkingLevel   `json:"thinking,omitempty"`
+	Model        *llm.Model           `json:"model,omitempty"`
+	Origin       *llm.UserInputOrigin `json:"-"`
 	// ForkChild 标记调用方本身是 fork 子 agent。fork 保留 Agent 工具是为了让
 	// 工具定义与父缓存一致,因此递归派发必须在调用边界拒绝
 	ForkChild bool `json:"-"`
@@ -255,6 +256,7 @@ type AgentSpec struct {
 	ID              string
 	Description     string
 	Prompt          string
+	Origin          *llm.UserInputOrigin `json:"-"`
 	AgentType       string
 	WorktreePath    string
 	Worktree        bool

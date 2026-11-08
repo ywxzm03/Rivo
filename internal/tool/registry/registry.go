@@ -66,18 +66,21 @@ type RunnerDeps struct {
 	Store       *task.Store
 	Model       llm.Model
 	Stream      llm.StreamFn
+
+	InputAccepted func(llm.UserInputOrigin)
 }
 
 // BuildRunner 构造子任务执行内核并把它挂到 manager 上，
 // 让编排层不必知道子任务执行的装配细节
 func BuildRunner(deps RunnerDeps, manager *subagent.Manager) *agenttool.Runner {
 	runner := &agenttool.Runner{
-		ParentCwd:   deps.ParentCwd,
-		SessionDir:  deps.SessionDir,
-		AgentDir:    deps.AgentDir,
-		Thinking:    deps.Thinking,
-		ParentTools: deps.ParentTools,
-		TaskStore:   deps.Store,
+		ParentCwd:     deps.ParentCwd,
+		SessionDir:    deps.SessionDir,
+		AgentDir:      deps.AgentDir,
+		Thinking:      deps.Thinking,
+		ParentTools:   deps.ParentTools,
+		TaskStore:     deps.Store,
+		InputAccepted: deps.InputAccepted,
 	}
 	runner.SetModel(deps.Model, deps.Stream)
 	manager.SetFactory(runner.Run)

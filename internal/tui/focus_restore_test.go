@@ -29,7 +29,7 @@ func assertFocusInvariant(t *testing.T, m *Model, where string) {
 	}
 }
 
-// 主视图按 Up 聚焦列表后 Enter 落在 main 行,必须把焦点交回输入框
+// 主视图按 Left 聚焦列表后 Enter 落在 main 行，必须把焦点交回输入框
 func TestEnterMainRowRestoresEditorFocus(t *testing.T) {
 	m := focusModel(t)
 	m.setTaskFocus(true)

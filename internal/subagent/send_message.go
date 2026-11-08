@@ -41,7 +41,7 @@ func (m *Manager) SendMessage(ctx context.Context, taskID, message string) (Send
 	if _, ok := task.(*taskpkg.AgentState); !ok {
 		return SendMessageResult{}, &taskpkg.StopTaskError{Code: "unsupported_type", Message: fmt.Sprintf("Task %s is not an agent task and cannot be resumed", taskID)}
 	}
-	if _, err := m.Continue(ctx, taskID, message); err != nil {
+	if _, err := m.Continue(ctx, taskID, message, nil); err != nil {
 		return SendMessageResult{}, err
 	}
 	return SendMessageResult{TaskID: taskID, Status: "resumed", Message: fmt.Sprintf("Task %s was %s; resumed it in the background with your message. You will be notified when it finishes.", taskID, task.Base().Status)}, nil

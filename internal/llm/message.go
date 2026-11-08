@@ -14,8 +14,17 @@ type Message interface {
 	message()
 }
 
+// UserInputOrigin 是只在内存流转的原始用户输入身份，发布后不再修改。
+type UserInputOrigin struct {
+	Generation uint64
+	Sequence   uint64
+	SessionID  string
+	Text       string
+}
+
 type UserMessage struct {
 	Content []Content
+	Origin  *UserInputOrigin `json:"-"`
 	// Hidden 标记这条消息只供模型阅读,不进显示层
 	// 子任务通知落盘时置位:模型下一轮照常读到正文,TUI 投影与会话树跳过渲染
 	// 标记随会话文件持久化,重开会话后仍然生效
