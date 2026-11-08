@@ -118,20 +118,20 @@ func replTarget(cfg provider.Config, target sessionTarget, stdin io.Reader, stdo
 	})
 }
 
-// resumeRecentApp 恢复最近会话，无会话时静默新建
+// resumeRecentApp 恢复最近会话，无会话时静默新建；只按 mtime 选文件，不扫描会话内容
 func resumeRecentApp(cfg provider.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get working directory: %w", err)
 	}
-	infos, err := session.ListSessions(cwd)
+	path, err := session.LatestSessionPath(cwd)
 	if err != nil {
 		return nil, err
 	}
-	if len(infos) == 0 {
+	if path == "" {
 		return app.New(cfg, onEvent)
 	}
-	return app.Open(infos[0].Path, cfg, onEvent)
+	return app.Open(path, cfg, onEvent)
 }
 
 type targetKind uint8

@@ -31,7 +31,37 @@ type selector struct {
 	selected          int
 }
 
+// openSelector 打开选择器；/resume 先异步加载会话列表，列表到达后再展示
 func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
+	if kind == RequestResume && m.handlers.Sessions != nil {
+		if m.busy {
+			m.notice("An operation is running. Press Escape to interrupt.")
+			return nil
+		}
+		m.resumeQuery = query
+		if m.resumePending {
+			// 已有一次加载在途，只更新过滤词，避免重复扫描会话目录
+			return nil
+		}
+		m.resumePending = true
+		m.resumeGeneration++
+		generation := m.resumeGeneration
+		load := m.handlers.Sessions()
+		return func() tea.Msg {
+			msg := load()
+			if sessions, ok := msg.(SessionsMsg); ok {
+				sessions.Generation = generation
+				return sessions
+			}
+			return msg
+		}
+	}
+	m.resumePending = false
+	return m.openSelectorNow(kind, query)
+}
+
+// openSelectorNow 用当前快照里的候选直接打开选择器
+func (m *Model) openSelectorNow(kind RequestKind, query string) tea.Cmd {
 	if m.busy {
 		if kind == RequestTree {
 			m.notice("Wait for the current operation to finish before opening the tree.")
@@ -75,7 +105,7 @@ func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
 		}
 	case "resume":
 		s.title = "Resume session"
-		for _, session := range m.state.Sessions {
+		for _, session := range m.sessions {
 			s.items = append(s.items, choice{value: session.Path, label: session.Summary, description: session.Modified, detail: session.Path})
 		}
 	case "tree":

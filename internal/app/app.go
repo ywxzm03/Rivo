@@ -98,8 +98,6 @@ func Open(path string, cfg provider.Config, onEvent llm.AgentEventSink) (*App, e
 		a.agent.SetThinkingLevel(llm.ThinkingLevel(proj.ThinkingLevel))
 	}
 	a.modelFallback = warning
-	// 3.恢复时对齐磁盘上的 AGENTS.md 与 skills
-	a.Reload()
 	return a, nil
 }
 

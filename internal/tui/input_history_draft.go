@@ -72,6 +72,7 @@ func (m *Model) clearComposerInput() {
 
 // recordSubmission 在清空前保存完整条目，并赋予这次手动提交新的身份
 func (m *Model) recordSubmission(input string, message ComposerPayload) ComposerPayload {
+	m.resumePending = false
 	m.rememberHistory(ComposerHistoryEntry{Draft: m.snapshotComposerDraft(input, true)})
 	message.Origin = m.nextInputOrigin(input)
 	m.clearComposerInput()

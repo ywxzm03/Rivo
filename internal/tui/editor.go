@@ -184,6 +184,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+v":
 		return m.readClipboard()
 	case "ctrl+c":
+		m.resumePending = false
 		if m.hasSelection() {
 			return m.copySelection()
 		}
@@ -207,6 +208,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.quit()
 		}
 	case "esc":
+		m.resumePending = false
 		if m.busy {
 			m.restoreQueuedMessages()
 			m.canceling = true
@@ -425,6 +427,8 @@ func (m *Model) submitWithQueue(kind queuedKind) tea.Cmd {
 
 // submitCommand 分发已确认的管理命令，不把它们写入全局输入历史
 func (m *Model) submitCommand(name, arg string) tea.Cmd {
+	// 新命令会作废在途的 /resume 列表请求，避免迟到结果弹出选择器
+	m.resumePending = false
 	switch name {
 	case "/exit":
 		return m.quit()

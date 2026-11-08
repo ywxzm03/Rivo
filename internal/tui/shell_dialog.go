@@ -338,6 +338,7 @@ func padRight(value string, width int) string {
 
 // openShellDialog 打开 /ps 弹窗并发起首次查询
 func (m *Model) openShellDialog() tea.Cmd {
+	m.resumePending = false
 	if m.handlers.ShellList == nil {
 		m.notice("Background shells are unavailable")
 		return nil
