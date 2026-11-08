@@ -256,7 +256,7 @@ func TestInputHistoryScopePreparationCanBeCancelled(t *testing.T) {
 	m.Update(ScopePreparedMsg{Request: first, Replay: []ComposerHistoryEntry{{Draft: ComposerDraft{Text: "child seed"}}}})
 	assertHistoryText(t, m, "stay in main")
 	if m.panel.viewingTaskID != "" || len(entered) != 0 {
-		t.Fatal("cancelled preparation entered the backend child view")
+		t.Fatal("canceled preparation entered the backend child view")
 	}
 	eraseHistoryDraft(m)
 	press(m, tea.KeyLeft)

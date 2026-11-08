@@ -191,7 +191,7 @@ func TestInputHistoryClearKeepsLocalAndSession(t *testing.T) {
 	m.Update(previous)
 	before := *historyRuntimeState(t, r)
 	// 在本 UI 中记录取消草稿，再执行清上下文
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("cancelled draft")})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("canceled draft")})
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	done := submitAndSettle(t, m, "/clear")
 	if done.Err != nil {
@@ -203,12 +203,12 @@ func TestInputHistoryClearKeepsLocalAndSession(t *testing.T) {
 		t.Fatalf("clear changed input history lifecycle: before=%+v after=%+v", before, after)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	if view := m.View(); !strings.Contains(view, "cancelled draft") {
-		t.Fatalf("clear erased local cancelled draft: %q", view)
+	if view := m.View(); !strings.Contains(view, "canceled draft") {
+		t.Fatalf("clear erased local canceled draft: %q", view)
 	}
 	fixture.service.Barrier()
 	rows := historyRuntimeRows(t, fixture.historyPath)
-	if len(rows) != 2 || rows[0].Text != "previous" || rows[1].Text != "cancelled draft" {
+	if len(rows) != 2 || rows[0].Text != "previous" || rows[1].Text != "canceled draft" {
 		t.Fatalf("clear recorded itself or lost input: %+v", rows)
 	}
 }

@@ -61,7 +61,8 @@ func (store *Store) appendRecord(record Record) (err error) {
 	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(store.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	// Windows 的 append-only 句柄不能截断；持锁后手动定位追加边界
+	file, err := os.OpenFile(store.path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
@@ -76,6 +77,9 @@ func (store *Store) appendRecord(record Record) (err error) {
 	}
 	boundary, err := store.repairTail(file)
 	if err != nil {
+		return err
+	}
+	if _, err := file.Seek(boundary, io.SeekStart); err != nil {
 		return err
 	}
 	n, err := store.file.ops.writeFile(file, data)

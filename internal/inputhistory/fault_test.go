@@ -42,8 +42,8 @@ func TestAppendRollbackAndPoison(t *testing.T) {
 				if err != nil {
 					return n, err
 				}
-				afterPartialWrite, err = os.ReadFile(path)
-				if err != nil {
+				afterPartialWrite = make([]byte, len(prefix)+n)
+				if _, err = file.ReadAt(afterPartialWrite, 0); err != nil {
 					return n, err
 				}
 				if returnWriteError {
@@ -106,7 +106,7 @@ func TestAppendRollbackAndPoison(t *testing.T) {
 		releaseWrite := make(chan struct{})
 		var releaseOnce sync.Once
 		defer releaseOnce.Do(func() { close(releaseWrite) })
-		var partial []byte
+		var partial, afterPartialWrite []byte
 		firstWrite := true
 		store.file.ops.write = func(file *os.File, data []byte) (int, error) {
 			if !firstWrite {
@@ -115,6 +115,10 @@ func TestAppendRollbackAndPoison(t *testing.T) {
 			firstWrite = false
 			partial = append([]byte(nil), data[:len(data)/2]...)
 			n, err := file.Write(partial)
+			if err == nil {
+				afterPartialWrite = make([]byte, len(prefix)+n)
+				_, err = file.ReadAt(afterPartialWrite, 0)
+			}
 			close(partialWritten)
 			<-releaseWrite
 			if err != nil {
@@ -141,7 +145,7 @@ func TestAppendRollbackAndPoison(t *testing.T) {
 		waitHistorySignal(t, partialWritten, "real partial write")
 		accept(1)
 		wantDamaged := append(append([]byte(nil), prefix...), partial...)
-		if len(partial) == 0 || !bytes.Equal(historyFileBytes(t, path), wantDamaged) {
+		if len(partial) == 0 || !bytes.Equal(afterPartialWrite, wantDamaged) {
 			t.Fatal("fault did not write the intended partial JSON after the committed prefix")
 		}
 		releaseOnce.Do(func() { close(releaseWrite) })
