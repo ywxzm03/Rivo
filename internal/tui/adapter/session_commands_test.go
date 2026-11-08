@@ -42,8 +42,9 @@ func TestSessionCommandsPublishNameAndReplaceRuntime(t *testing.T) {
 	if done.Err != nil || done.Notice != "Thread name changed to Named Thread" || done.Snapshot.SessionName != "Named Thread" {
 		t.Fatalf("rename completion = %+v", done)
 	}
-	if len(done.Snapshot.Sessions) != 1 || done.Snapshot.Sessions[0].Summary != "Named Thread" {
-		t.Fatal("session selector did not use the persisted name")
+	sessions := r.Sessions()().(tui.SessionsMsg)
+	if sessions.Err != nil || len(sessions.Sessions) != 1 || sessions.Sessions[0].Summary != "Named Thread" {
+		t.Fatalf("sessions = %+v, want persisted name", sessions)
 	}
 	old := r.namespace
 	done = r.request(tui.Request{Kind: "new"})().(tui.OperationDoneMsg)

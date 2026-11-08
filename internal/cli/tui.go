@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/config"
+	"github.com/ywxzm03/Rivo/internal/gitmeta"
 	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
@@ -79,6 +80,7 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 		ReadClipboardData:       readClipboardData,
 		SubagentRequest:         runtime.SubagentRequest,
 		SubagentSnapshot:        runtime.SubagentSnapshot,
+		Sessions:                runtime.Sessions,
 		ShellList:               runtime.ShellList,
 		ShellKill:               runtime.ShellKill,
 		ShellStopAll:            runtime.ShellStopAll,
@@ -109,7 +111,17 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 	return 0
 }
 
+// gitBranch 优先直接读 .git/HEAD；git 环境变量会改变仓库发现，交给子进程
 func gitBranch(cwd string) string {
+	if os.Getenv("GIT_DIR") != "" || os.Getenv("GIT_WORK_TREE") != "" ||
+		os.Getenv("GIT_CEILING_DIRECTORIES") != "" || os.Getenv("GIT_DISCOVERY_ACROSS_FILESYSTEM") != "" {
+		return gitBranchCommand(cwd)
+	}
+	return gitmeta.CurrentBranch(cwd)
+}
+
+// gitBranchCommand 在 git 环境变量覆盖仓库发现时兜底
+func gitBranchCommand(cwd string) string {
 	branchBytes, _ := exec.Command("git", "-C", cwd, "branch", "--show-current").Output()
 	return strings.TrimSpace(string(branchBytes))
 }

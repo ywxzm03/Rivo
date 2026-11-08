@@ -16,65 +16,96 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
+// 会话扫描必须在 Runtime 主锁之外执行，不能拖住取消与事件处理
 func TestSessionScanDoesNotBlockRuntime(t *testing.T) {
-	for _, kind := range []string{"snapshot", "completion"} {
-		t.Run(kind, func(t *testing.T) {
-			setupAdapterEnv(t)
-			cfg, err := provider.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
-			cwd := t.TempDir()
-			dir, err := session.DefaultDir(cwd)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(dir, "slow.jsonl")
-			if err := syscall.Mkfifo(path, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			a, err := app.NewWithSessionDir(cfg, t.TempDir(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := New(cfg, cwd, "main")
-			r.Attach(a)
-			snapshot := r.Snapshot
-			if kind == "completion" {
-				cmd := r.Request(tui.Request{ID: 1, Kind: "thinking", Value: "off"})
-				snapshot = func() tui.Snapshot { return *cmd().(tui.OperationDoneMsg).Snapshot }
-			}
-			finished := make(chan tui.Snapshot, 1)
-			go func() { finished <- snapshot() }()
-			// 等待扫描器打开管道，再暂缓内容写入以模拟慢速会话读取
-			writer, err := os.OpenFile(path, os.O_WRONLY, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer writer.Close()
-			responsive := make(chan struct{})
-			go func() {
-				r.Cancel()
-				_ = r.HandleEvent(llm.AgentStartEvent{})
-				close(responsive)
-			}()
-			select {
-			case <-responsive:
-			case <-time.After(time.Second):
-				t.Error("session scan held cancellation and event lock")
-			}
-			if _, err := writer.WriteString("{\"type\":\"message\",\"id\":\"first\",\"timestamp\":\"t\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"saved session\"}]}}\n"); err != nil {
-				t.Fatal(err)
-			}
-			_ = writer.Close()
-			result := <-finished
-			<-responsive
-			if len(result.Sessions) != 1 || result.Sessions[0].Path != path || result.Sessions[0].Summary != "saved session" {
-				t.Fatalf("snapshot sessions = %+v, want saved session", result.Sessions)
-			}
-		})
+	setupAdapterEnv(t)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	dir, err := session.DefaultDir(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "slow.jsonl")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(cfg, cwd, "main")
+	r.Attach(a)
+	finished := make(chan tui.SessionsMsg, 1)
+	go func() { finished <- r.Sessions()().(tui.SessionsMsg) }()
+	// 写入端可能阻塞在 FIFO 打开上，放到独立 goroutine，避免测试自身挂死
+	go func() {
+		writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer writer.Close()
+		_, _ = writer.WriteString("{\"type\":\"message\",\"id\":\"first\",\"timestamp\":\"t\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"saved session\"}]}}\n")
+	}()
+	responsive := make(chan struct{})
+	go func() {
+		r.Cancel()
+		_ = r.HandleEvent(llm.AgentStartEvent{})
+		close(responsive)
+	}()
+	select {
+	case <-responsive:
+	case <-time.After(time.Second):
+		t.Error("session scan held cancellation and event lock")
+	}
+	var result tui.SessionsMsg
+	select {
+	case result = <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session scan did not finish")
+	}
+	if result.Err != nil || len(result.Sessions) != 1 || result.Sessions[0].Path != path || result.Sessions[0].Summary != "saved session" {
+		t.Fatalf("sessions = %+v, want saved session", result)
+	}
+}
+
+// Snapshot 不再扫描会话目录，目录里存在慢速会话也不影响首帧快照
+func TestSnapshotDoesNotScanSessions(t *testing.T) {
+	setupAdapterEnv(t)
+	cfg, err := provider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	dir, err := session.DefaultDir(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "slow.jsonl"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.NewWithSessionDir(cfg, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(cfg, cwd, "main")
+	r.Attach(a)
+	done := make(chan struct{})
+	go func() {
+		_ = r.Snapshot()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot scanned session directory")
 	}
 }

@@ -29,13 +29,19 @@ DEADCODE := $(TOOLS_BIN)/deadcode$(BIN_EXT)
 
 COVERAGE_MIN ?= 80
 
-.PHONY: help build test test-race cover cover-check vet fmt check-fmt lint deadcode tools clean
+BIN ?= rivo
+GO_BUILD_FLAGS ?= -trimpath -ldflags="-s -w"
+
+.PHONY: help build build-bin test test-race cover cover-check vet fmt check-fmt lint deadcode tools clean
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Build all packages
-	$(GO) build ./...
+	$(GO) build $(GO_BUILD_FLAGS) ./...
+
+build-bin: ## Build the rivo binary with release flags
+	$(GO) build $(GO_BUILD_FLAGS) -o $(BIN) ./cmd/rivo
 
 test: ## Run all tests
 	$(GO) test ./...

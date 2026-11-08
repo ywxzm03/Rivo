@@ -14,6 +14,8 @@ type Skill struct {
 	BaseDir string
 	// DisableModelInvocation 为真时该 skill 不进入清单
 	DisableModelInvocation bool
+	// fileKey 是 SKILL.md 的规范真实路径，仅用于软链接去重；为空时按 FilePath 解析
+	fileKey string
 }
 
 // formatSkills 渲染 skills 清单，无可见 skill 时返回空串

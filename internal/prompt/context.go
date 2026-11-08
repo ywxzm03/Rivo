@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ywxzm03/Rivo/internal/gitmeta"
 )
 
 // ContextFile 一份已加载的 AGENTS.md
@@ -91,12 +93,12 @@ func loadContextFileFromDir(dir string) *ContextFile {
 // findShadowedContextFile 处理嵌套 worktree：worktree 根有同名候选文件时，
 // 主仓中的同名文件被遮蔽，避免同一份说明出现两次
 func findShadowedContextFile(cwd string) string {
-	gitPaths := findGitPaths(cwd)
-	if gitPaths == nil {
+	repo := gitmeta.Find(cwd)
+	if repo == nil {
 		return ""
 	}
-	commonGitDir := canonicalizePath(gitPaths.commonGitDir)
-	worktreeRoot := canonicalizePath(gitPaths.repoDir)
+	commonGitDir := canonicalizePath(repo.CommonDir)
+	worktreeRoot := canonicalizePath(repo.Root)
 	mainRepoRoot := filepath.Dir(commonGitDir)
 	// 普通仓库两者相同，sibling worktree 的主仓也不是其祖先，两种情况都不遮蔽
 	if !strings.HasPrefix(worktreeRoot, mainRepoRoot+string(filepath.Separator)) {
@@ -114,59 +116,6 @@ func findShadowedContextFile(cwd string) string {
 	return filepath.Join(mainRepoRoot, filepath.Base(file.Path))
 }
 
-// gitPaths 一个仓库的 git 目录信息
-type gitPaths struct {
-	repoDir string
-	// commonGitDir 共享的 git 目录，worktree 下指向主仓
-	commonGitDir string
-}
-
-// findGitPaths 从 cwd 向上查找 .git：目录形态直接使用，文件形态（worktree/submodule）
-// 解析 gitdir 与 commondir
-func findGitPaths(cwd string) *gitPaths {
-	dir := cwd
-	for {
-		gitPath := filepath.Join(dir, ".git")
-		if info, err := os.Stat(gitPath); err == nil {
-			if info.IsDir() {
-				if !exists(filepath.Join(gitPath, "HEAD")) {
-					return nil
-				}
-				return &gitPaths{repoDir: dir, commonGitDir: gitPath}
-			}
-			content, err := os.ReadFile(gitPath)
-			if err != nil {
-				return nil
-			}
-			trimmed := strings.TrimSpace(string(content))
-			if !strings.HasPrefix(trimmed, "gitdir: ") {
-				return nil
-			}
-			gitDir := strings.TrimSpace(strings.TrimPrefix(trimmed, "gitdir: "))
-			if !filepath.IsAbs(gitDir) {
-				gitDir = filepath.Join(dir, gitDir)
-			}
-			if !exists(filepath.Join(gitDir, "HEAD")) {
-				return nil
-			}
-			commonGitDir := gitDir
-			if data, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
-				common := strings.TrimSpace(string(data))
-				if !filepath.IsAbs(common) {
-					common = filepath.Join(gitDir, common)
-				}
-				commonGitDir = common
-			}
-			return &gitPaths{repoDir: dir, commonGitDir: commonGitDir}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return nil
-		}
-		dir = parent
-	}
-}
-
 // canonicalizePath 解析符号链接，路径不存在时原样返回
 func canonicalizePath(path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
@@ -174,11 +123,6 @@ func canonicalizePath(path string) string {
 		return path
 	}
 	return resolved
-}
-
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func stripBOM(text string) string {

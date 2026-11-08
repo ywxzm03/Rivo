@@ -154,7 +154,6 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 		if result.Next != nil {
 			r.rebuildInputHistory(result.Next)
 		}
-		snapshot.Sessions = listSessionOptions(snapshot.Cwd)
 		snapshot.Subagents = r.subagentSnapshotLocked()
 		snapshot.InputHistory = r.inputScopeState(snapshot.Subagents.ViewingTaskID)
 		if errors.Is(result.Err, context.Canceled) {
@@ -451,8 +450,11 @@ func (r *Runtime) snapshotLocked(includeMessages bool) tui.Snapshot {
 		Steering: steering, SteeringInputs: payloadsFromMessages(steeringInputs), SteeringRevision: r.app.QueueRevision(agent.QueueSteering), FollowUp: followUp, FollowUpInputs: payloadsFromMessages(followUpInputs), FollowUpRevision: r.app.QueueRevision(agent.QueueFollowUp)}
 }
 
-func listSessionOptions(cwd string) []tui.SessionOption {
-	sessions, _ := session.ListSessions(cwd)
+func listSessionOptions(cwd string) ([]tui.SessionOption, error) {
+	sessions, err := session.ListSessions(cwd)
+	if err != nil {
+		return nil, err
+	}
 	options := make([]tui.SessionOption, 0, len(sessions))
 	for _, item := range sessions {
 		label := item.Name
@@ -461,7 +463,7 @@ func listSessionOptions(cwd string) []tui.SessionOption {
 		}
 		options = append(options, tui.SessionOption{Path: item.Path, Summary: label, Modified: session.RelativeTime(item.ModTime)})
 	}
-	return options
+	return options, nil
 }
 
 func modelOption(model llm.Model) tui.ModelOption {
@@ -472,10 +474,20 @@ func (r *Runtime) snapshot() tui.Snapshot {
 	r.mu.Lock()
 	snapshot := r.snapshotLocked(true)
 	r.mu.Unlock()
-	snapshot.Sessions = listSessionOptions(snapshot.Cwd)
 	snapshot.Subagents = r.subagentSnapshotLocked()
 	snapshot.InputHistory = r.inputScopeState(snapshot.Subagents.ViewingTaskID)
 	return snapshot
+}
+
+// Sessions 异步加载当前 cwd 的会话列表，供 /resume 选择器使用
+func (r *Runtime) Sessions() tea.Cmd {
+	r.mu.Lock()
+	cwd := r.cwd
+	r.mu.Unlock()
+	return func() tea.Msg {
+		options, err := listSessionOptions(cwd)
+		return tui.SessionsMsg{Sessions: options, Err: err}
+	}
 }
 
 func thinkingLevels(model llm.Model) []string {

@@ -87,7 +87,6 @@ func testState() Snapshot {
 		s.Models = append(s.Models, ModelOption{ID: fmt.Sprintf("model-%02d", i), Provider: fmt.Sprintf("provider-%d", i%2), Name: fmt.Sprintf("Model %d", i), ContextWindow: 1000000, Levels: []string{"off", "low", "high"}})
 	}
 	s.ModelKey, s.DefaultModelKey = s.Models[0].Key(), s.Models[1].Key()
-	s.Sessions = []SessionOption{{Path: "one", Summary: "First session", Modified: "2m ago"}, {Path: "two", Summary: "中文会话", Modified: "1h ago"}}
 	return s
 }
 

@@ -172,7 +172,6 @@ type Snapshot struct {
 	// CurrentModel 保留运行中的模型元数据，供选择器定位当前项
 	CurrentModel     ModelOption
 	Models           []ModelOption
-	Sessions         []SessionOption
 	Tree             []TreeNode
 	Messages         []Message
 	Skills           []SkillOption
@@ -237,7 +236,9 @@ type Handlers struct {
 	ShellStopAll func() tea.Cmd
 	// ShellKill 终止单个后台 shell,供 /ps 弹窗内按 x 使用
 	ShellKill func(id string) tea.Cmd
-	History   HistoryHandlers
+	// Sessions 异步加载 /resume 选择器需要的会话列表
+	Sessions func() tea.Cmd
+	History  HistoryHandlers
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -245,6 +246,14 @@ type MessageMsg Message
 type MessageCommittedMsg struct {
 	PreviousID string
 	Message    Message
+}
+
+// SessionsMsg 携带 /resume 选择器需要的会话列表
+type SessionsMsg struct {
+	Sessions []SessionOption // 按修改时间倒序；空切片表示没有可恢复会话
+	Err      error           // 读取会话目录失败；选择器仍打开，只显示空列表
+	// Generation 由 TUI 包装命令时填入，用于丢弃被取消或已被新请求取代的结果；0 表示未经包装
+	Generation uint64
 }
 
 type StatusMsg string
@@ -356,6 +365,14 @@ type Model struct {
 	// queues 承载 steering / follow-up 队列镜像
 	queues          queueMirror
 	statusNoticeSeq uint64
+	// sessions 是 /resume 选择器按需加载的会话列表
+	sessions []SessionOption
+	// resumeQuery 是等待会话列表期间 /resume 已经输入的过滤词
+	resumeQuery string
+	// resumePending 表示 /resume 正在等待会话列表，期间的取消键与其它选择器会作废该请求
+	resumePending bool
+	// resumeGeneration 标识最近一次 /resume 加载，旧代次的结果直接丢弃
+	resumeGeneration uint64
 	// shellPanelSeq 是 /stop 受理文案与命令回显的独立序号,避免与 /status 互相覆盖
 	shellPanelSeq uint64
 	// shellDialog 非空时输入坞被 /ps 弹窗接管,transcript 不动
@@ -543,6 +560,21 @@ func (m *Model) handleSteeringState(msg SteeringStateMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case SessionsMsg:
+		if !m.resumePending || (msg.Generation != 0 && msg.Generation != m.resumeGeneration) {
+			return m, nil
+		}
+		m.resumePending = false
+		if m.composer.selector != nil || m.shellDialog != nil || m.panel.taskSelector || m.busy {
+			return m, nil
+		}
+		m.sessions = append([]SessionOption(nil), msg.Sessions...)
+		if msg.Err != nil {
+			m.notice("Could not list sessions: " + msg.Err.Error())
+		}
+		query := m.resumeQuery
+		m.resumeQuery = ""
+		return m, m.openSelectorNow(RequestResume, query)
 	case HistoryLookupMsg:
 		return m, m.handleHistoryLookup(msg)
 	case ScopePreparedMsg:
@@ -831,7 +863,6 @@ func (m *Model) applySnapshot(s Snapshot) {
 			m.state.Messages[i].Divider = &copy
 		}
 	}
-	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	for i := range m.state.Models {
@@ -1432,7 +1463,6 @@ func (m *Model) applyMetadata(s Snapshot) {
 	m.state.Subagents = cloneSubagentSnapshot(s.Subagents)
 	// 整份快照替换后必须收敛焦点:列表可能被清空而 taskSelector 仍为真
 	m.reconcilePanelFocus()
-	m.state.Sessions = append([]SessionOption(nil), s.Sessions...)
 	m.state.Tree = append([]TreeNode(nil), s.Tree...)
 	m.state.Models = append([]ModelOption(nil), s.Models...)
 	m.state.Skills = append([]SkillOption(nil), s.Skills...)
