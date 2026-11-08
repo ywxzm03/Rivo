@@ -1,7 +1,11 @@
 package adapter
 
 import (
-	"sync"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,6 +19,21 @@ import (
 // 会话切换后,新 App 的通知唤醒与后台结束兜底都必须照常工作
 func TestNotificationPathSurvivesSessionSwitch(t *testing.T) {
 	setupAdapterEnv(t)
+	// 通知会启动模型 run，用本地终态错误隔离远端连接和重试时延
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "notification model fixture", http.StatusBadRequest)
+	}))
+	t.Cleanup(server.Close)
+	agentDir := os.Getenv("RIVO_AGENT_DIR")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	models := fmt.Sprintf(`{"providers":{"fixture":{"baseUrl":%q,"api":"openai-responses","apiKey":"test-key","models":[{"id":"fixture","contextWindow":100000,"maxTokens":1000}]}}}`, server.URL)
+	for name, body := range map[string]string{"models.json": models, "settings.json": `{"defaultProvider":"fixture","defaultModel":"fixture"}`} {
+		if err := os.WriteFile(filepath.Join(agentDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
@@ -25,14 +44,17 @@ func TestNotificationPathSurvivesSessionSwitch(t *testing.T) {
 	}
 	r := New(cfg, first.Cwd(), "")
 	r.Attach(first)
+	t.Cleanup(func() { r.app.Close() })
 
-	var mu sync.Mutex
-	var sent []tea.Msg
+	ended := make(chan struct{}, 1)
 	r.mu.Lock()
 	r.send = func(msg tea.Msg) {
-		mu.Lock()
-		sent = append(sent, msg)
-		mu.Unlock()
+		if end, ok := msg.(tui.BackgroundRunMsg); ok && !end.Running {
+			select {
+			case ended <- struct{}{}:
+			default:
+			}
+		}
 	}
 	r.mu.Unlock()
 
@@ -61,19 +83,9 @@ func TestNotificationPathSurvivesSessionSwitch(t *testing.T) {
 		t.Fatal("notification was not enqueued")
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		for _, msg := range sent {
-			if end, ok := msg.(tui.BackgroundRunMsg); ok && !end.Running {
-				mu.Unlock()
-				return
-			}
-		}
-		mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no background end message after session switch")
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	t.Fatalf("no background end message after session switch: %#v", sent)
 }

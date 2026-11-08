@@ -79,7 +79,7 @@ func (r *Read) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	limit, hasLimit := params.Limit, params.Limit > 0
 
 	// 1.解析路径后整读
-	absPath, err := resolvePathFrom(path, r.WorkingDir)
+	absPath, err := resolvePathFrom(path, toolWorkingDir(ctx, r.WorkingDir))
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

@@ -1,6 +1,9 @@
 package session
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -35,6 +38,27 @@ func (m *SessionManager) BuildContext() ctxview.ContextView {
 	// 4.生成上下文条目：compaction 与被省略的目标有特殊处理，其余类型不产出条目
 	ctx.Entries, ctx.UsageStale = buildEntries(path, selected, compaction, edits)
 	return ctx
+}
+
+// BranchToolDetails 按原始父链读取成功工具详情，不受模型上下文裁剪影响
+func (m *SessionManager) BranchToolDetails(toolName string) ([]json.RawMessage, error) {
+	var details []json.RawMessage
+	for _, entry := range m.activePath() {
+		message, ok := entry.(*MessageEntry)
+		if !ok {
+			continue
+		}
+		result, ok := message.Message.(llm.ToolResultMessage)
+		if !ok || result.ToolName != toolName || result.IsError || result.Details == nil {
+			continue
+		}
+		raw, err := json.Marshal(result.Details)
+		if err != nil {
+			return nil, fmt.Errorf("session: encode tool details for entry %s: %w", entry.base().ID, err)
+		}
+		details = append(details, raw)
+	}
+	return details, nil
 }
 
 // applySettings 从完整路径提取思考等级与模型

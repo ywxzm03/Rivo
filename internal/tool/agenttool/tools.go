@@ -9,15 +9,19 @@ import (
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
 	toolpkg "github.com/ywxzm03/Rivo/internal/tool"
 	"github.com/ywxzm03/Rivo/internal/tool/backgroundbash"
+	"github.com/ywxzm03/Rivo/internal/tool/codemode"
 )
 
 // childTools 构造子 agent 的工具集。
-// fork 复用父的 agent 与 TaskStop 实例,写类工具换绑子 transcript 的实例
+// fork 复用父的 agent 与 TaskStop 实例，写类工具与 codemode 换绑子会话
 func childTools(parent []llm.Tool, fork bool, childSession *session.SessionManager, taskStore *taskpkg.Store) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(parent))
 	for _, tool := range parent {
 		// 1.写类工具必须换实例,否则子 agent 的改动会进入父会话的 undo 快照
 		switch tool.(type) {
+		case *codemode.Tool:
+			tools = append(tools, codemode.New(childSession))
+			continue
 		case *toolpkg.Write:
 			tools = append(tools, &toolpkg.Write{History: toolpkg.Tracker(childSession.FileHistory())})
 			continue

@@ -11,6 +11,7 @@ import (
 	"github.com/ywxzm03/Rivo/internal/tool"
 	"github.com/ywxzm03/Rivo/internal/tool/agenttool"
 	"github.com/ywxzm03/Rivo/internal/tool/backgroundbash"
+	"github.com/ywxzm03/Rivo/internal/tool/codemode"
 	"github.com/ywxzm03/Rivo/internal/tool/sendmessagetool"
 	"github.com/ywxzm03/Rivo/internal/tool/taskstoptool"
 )
@@ -26,7 +27,9 @@ type Deps struct {
 	// Launcher 供 agent 工具启动子任务
 	Launcher agenttool.Launcher
 	// Messenger 供 send_message 工具投递消息
-	Messenger sendmessagetool.Messenger
+	Messenger       sendmessagetool.Messenger
+	CodemodeEnabled bool             // App 解析后的最终开关
+	CodemodeHistory codemode.History // 当前会话的原始父链
 }
 
 // Build 返回内置工具集合，顺序即模型看到的工具顺序
@@ -46,6 +49,9 @@ func Build(deps Deps) []llm.Tool {
 	// PowerShell 只在 Windows 上提供
 	if runtime.GOOS == "windows" {
 		tools = append(tools, &tool.PowerShell{WorkingDir: deps.WorkingDir})
+	}
+	if deps.CodemodeEnabled {
+		tools = append(tools, codemode.New(deps.CodemodeHistory))
 	}
 	return tools
 }

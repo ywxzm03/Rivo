@@ -17,6 +17,7 @@ type Config struct {
 	ProviderID    string
 	ModelID       string
 	ThinkingLevel llm.ThinkingLevel
+	Codemode      config.CodemodeSettings
 	// Warnings 是加载期的非致命警告，由调用方输出到 stderr
 	Warnings []string
 	// registry 是内置与 models.json 自定义 provider 的合并注册表
@@ -49,6 +50,7 @@ func Load() (Config, error) {
 	if err != nil {
 		cfg.Warnings = append(cfg.Warnings, err.Error())
 	}
+	cfg.Codemode = settings.Codemode
 	models, err := config.LoadModels()
 	if err != nil {
 		cfg.Warnings = append(cfg.Warnings, err.Error())

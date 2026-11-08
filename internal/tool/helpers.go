@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +12,14 @@ import (
 
 func textContents(text string) []llm.Content {
 	return []llm.Content{llm.TextContent{Text: text}}
+}
+
+// toolWorkingDir 优先使用当前 agent 的目录，独立直调沿用工具配置
+func toolWorkingDir(ctx context.Context, configured string) string {
+	if cwd := llm.CurrentWorkingDir(ctx); cwd != "" {
+		return cwd
+	}
+	return configured
 }
 
 func resolvePathFrom(path, cwd string) (string, error) {

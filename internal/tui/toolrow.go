@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,6 +173,12 @@ func formatArguments(args map[string]any) string {
 func toolRowArgument(name string, args map[string]any, expanded bool) string {
 	path := toolPath(args)
 	switch name {
+	case "codemode":
+		if code := codemodeCodeTitle(argString(args, "code")); code != "" {
+			quoted := strconv.Quote(ansi.Truncate(code, rowArgumentChars-8, "…"))
+			return `code: "` + ansi.Truncate(quoted[1:len(quoted)-1], rowArgumentChars-8, "…") + `"`
+		}
+		return ""
 	case "bash", "powershell":
 		return toolRowCommand(argString(args, "command"), expanded)
 	case "grep", "find":
@@ -293,11 +300,17 @@ func hardWrap(text string, width int) []string {
 // renderToolRow 画一条调用行和它的结果块
 func renderToolRow(call ToolCallView, width int, expanded bool, now time.Time) []string {
 	lines := wrapToolRowTitle(toolRowDot(call, now), toolRowCallTitle(call, expanded), width)
+	if call.Name == "codemode" {
+		lines = codemodeFitRows(lines, width)
+	}
 	return append(lines, renderToolRowResult(call, width, expanded)...)
 }
 
 // renderToolRowResult 画 ⎿ 起头的结果块
 func renderToolRowResult(call ToolCallView, width int, expanded bool) []string {
+	if call.Name == "codemode" {
+		return renderCodemodeResult(call, width, expanded)
+	}
 	args := toolArgs(call)
 	// 结果区只在工具开始执行后才有，pending 阶段只画调用行；
 	// 点的呼吸与结果区是否存在是两件事

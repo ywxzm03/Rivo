@@ -122,7 +122,7 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
-	absPath, isDirectory, err := resolveGrepPath(options.searchPath, g.WorkingDir)
+	absPath, isDirectory, err := resolveGrepPath(options.searchPath, toolWorkingDir(ctx, g.WorkingDir))
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

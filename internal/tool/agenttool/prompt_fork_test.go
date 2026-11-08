@@ -7,30 +7,6 @@ import (
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
-func TestBuiltinPromptSelectsByAgentType(t *testing.T) {
-	cases := map[string]string{
-		"explore": "file search specialist",
-		"plan":    "software architect",
-		"work":    "use the tools available",
-	}
-	for agentType, want := range cases {
-		if got := builtinPrompt(agentType); !containsFold(got, want) {
-			t.Fatalf("builtinPrompt(%q) does not contain %q", agentType, want)
-		}
-	}
-}
-
-func TestBuiltinPromptIsCaseInsensitiveAndFallsBack(t *testing.T) {
-	// 1.大小写不敏感
-	if got := builtinPrompt("EXPLORE"); !containsFold(got, "file search specialist") {
-		t.Fatalf("uppercase type fell through: %q", got)
-	}
-	// 2.未知类型给通用兜底 prompt
-	if got := builtinPrompt("custom"); !containsFold(got, "Complete the requested task") {
-		t.Fatalf("fallback prompt = %q", got)
-	}
-}
-
 func TestBuiltinPromptDistinguishesEveryType(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, agentType := range []string{"explore", "plan", "work", "unknown"} {

@@ -22,7 +22,7 @@ type toolRenderState struct {
 }
 
 func (s toolRenderState) callExpanded(group *ToolGroupView, call ToolCallView) bool {
-	return s.allExpanded || s.calls[group.ID+"/"+call.ID]
+	return s.allExpanded || s.calls[call.ID]
 }
 
 func (s toolRenderState) groupExpanded(group *ToolGroupView) bool {

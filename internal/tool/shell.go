@@ -42,6 +42,7 @@ func executeShellCommand(
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	workingDir = toolWorkingDir(ctx, workingDir)
 	if workingDir == "" {
 		workingDir, err = os.Getwd()
 		if err != nil {
