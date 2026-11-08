@@ -63,6 +63,7 @@ type SubagentSnapshotMsg struct {
 	RestoreMessage *ComposerPayload
 	// RestoreMessages 是从子任务队列撤回、要按顺序放回编辑器的输入
 	RestoreMessages []ComposerPayload
+	InputHistory    *InputHistoryState
 }
 
 type subagentRefreshMsg struct{}
@@ -145,6 +146,7 @@ func (m *Model) applySubagentSnapshot(snapshot SubagentSnapshot) {
 	previousTasks := m.state.Subagents.Tasks
 	snapshot = shallowSubagentSnapshot(snapshot)
 	m.state.Subagents = snapshot
+	m.reconcileHistoryScopes(snapshot.Tasks)
 	waitingChanged := previousWaiting != m.backgroundWaitingLabel()
 	// 选中项消失时先落到邻居,没有再回 main 行,避免光标直接跳走
 	if m.panel.selectedTaskID != "" && !hasSubagentTask(snapshot.Tasks, m.panel.selectedTaskID) {
@@ -310,6 +312,7 @@ func (m *Model) ensureTypingFocus(msg tea.KeyMsg) bool {
 // 从 child view 进入列表时保留当前查看任务作为方向键锚点
 func (m *Model) setTaskFocus(focused bool) {
 	if m.panel.taskSelector != focused {
+		m.invalidateHistoryInput()
 		m.panel.taskSelector = focused
 		if focused {
 			if m.panel.viewingTaskID != "" && hasSubagentTask(m.state.Subagents.Tasks, m.panel.selectedTaskID) {
@@ -348,6 +351,7 @@ func (m *Model) selectSubagent(direction int) bool {
 	if len(tasks) == 0 || direction == 0 {
 		return false
 	}
+	m.invalidateHistoryInput()
 	position := -1
 	if m.panel.mainSelected {
 		position = 0
@@ -378,6 +382,9 @@ func (m *Model) selectSubagent(direction int) bool {
 }
 
 func (m *Model) enterSelectedSubagent() tea.Cmd {
+	if cmd, preparing := m.prepareHistoryScope(m.selectedHistoryScope()); preparing {
+		return cmd
+	}
 	if m.panel.mainSelected || m.panel.selectedTaskID == "" {
 		if m.panel.viewingTaskID != "" {
 			return m.exitSubagentViewCmd()
@@ -404,13 +411,14 @@ func (m *Model) enterSubagentView(id string) {
 	if !ok {
 		return
 	}
+	m.activateHistoryScope(id)
 	if m.panel.viewingTaskID == "" {
 		m.panel.mainMessages = cloneMessages(m.state.Messages)
 	}
 	m.panel.viewingTaskID = id
 	m.panel.selectedTaskID = id
 	m.panel.mainSelected = false
-	// 进入 child view 后先保持输入框焦点;第一次 Up/Down 再进入任务列表
+	// 进入 child view 后保持输入框焦点，Left 显式进入任务列表
 	m.panel.taskSelector = false
 	m.state.Subagents.ViewingTaskID = id
 	m.state.Messages = cloneMessages(task.Messages)
@@ -459,6 +467,7 @@ func (m *Model) exitSubagentView() {
 	if m.panel.viewingTaskID == "" {
 		return
 	}
+	m.activateHistoryScope(m.composer.histories.persistent.metadata.SessionID)
 	m.panel.viewingTaskID = ""
 	m.panel.selectedTaskID = ""
 	m.panel.mainSelected = true
@@ -580,7 +589,13 @@ func (m *Model) taskRows() []string {
 	}
 	mainDot := colored(taskDotColor(mainFilled, false), taskStateDot(mainFilled, false))
 	var rows []string
-	rows = append(rows, taskListIndent+taskCursor(mainSelected)+" "+mainDot+" main")
+	mainRow := taskListIndent + taskCursor(mainSelected) + " " + mainDot + " main"
+	if focused {
+		mainRow += colored(mutedColor, "  esc input")
+	} else if m.canFocusHistoryTasks() {
+		mainRow += colored(mutedColor, "  ← tasks")
+	}
+	rows = append(rows, ansi.Truncate(mainRow, m.width, "…"))
 	// 超出上限时保留最近的若干任务,避免把输入坞挤出屏幕
 	budget := m.taskListLimit() - len(rows)
 	sorted := m.state.Subagents.sortedTasks()
@@ -705,6 +720,8 @@ func (m *Model) restoreSubagentMessages(messages []ComposerPayload) {
 		m.layout()
 		return
 	}
+	m.invalidateHistoryInput()
+	m.currentHistory().navigation.lastText = nil
 	var parts []string
 	for _, message := range messages {
 		if text := strings.TrimSpace(m.editorTextForPayload(message)); text != "" {

@@ -7,13 +7,7 @@ type composer struct {
 	// completion 是当前补全候选下标，completionHidden 隐藏候选列表
 	completion       int
 	completionHidden bool
-	// history 与 historyPos 支撑上下键翻历史，historyMessages 保留对应附件
-	history         []string
-	historyMessages []ComposerPayload
-	historyPos      int
-	// draft 是翻历史时暂存的当前输入
-	draft        string
-	draftMessage *ComposerPayload
+	histories        composerHistories // 各 scope 的本地条目及共享持久快照
 	// pastes 把折叠标记映射回粘贴原文，images 同理映射图片
 	pastes       map[int]string
 	pasteCounter int

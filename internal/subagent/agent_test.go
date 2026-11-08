@@ -48,7 +48,7 @@ func TestManagerContinueReusesTaskID(t *testing.T) {
 	}
 	waitForTaskStatus(t, manager.Store(), first.TaskID, taskpkg.StatusCompleted)
 	manager.Store().DrainNotifications()
-	second, err := manager.Continue(context.Background(), first.TaskID, "follow up")
+	second, err := manager.Continue(context.Background(), first.TaskID, "follow up", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,10 +382,10 @@ func TestContinueRejectsEmptyInput(t *testing.T) {
 	manager := NewManager(taskpkg.NewStore(), fakeRuntime(func(context.Context, string) (*llm.AssistantMessage, error) {
 		return &llm.AssistantMessage{}, nil
 	}))
-	if _, err := manager.Continue(context.Background(), "", "x"); err == nil {
+	if _, err := manager.Continue(context.Background(), "", "x", nil); err == nil {
 		t.Fatal("empty task ID accepted")
 	}
-	if _, err := manager.Continue(context.Background(), "task-1", "  "); err == nil {
+	if _, err := manager.Continue(context.Background(), "task-1", "  ", nil); err == nil {
 		t.Fatal("empty prompt accepted")
 	}
 }
@@ -396,7 +396,7 @@ func TestContinueRejectsUnknownTask(t *testing.T) {
 	manager := NewManager(taskpkg.NewStore(), fakeRuntime(func(context.Context, string) (*llm.AssistantMessage, error) {
 		return &llm.AssistantMessage{}, nil
 	}))
-	_, err := manager.Continue(context.Background(), "missing", "x")
+	_, err := manager.Continue(context.Background(), "missing", "x", nil)
 	var stopErr *taskpkg.StopTaskError
 	if !errors.As(err, &stopErr) || stopErr.Code != "not_found" {
 		t.Fatalf("error = %v, want not_found StopTaskError", err)
@@ -415,7 +415,7 @@ func TestContinueRejectsRunningTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Continue(context.Background(), launched.TaskID, "again"); err == nil {
+	if _, err := manager.Continue(context.Background(), launched.TaskID, "again", nil); err == nil {
 		t.Fatal("continuation of a running task was accepted")
 	}
 	close(block)

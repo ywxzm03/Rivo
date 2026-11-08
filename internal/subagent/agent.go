@@ -74,7 +74,7 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 	}
 	// 首次注册先占住稳定 ID,runtime 在 lifecycle 能发布任何终态回调之前挂上
 	toolContext, hasToolContext := llm.CurrentToolContext(ctx)
-	spec := taskpkg.AgentSpec{ID: stateID, Description: input.Description, Prompt: input.Prompt, AgentType: agentType, Model: modelValue(input.Model), Thinking: thinkingValue(input.Thinking), Worktree: input.Worktree != nil && *input.Worktree}
+	spec := taskpkg.AgentSpec{ID: stateID, Description: input.Description, Prompt: input.Prompt, Origin: input.Origin, AgentType: agentType, Model: modelValue(input.Model), Thinking: thinkingValue(input.Thinking), Worktree: input.Worktree != nil && *input.Worktree}
 	if hasToolContext {
 		spec.ParentContext = &toolContext.Context
 		spec.ParentConfig = &toolContext.Config
@@ -110,7 +110,7 @@ func (m *Manager) finishLaunchFailure(taskID string, token uint64, input taskpkg
 
 // Continue 用同一个稳定 agent ID 恢复终态任务。旧 lifecycle 先取消并完全 drain,
 // 然后才挂上新 runtime。
-func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.AgentLaunched, error) {
+func (m *Manager) Continue(ctx context.Context, taskID, prompt string, origin *llm.UserInputOrigin) (taskpkg.AgentLaunched, error) {
 	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(prompt) == "" {
 		return taskpkg.AgentLaunched{}, errors.New("agent: task ID and prompt are required")
 	}
@@ -151,6 +151,7 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 	agentType := agentTask.AgentType
 	runtime, err := m.factory(ctx, taskpkg.AgentSpec{
 		ID: taskID, Description: task.Base().Description, Prompt: prompt,
+		Origin:          origin,
 		AgentType:       agentType,
 		WorktreePath:    agentTask.WorktreePath,
 		Worktree:        agentTask.Worktree,
@@ -160,7 +161,7 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 	if err != nil {
 		return taskpkg.AgentLaunched{}, err
 	}
-	input := taskpkg.AgentInput{Description: task.Base().Description, Prompt: prompt, SubagentType: &agentType}
+	input := taskpkg.AgentInput{Description: task.Base().Description, Prompt: prompt, Origin: origin, SubagentType: &agentType}
 	if err := m.launch(ctx, taskID, runtime, input, func() (uint64, error) {
 		return m.store.RegisterContinuation(taskID, runtime, prompt)
 	}); err != nil {
@@ -246,7 +247,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 	run := runtime.Run
 	if run == nil {
 		run = func(runCtx context.Context, prompt string) (*llm.AssistantMessage, error) {
-			return runtime.Agent.RunMessage(runCtx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: prompt}}})
+			return runtime.Agent.RunMessage(runCtx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: prompt}}, Origin: input.Origin})
 		}
 	}
 	reply, runErr := run(ctx, input.Prompt)

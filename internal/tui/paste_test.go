@@ -183,9 +183,9 @@ func TestSubmitExpandsPaste(t *testing.T) {
 	if len(m.composer.pastes) != 0 || m.editor.Value() != "" {
 		t.Fatalf("submit should clear pastes and editor: %v %q", m.composer.pastes, m.editor.Value())
 	}
-	if len(m.composer.history) != 1 || m.composer.history[0] != body+"tail" {
-		t.Fatalf("history should keep expanded text: %q", m.composer.history)
-	}
+	m.busy = false
+	press(m, tea.KeyUp)
+	assertHistoryText(t, m, body+"tail")
 }
 
 func TestSubmitLiteralMarker(t *testing.T) {

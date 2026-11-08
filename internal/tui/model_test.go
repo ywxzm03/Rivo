@@ -197,14 +197,6 @@ func TestEditorWrapHistoryAndBusyDraft(t *testing.T) {
 	}
 	press(m, tea.KeyEnter)
 	typeText(m, "draft")
-	press(m, tea.KeyUp)
-	if !strings.HasSuffix(m.editor.Value(), "second") {
-		t.Fatal("history entry missing")
-	}
-	press(m, tea.KeyDown)
-	if m.editor.Value() != "draft" {
-		t.Fatal("history lost unsubmitted draft")
-	}
 	m.busy = true
 	press(m, tea.KeyEnter)
 	if m.editor.Value() != "draft" || !m.busy {

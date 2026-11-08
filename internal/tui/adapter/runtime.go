@@ -62,6 +62,7 @@ type Runtime struct {
 	subagentMu          sync.Mutex
 	subagentRevision    uint64
 	subagentTranscripts map[string]*transcriptCache
+	history             inputHistoryBinding
 }
 
 // subagentSnapshotLocked 投影子任务面板。app 指针在主锁下取,
@@ -105,6 +106,9 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 	}
 	return func() tea.Msg {
 		result := op.Wait()
+		if result.Next != nil && result.Next != activeApp {
+			activeApp.Close()
+		}
 		r.mu.Lock()
 		r.operationActive = false
 		var commitErr *session.CommitError
@@ -147,8 +151,12 @@ func (r *Runtime) runOperation(req tui.Request, activeApp *app.App, value string
 		snapshot := r.snapshotLocked(reset)
 
 		r.mu.Unlock()
+		if result.Next != nil {
+			r.rebuildInputHistory(result.Next)
+		}
 		snapshot.Sessions = listSessionOptions(snapshot.Cwd)
 		snapshot.Subagents = r.subagentSnapshotLocked()
+		snapshot.InputHistory = r.inputScopeState(snapshot.Subagents.ViewingTaskID)
 		if errors.Is(result.Err, context.Canceled) {
 			result.Err = nil
 		}
@@ -179,10 +187,6 @@ func (r *Runtime) shouldResetLocked(req tui.Request, result app.OperationResult)
 
 // switchAppLocked 切换到新 App 并重置属于旧会话的投影状态
 func (r *Runtime) switchAppLocked(req tui.Request, next *app.App) {
-	// 旧 App 的后台循环与 store 钩子必须显式收尾，否则每次换会话都会泄漏
-	if previous := r.app; previous != nil && previous != next {
-		previous.Close()
-	}
 	r.app = next
 	r.namespace = next.SessionID()
 	// 新会话是另一个 App,后台 run 的结束兜底必须重新挂上
@@ -282,6 +286,9 @@ func (r *Runtime) request(req tui.Request) tea.Cmd {
 			return func() tea.Msg {
 				return tui.OperationDoneMsg{ID: req.ID, Err: err, EditorValue: userMessageEditorTextOrEmpty(message), EditorMessage: editorMessage, RestoreEditor: message != nil}
 			}
+		}
+		if message != nil && value != req.Value {
+			message.Content = []llm.Content{llm.TextContent{Text: value}}
 		}
 	}
 	// 记录操作前设置，完成后只在值真正变化时输出提示
@@ -467,6 +474,7 @@ func (r *Runtime) snapshot() tui.Snapshot {
 	r.mu.Unlock()
 	snapshot.Sessions = listSessionOptions(snapshot.Cwd)
 	snapshot.Subagents = r.subagentSnapshotLocked()
+	snapshot.InputHistory = r.inputScopeState(snapshot.Subagents.ViewingTaskID)
 	return snapshot
 }
 
@@ -518,7 +526,6 @@ func (r *Runtime) attachBackgroundHookLocked(a *app.App) {
 
 func (r *Runtime) Attach(a *app.App) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.app = a
 	r.namespace = a.SessionID()
 	r.attachBackgroundHookLocked(a)
@@ -531,6 +538,8 @@ func (r *Runtime) Attach(a *app.App) {
 			Text: "Warning: " + warning,
 		})
 	}
+	r.mu.Unlock()
+	r.rebuildInputHistory(a)
 }
 
 func (r *Runtime) RestoreSteeringMessages() []tui.ComposerPayload {

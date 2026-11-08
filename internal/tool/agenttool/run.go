@@ -29,6 +29,8 @@ type Runner struct {
 	ParentTools []llm.Tool
 	TaskStore   *taskpkg.Store
 
+	InputAccepted func(llm.UserInputOrigin)
+
 	// mu 保护模型与 stream:主 agent 切换模型时会写,子任务启动时会读
 	mu          sync.RWMutex
 	parentModel llm.Model
@@ -138,6 +140,13 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 			return nil, err
 		}
 		messages = append(messages, pendingToPersist...)
+		if r.InputAccepted != nil {
+			for _, message := range pendingToPersist {
+				if user, ok := message.(llm.UserMessage); ok && !user.Hidden && user.Origin != nil {
+					r.InputAccepted(*user.Origin)
+				}
+			}
+		}
 	}
 	if len(messages) > 0 && !spec.Continuation {
 		if _, err := sm.AppendMessages(messages); err != nil {
@@ -173,7 +182,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 		MaxTurns:   maxTurns,
 		ForkChild:  fork,
 		TaskID:     spec.ID,
-		Hooks:      agent.Hooks{CommitMessages: sm.AppendMessages},
+		Hooks:      agent.Hooks{CommitMessages: sm.AppendMessages, InputAccepted: r.InputAccepted},
 	})
 	runtime := &subagent.AgentRuntime{
 		Agent: child, OutputFile: transcriptPath, WorktreePath: worktreePath, DoneChan: make(chan struct{}),
@@ -191,7 +200,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 		}
 	} else if spec.Continuation {
 		runtime.Run = func(ctx context.Context, promptText string) (*llm.AssistantMessage, error) {
-			return child.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: promptText}}})
+			return child.RunMessage(ctx, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: promptText}}, Origin: spec.Origin})
 		}
 	}
 	runnerSucceeded = true

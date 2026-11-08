@@ -14,6 +14,10 @@ func payloadMessage(payload *tui.ComposerPayload) *llm.UserMessage {
 		return nil
 	}
 	converted := agent.PendingPayload{Text: payload.Text}
+	if payload.Origin != nil {
+		origin := domainInputOrigin(*payload.Origin)
+		converted.Origin = &origin
+	}
 	for _, image := range payload.Images {
 		converted.Images = append(converted.Images, agent.ImagePart{Data: image.Data, MIMEType: image.MIMEType})
 	}
@@ -30,6 +34,10 @@ func payloadFromMessage(message *llm.UserMessage) *tui.ComposerPayload {
 		return nil
 	}
 	payload := &tui.ComposerPayload{}
+	if message.Origin != nil {
+		origin := uiInputOrigin(*message.Origin)
+		payload.Origin = &origin
+	}
 	for _, content := range message.Content {
 		switch content := content.(type) {
 		case llm.TextContent:

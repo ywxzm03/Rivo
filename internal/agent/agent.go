@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -150,6 +149,7 @@ type ImagePart struct {
 type PendingPayload struct {
 	Text   string
 	Images []ImagePart
+	Origin *llm.UserInputOrigin
 }
 
 func (p PendingPayload) isEmpty() bool {
@@ -165,14 +165,14 @@ func (p PendingPayload) UserMessage() llm.UserMessage {
 	for _, image := range p.Images {
 		content = append(content, llm.ImageContent{Data: image.Data, MIMEType: image.MIMEType})
 	}
-	return llm.UserMessage{Content: content}
+	return llm.UserMessage{Content: content, Origin: p.Origin}
 }
 
 // PayloadFromMessage 把领域消息转成待注入内容，保留图片
 func PayloadFromMessage(message llm.UserMessage) PendingPayload { return payloadOf(message) }
 
 func payloadOf(message llm.UserMessage) PendingPayload {
-	payload := PendingPayload{}
+	payload := PendingPayload{Origin: message.Origin}
 	for _, content := range message.Content {
 		switch content := content.(type) {
 		case llm.TextContent:
@@ -289,7 +289,16 @@ func (a *Agent) AcknowledgePending(payload PendingPayload) bool {
 		return false
 	}
 	return a.acknowledgeQueue(queue, func(message pendingMessage) bool {
-		return reflect.DeepEqual(payloadOf(message.message), payload)
+		pending := payloadOf(message.message)
+		if pending.Text != payload.Text || len(pending.Images) != len(payload.Images) {
+			return false
+		}
+		for i, image := range pending.Images {
+			if image != payload.Images[i] {
+				return false
+			}
+		}
+		return true
 	})
 }
 
@@ -315,15 +324,19 @@ func (a *Agent) clearRetryableQueue(queue *pendingMessageQueue) {
 
 func (a *Agent) acknowledgeQueue(queue *pendingMessageQueue, match func(pendingMessage) bool) bool {
 	queue.mu.Lock()
-	defer queue.mu.Unlock()
 	for i, message := range queue.items {
 		if message.retryable && match(message) {
 			queue.items = append(queue.items[:i], queue.items[i+1:]...)
 			queue.revision++
 			a.clearRetryableQueue(queue)
+			queue.mu.Unlock()
+			if a.hooks.InputAccepted != nil && !message.message.Hidden && message.message.Origin != nil {
+				a.hooks.InputAccepted(*message.message.Origin)
+			}
 			return true
 		}
 	}
+	queue.mu.Unlock()
 	return false
 }
 
@@ -368,6 +381,8 @@ type Hooks struct {
 	PrepareRequest func(context.Context, PreparedRequest) (PreparedRequest, error)
 	// CommitMessages 把消息落盘并返回消息 ID
 	CommitMessages func([]llm.Message) ([]string, error)
+	// InputAccepted 通知已进入运行上下文的用户输入来源
+	InputAccepted func(llm.UserInputOrigin)
 }
 
 // New 按 Options 装配 Agent
@@ -732,7 +747,7 @@ func (a *Agent) claimPending(initialPending **pendingMessage, initialQueue **pen
 func (a *Agent) admitPending(ctx context.Context, pending pendingMessage, pendingQueue *pendingMessageQueue) (context.Context, error) {
 	userMessage := pending.message
 	if len(userMessage.Content) == 0 {
-		userMessage = llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: pending.input}}}
+		userMessage.Content = []llm.Content{llm.TextContent{Text: pending.input}}
 	}
 	ids, err := a.persistMessages([]llm.Message{userMessage})
 	if err != nil {
@@ -1337,6 +1352,13 @@ func (a *Agent) persistMessages(messages []llm.Message) ([]string, error) {
 		}
 	}
 	a.ctx.Messages = append(a.ctx.Messages, messages...)
+	if a.hooks.InputAccepted != nil {
+		for _, message := range messages {
+			if user, ok := message.(llm.UserMessage); ok && !user.Hidden && user.Origin != nil {
+				a.hooks.InputAccepted(*user.Origin)
+			}
+		}
+	}
 	return ids, nil
 }
 

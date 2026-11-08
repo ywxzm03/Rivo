@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -14,21 +15,19 @@ import (
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
+	"github.com/ywxzm03/Rivo/internal/app"
+	"github.com/ywxzm03/Rivo/internal/config"
 	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	"github.com/ywxzm03/Rivo/internal/tui/adapter"
 )
 
 func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, stdin, stdout *os.File, stderr io.Writer) (exitCode int) {
-	var runtime *adapter.Runtime
 	// panic 会跳过所有收尾逻辑并让进程直接消失;兜住它,并把子任务一起收掉
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			fmt.Fprintf(stderr, "Rivo: internal error: %v\n%s\n", recovered, debug.Stack())
 			exitCode = 1
-		}
-		if runtime != nil {
-			runtime.ShutdownSubagents()
 		}
 	}()
 	cwd, err := os.Getwd()
@@ -37,7 +36,23 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 		return 2
 	}
 	branch := gitBranch(cwd)
-	runtime = adapter.New(cfg, cwd, branch)
+	runtime := adapter.New(cfg, cwd, branch)
+	agentDir, err := config.Dir()
+	if err != nil {
+		fmt.Fprintf(stderr, "Rivo: input history directory: %v\n", err)
+		return 2
+	}
+	history := app.NewInputHistory(filepath.Join(agentDir, "history.jsonl"), runtime.NotifyHistoryFailure)
+	runtime.BindInputHistory(history)
+	defer func() {
+		runtime.Cancel()
+		runtime.Wait()
+		runtime.ShutdownSubagents()
+		runtime.Close()
+		for _, failure := range history.Close() {
+			fmt.Fprintf(stderr, "Rivo: input history: %v\n", failure)
+		}
+	}()
 	a, err := openSessionTarget(cfg, target, runtime.HandleEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
@@ -67,6 +82,7 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 		ShellList:               runtime.ShellList,
 		ShellKill:               runtime.ShellKill,
 		ShellStopAll:            runtime.ShellStopAll,
+		History:                 runtime.HistoryHandlers(),
 		WriteClipboard: func(text string) error {
 			if err := textclipboard.WriteAll(text); err == nil {
 				return nil

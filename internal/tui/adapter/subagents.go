@@ -31,7 +31,8 @@ func (r *Runtime) SubagentSnapshot() tea.Cmd {
 		if activeApp == nil || activeApp.SubagentStore() == nil {
 			return tui.SubagentSnapshotMsg{Err: app.ErrSteeringUnavailable}
 		}
-		return tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshotLocked()}
+		snapshot := r.subagentSnapshotLocked()
+		return tui.SubagentSnapshotMsg{Snapshot: snapshot, InputHistory: r.inputScopeState(snapshot.ViewingTaskID)}
 	}
 }
 
@@ -63,7 +64,8 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 			if request.Message == nil {
 				err = fmt.Errorf("subagent: missing message")
 			} else {
-				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, llm.TextOf(payloadMessage(request.Message).Content))
+				message := payloadMessage(request.Message)
+				_, err = activeApp.ContinueSubagent(context.Background(), request.TaskID, llm.TextOf(message.Content), message.Origin)
 			}
 		case "dequeue":
 			// 从子任务队列撤回:与主 agent 一样,取出后交回编辑器
@@ -85,6 +87,12 @@ func (r *Runtime) SubagentRequest(request tui.SubagentRequest) tea.Cmd {
 			}
 		}
 		result := tui.SubagentSnapshotMsg{Snapshot: r.subagentSnapshot(), Err: err, RestoreMessages: payloadsFromMessages(restored)}
+		result.InputHistory = r.inputScopeState(result.Snapshot.ViewingTaskID)
+		if request.Kind == "evict" && err == nil {
+			r.mu.Lock()
+			delete(r.history.seededScopes, request.TaskID)
+			r.mu.Unlock()
+		}
 		if err != nil {
 			result.RestoreMessage = request.Message
 		}

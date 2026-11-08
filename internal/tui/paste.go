@@ -56,7 +56,7 @@ func (m *Model) handleImage(image ImagePart) {
 		m.composer.images = make(map[int]ImagePart)
 	}
 	reserved := imageMarkerIDs(m.editor.Value())
-	id := m.nextImageID(reserved)
+	id := nextImageID(&m.composer.imageCounter, reserved)
 	m.composer.images[id] = image
 	m.editor.InsertString(imageMarker(id))
 	m.clearSelection()
@@ -106,20 +106,12 @@ func payloadHasImages(payload ComposerPayload) bool {
 	return len(payload.Images) > 0
 }
 
-// editorTextForPayload 把待发送内容还原成编辑器文本，图片重新占位
+// editorTextForPayload 把待发送内容还原成编辑器文本，复用相同的附件编号规则
 func (m *Model) editorTextForPayload(payload ComposerPayload) string {
-	reserved := imageMarkerIDs(payload.Text)
-	var b strings.Builder
-	b.WriteString(payload.Text)
-	for _, image := range payload.Images {
-		if m.composer.images == nil {
-			m.composer.images = make(map[int]ImagePart)
-		}
-		id := m.nextImageID(reserved)
-		m.composer.images[id] = image
-		b.WriteString(imageMarker(id))
-	}
-	return b.String()
+	draft := ComposerDraft{Images: m.composer.images, ImageCounter: m.composer.imageCounter}
+	appendPayloadDraft(&draft, payload)
+	m.composer.images, m.composer.imageCounter = draft.Images, draft.ImageCounter
+	return draft.Text
 }
 
 func imageMarkerIDs(text string) map[int]bool {
@@ -133,17 +125,19 @@ func imageMarkerIDs(text string) map[int]bool {
 	return ids
 }
 
-func (m *Model) nextImageID(reserved map[int]bool) int {
+func nextImageID(counter *int, reserved map[int]bool) int {
 	for {
-		m.composer.imageCounter++
-		if !reserved[m.composer.imageCounter] {
-			reserved[m.composer.imageCounter] = true
-			return m.composer.imageCounter
+		*counter = *counter + 1
+		if !reserved[*counter] {
+			reserved[*counter] = true
+			return *counter
 		}
 	}
 }
 
 func (m *Model) restoreEditorPayload(payload *ComposerPayload, fallback string) {
+	m.invalidateHistoryInput()
+	m.currentHistory().navigation.lastText = nil
 	m.resetPastes()
 	value := fallback
 	if payload != nil {

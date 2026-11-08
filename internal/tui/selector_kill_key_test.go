@@ -74,22 +74,6 @@ func TestEditorXIsPlainCharWithText(t *testing.T) {
 	}
 }
 
-// 主视图输入框为空时 x 仍是命令键
-func TestMainViewXRequiresEmptyEditor(t *testing.T) {
-	m, requests := killKeyModel(t, "running")
-	m.panel.selectedTaskID = "agent-1"
-	m.panel.mainSelected = false
-
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-
-	if len(*requests) != 1 || (*requests)[0].Kind != "stop" {
-		t.Fatalf("stop request = %#v, want one stop", *requests)
-	}
-	if got := m.editor.Value(); got != "" {
-		t.Fatalf("editor value = %q, want empty", got)
-	}
-}
-
 // running 任务按 x 走 stop
 func TestSelectorKillRunningSendsStop(t *testing.T) {
 	m, requests := killKeyModel(t, "running")

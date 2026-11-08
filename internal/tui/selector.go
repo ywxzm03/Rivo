@@ -40,6 +40,7 @@ func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
 		}
 		return nil
 	}
+	m.invalidateHistoryInput()
 	s := &selector{kind: kind}
 	switch kind {
 	case "model":

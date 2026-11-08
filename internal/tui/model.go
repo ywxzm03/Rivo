@@ -132,6 +132,7 @@ type Snapshot struct {
 	FollowUpInputs   []ComposerPayload
 	FollowUpRevision uint64
 	Subagents        SubagentSnapshot
+	InputHistory     *InputHistoryState
 }
 
 type queuedKind uint8
@@ -185,6 +186,7 @@ type Handlers struct {
 	ShellStopAll func() tea.Cmd
 	// ShellKill 终止单个后台 shell,供 /ps 弹窗内按 x 使用
 	ShellKill func(id string) tea.Cmd
+	History   HistoryHandlers
 }
 
 // MessageMsg 更新具有同一 ID 的消息，OperationDoneMsg 才结束整个用户操作
@@ -235,6 +237,7 @@ type OperationDoneMsg struct {
 	ResetSessionUI  bool
 	ResetTranscript bool
 	Quit            bool
+	InputHistory    *InputHistoryState
 }
 type flushMsg struct{}
 
@@ -354,7 +357,8 @@ func (m *Model) Init() tea.Cmd {
 	}
 	prompt := m.initialPrompt
 	m.initialPrompt = ""
-	return tea.Batch(textarea.Blink, m.dispatch("run", prompt))
+	message := m.recordSubmission(prompt, ComposerPayload{Text: prompt})
+	return tea.Batch(textarea.Blink, m.dispatchMessage(RequestRun, prompt, &message))
 }
 
 // startSpinner 只在没有活动 tick 链时启动旋转器
@@ -413,6 +417,7 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 			m.applySnapshot(*msg.Snapshot)
 		}
 	}
+	m.installInputHistory(msg.InputHistory)
 	m.steeringRestored = false
 	m.queues.followUpRestored = false
 	if msg.ResetTranscript {
@@ -435,6 +440,8 @@ func (m *Model) handleOperationDone(msg OperationDoneMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.RestoreEditor && m.panel.viewingTaskID == "" {
+		m.invalidateHistoryInput()
+		m.currentHistory().navigation.lastText = nil
 		m.resetPastes()
 		editorValue := msg.EditorValue
 		if msg.EditorMessage != nil {
@@ -485,6 +492,18 @@ func (m *Model) handleSteeringState(msg SteeringStateMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case HistoryLookupMsg:
+		return m, m.handleHistoryLookup(msg)
+	case ScopePreparedMsg:
+		return m, m.handleScopePrepared(msg)
+	case HistoryRecordMsg:
+		if msg.Err != nil {
+			m.notice("Input history: " + msg.Err.Error())
+			if m.handlers.History.Acknowledge != nil {
+				m.handlers.History.Acknowledge(msg.Origin)
+			}
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = max(1, msg.Width), max(1, msg.Height)
 		m.layout()
@@ -509,7 +528,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.handleKey(msg)
 	case tea.MouseMsg:
-		return m, m.handleMouse(msg)
+		cmd := m.handleMouse(msg)
+		if m.hasSelection() {
+			m.invalidateHistoryInput()
+		}
+		return m, cmd
 	case MessageMsg:
 		if m.panel.viewingTaskID != "" {
 			// 主 Agent 的流式消息属于 main transcript;child 视图只缓存
@@ -623,6 +646,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		snapshotApplied := msg.Snapshot.Revision >= m.state.Subagents.Revision && (msg.Err == nil || msg.Snapshot.Revision > 0)
 		if snapshotApplied {
 			m.applySubagentSnapshot(msg.Snapshot)
+			if msg.InputHistory != nil {
+				if msg.Snapshot.ViewingTaskID != m.panel.viewingTaskID {
+					if msg.Snapshot.ViewingTaskID == "" {
+						m.exitSubagentView()
+					} else {
+						m.enterSubagentView(msg.Snapshot.ViewingTaskID)
+					}
+				}
+				m.installInputHistory(msg.InputHistory)
+			}
 		}
 		if msg.Err != nil {
 			if msg.RestoreMessage != nil && m.panel.viewingTaskID != "" {
@@ -670,6 +703,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notice("Clipboard paste failed: " + msg.err.Error())
 		} else {
+			m.invalidateHistoryInput()
+			m.composer.histories.lookup.editorRevision++
 			for _, image := range msg.data.Images {
 				m.handleImage(image)
 			}
@@ -805,11 +840,6 @@ func (m *Model) dispatchMessage(kind RequestKind, value string, message *Compose
 	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: kind, Value: value, Payload: message}), m.startSubagentRefresh())
 }
 
-func (m *Model) dispatchSteering(value string) tea.Cmd {
-	message := textPayload(value)
-	return m.dispatchSteeringMessage(value, &message)
-}
-
 func (m *Model) dispatchSteeringMessage(value string, message *ComposerPayload) tea.Cmd {
 	if !m.busy {
 		return nil
@@ -832,11 +862,6 @@ func (m *Model) dispatchSteeringMessage(value string, message *ComposerPayload) 
 		return nil
 	}
 	return nil
-}
-
-func (m *Model) dispatchFollowUp(value string) tea.Cmd {
-	message := textPayload(value)
-	return m.dispatchFollowUpMessage(value, &message)
 }
 
 func (m *Model) dispatchFollowUpMessage(value string, message *ComposerPayload) tea.Cmd {
@@ -933,6 +958,8 @@ func (m *Model) restoreCompactionMessages(queued []compactionQueuedMessage) {
 		return
 	}
 	current := m.editor.Value()
+	m.invalidateHistoryInput()
+	m.currentHistory().navigation.lastText = nil
 	var currentMessage *ComposerPayload
 	if message, ok := m.buildPayload(); ok {
 		copy := clonePayload(message)
@@ -1236,9 +1263,8 @@ func (m *Model) resetSessionUI() {
 	m.editor.Reset()
 	m.compactionQueuedMessages = nil
 	m.resetPastes()
-	m.composer.history, m.composer.draft, m.composer.draftMessage = nil, "", nil
-	m.composer.historyMessages = nil
-	m.composer.historyPos, m.composer.completion = 0, 0
+	m.composer.histories = composerHistories{}
+	m.composer.completion = 0
 	m.composer.completionHidden = true
 	m.composer.selector = nil
 	m.shellDialog = nil
@@ -1385,6 +1411,7 @@ func (m *Model) applyMetadata(s Snapshot) {
 	for i := range m.state.Models {
 		m.state.Models[i].Levels = append([]string(nil), s.Models[i].Levels...)
 	}
+	m.installInputHistory(s.InputHistory)
 }
 
 func (m *Model) lastMessageID() string {
