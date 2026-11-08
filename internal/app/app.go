@@ -130,7 +130,7 @@ func fallbackWarning(cfg provider.Config, proj ctxview.ContextView) string {
 	return fmt.Sprintf("Could not restore model %s/%s. Using %s/%s", proj.Provider, proj.Model, cfg.ProviderID, modelID)
 }
 
-// New 创建 App，会话文件写入默认目录 ~/.rivo/agent/sessions/
+// New 创建 App，会话文件写入默认目录 ~/.rivo/sessions/
 func New(cfg provider.Config, onEvent llm.AgentEventSink) (*App, error) {
 	return NewWithSessionDir(cfg, "", onEvent)
 }

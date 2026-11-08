@@ -20,7 +20,7 @@ const APIOpenAICompletions = "openai-completions"
 // agentDirEnv 是 agent 配置目录的环境变量覆盖名
 const agentDirEnv = "RIVO_AGENT_DIR"
 
-// Settings 对应 ~/.rivo/agent/settings.json
+// Settings 对应 ~/.rivo/settings.json
 type Settings struct {
 	DefaultProvider      string           `json:"defaultProvider"`
 	DefaultModel         string           `json:"defaultModel"`
@@ -126,7 +126,7 @@ func (p Provider) HasAPI() bool {
 	return p.apiSet || (p.API != "" && !p.apiDefaulted)
 }
 
-// ModelsFile 对应 ~/.rivo/agent/models.json，解析时保持文件顺序
+// ModelsFile 对应 ~/.rivo/models.json，解析时保持文件顺序
 type ModelsFile struct {
 	Providers []NamedProvider
 }
@@ -137,7 +137,7 @@ type NamedProvider struct {
 	Provider Provider
 }
 
-// Dir 返回 agent 配置目录 ~/.rivo/agent；设置 RIVO_AGENT_DIR 时使用其值
+// Dir 返回配置目录 ~/.rivo；设置 RIVO_AGENT_DIR 时使用其值
 func Dir() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv(agentDirEnv)); dir != "" {
 		return dir, nil
@@ -146,7 +146,7 @@ func Dir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("config: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent"), nil
+	return filepath.Join(home, ".rivo"), nil
 }
 
 // LoadSettings 读取 settings.json，文件不存在返回零值配置

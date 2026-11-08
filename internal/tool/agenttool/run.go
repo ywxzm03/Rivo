@@ -257,7 +257,7 @@ func transcriptPathFor(sessionDir, taskID string) string {
 
 // loadDefinition 读取非内置、非 fork 类型对应的 agent 定义。
 // 项目定义始终从父项目根解析:worktree 基于 origin/HEAD,未跟踪的
-// .rivo/agent/agents 文件不会出现在里面
+// .rivo/agents 文件不会出现在里面
 func (r *Runner) loadDefinition(spec taskpkg.AgentSpec, _ string, fork bool) (*Definition, error) {
 	if fork || isBuiltinAgent(spec.AgentType) {
 		return nil, nil
