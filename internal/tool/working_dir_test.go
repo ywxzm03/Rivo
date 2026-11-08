@@ -57,16 +57,17 @@ func TestFileToolsUseCurrentAgentWorkingDirectory(t *testing.T) {
 
 func TestForegroundShellUsesCurrentAgentWorkingDirectory(t *testing.T) {
 	parent, child := t.TempDir(), t.TempDir()
-	physicalChild, err := filepath.EvalSymlinks(child)
-	if err != nil {
-		t.Fatal(err)
+	for dir, value := range map[string]string{parent: "parent", child: "child"} {
+		if err := os.WriteFile(filepath.Join(dir, "cwd-marker.txt"), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx := llm.WithWorkingDir(context.Background(), child)
-	result, err := (&Bash{WorkingDir: parent}).Execute(ctx, map[string]any{"command": "pwd -P"})
+	result, err := (&Bash{WorkingDir: parent}).Execute(ctx, map[string]any{"command": "cat cwd-marker.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(llm.TextOf(result.Content)); got != physicalChild {
-		t.Fatalf("foreground shell cwd = %q, want current agent %q", got, physicalChild)
+	if got := strings.TrimSpace(llm.TextOf(result.Content)); got != "child" {
+		t.Fatalf("foreground shell read %q, want current agent marker", got)
 	}
 }

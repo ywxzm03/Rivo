@@ -24,7 +24,7 @@ func TestCodemodeUsesCurrentToolContext(t *testing.T) {
 	var a *Agent
 	probe := &testutil.Tool{ToolName: "probe", Run: func(ctx context.Context, _ map[string]any) (llm.ToolResult, error) {
 		host, ok := llm.CurrentToolContext(ctx)
-		if !ok || host.Config.SessionID != "current-session" || host.AgentID != "child-task" || !host.ForkChild || llm.CurrentWorkingDir(ctx) != cwd || llm.CurrentUserMessageID(ctx) != "user-entry" {
+		if !ok || host.Config.SessionID != "current-session" || host.TaskID != "current-session" || !host.ForkChild || llm.CurrentWorkingDir(ctx) != cwd || llm.CurrentUserMessageID(ctx) != "user-entry" {
 			return llm.ToolResult{}, fmt.Errorf("lost current tool context: %+v", host)
 		}
 		if !strings.HasPrefix(host.Runtime.CallID, "parent/") || host.Runtime.ExecuteNested != nil || host.Runtime.Update != nil || host.Runtime.EarlierResults != nil {
@@ -36,7 +36,7 @@ func TestCodemodeUsesCurrentToolContext(t *testing.T) {
 		return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "verified"}}}, nil
 	}}
 	var starts, ends int
-	a = New(Options{Config: llm.AgentConfig{SessionID: "current-session"}, Context: llm.Context{Tools: []llm.Tool{codemode.New(emptyCodemodeHistory{}), probe}}, WorkingDir: cwd, AgentID: "child-task", ForkChild: true, Events: func(event llm.AgentEvent) error {
+	a = New(Options{Config: llm.AgentConfig{SessionID: "current-session"}, Context: llm.Context{Tools: []llm.Tool{codemode.New(emptyCodemodeHistory{}), probe}}, WorkingDir: cwd, TaskID: "current-session", ForkChild: true, Events: func(event llm.AgentEvent) error {
 		switch event := event.(type) {
 		case llm.ToolExecutionStartEvent:
 			starts++

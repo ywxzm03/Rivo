@@ -92,4 +92,4 @@ type Details struct {
 }
 
 func (Details) ToolDetails() {}
-func init()                  { llm.RegisterToolDetails[Details]("codemode") }
+func init()                  { llm.RegisterToolDetails[Details]("codemode", "codemode") }

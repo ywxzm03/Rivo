@@ -20,7 +20,7 @@ func (f *fakeLauncher) Start(_ context.Context, input taskpkg.AgentInput) (taskp
 	if f.err != nil {
 		return taskpkg.AgentLaunched{}, f.err
 	}
-	return taskpkg.AgentLaunched{AgentID: "agent-1", Status: "async_launched"}, nil
+	return taskpkg.AgentLaunched{TaskID: "agent-1", Status: "async_launched"}, nil
 }
 
 func TestToolSatisfiesLLMToolContract(t *testing.T) {
@@ -84,7 +84,7 @@ func TestExecuteParsesFullInput(t *testing.T) {
 	if text := result.Content[0].(llm.TextContent).Text; text != "Started subagent agent-1" {
 		t.Fatalf("result text = %q", text)
 	}
-	if details, ok := result.Details.(taskpkg.AgentLaunched); !ok || details.AgentID != "agent-1" {
+	if details, ok := result.Details.(taskpkg.AgentLaunched); !ok || details.TaskID != "agent-1" {
 		t.Fatalf("result details = %#v", result.Details)
 	}
 }

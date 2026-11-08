@@ -15,7 +15,7 @@ type toolExecutor struct {
 }
 
 func (a *Agent) toolExecutor() toolExecutor {
-	return toolExecutor{context: llm.ToolContext{Context: a.ctx, Config: a.cfg, ForkChild: a.forkChild, AgentID: a.agentID}, workingDir: a.workingDir}
+	return toolExecutor{context: llm.ToolContext{Context: a.ctx, Config: a.cfg, ForkChild: a.forkChild, TaskID: a.taskID}, workingDir: a.workingDir}
 }
 
 func (e toolExecutor) find(name string) llm.Tool {

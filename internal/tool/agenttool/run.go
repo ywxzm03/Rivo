@@ -52,6 +52,10 @@ func (r *Runner) modelAndStream() (llm.Model, llm.StreamFn) {
 
 // Run 按 spec 装配并返回一个已就绪的子 agent runtime
 func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.AgentRuntime, error) {
+	// 任务号直接作为会话号与文件名,非法值必须在创建任何文件或工作树之前拒绝
+	if err := session.ValidateID(spec.ID); err != nil {
+		return nil, fmt.Errorf("subagent: invalid task id %q: %w", spec.ID, err)
+	}
 	cwd := r.ParentCwd
 	worktreePath := spec.WorktreePath
 	worktreeBase := ""
@@ -60,7 +64,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 	// 1.失败路径要回收刚创建的空 worktree,避免留下垃圾目录
 	defer func() {
 		if createdWorktree && !runnerSucceeded {
-			_ = cleanupSubagentWorktree(worktreePath, r.ParentCwd, worktreeBase, metadataPathFor(worktreePath, r.SessionDir, spec.ID))
+			_ = cleanupSubagentWorktree(worktreePath, r.ParentCwd, worktreeBase, metadataPathFor(r.SessionDir, spec.ID))
 		}
 	}()
 	if spec.Worktree && worktreePath == "" {
@@ -77,12 +81,12 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 	if r.SessionDir == "" {
 		return nil, fmt.Errorf("subagent: session directory is unavailable")
 	}
-	// 2.transcript 与元数据落在 sessionDir/subagents 下
-	transcriptPath := filepath.Join(r.SessionDir, "subagents", "agent-"+spec.ID+".jsonl")
+	// 2.transcript 与元数据落在 sessionDir/subagents 下,文件名就是任务号
+	transcriptPath := transcriptPathFor(r.SessionDir, spec.ID)
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
 		return nil, err
 	}
-	metadataPath := strings.TrimSuffix(transcriptPath, ".jsonl") + ".meta.json"
+	metadataPath := metadataPathFor(r.SessionDir, spec.ID)
 	if !spec.Continuation || createdWorktree {
 		meta := metadata{AgentType: spec.AgentType, Description: spec.Description, WorktreePath: worktreePath, WorktreeOwned: createdWorktree}
 		if err := writeMetadata(metadataPath, meta); err != nil {
@@ -168,7 +172,7 @@ func (r *Runner) Run(_ context.Context, spec taskpkg.AgentSpec) (*subagent.Agent
 		WorkingDir: cwd,
 		MaxTurns:   maxTurns,
 		ForkChild:  fork,
-		AgentID:    spec.ID,
+		TaskID:     spec.ID,
 		Hooks:      agent.Hooks{CommitMessages: sm.AppendMessages},
 	})
 	runtime := &subagent.AgentRuntime{
@@ -224,15 +228,22 @@ func writeMetadata(path string, meta metadata) error {
 	return nil
 }
 
-// openSession 打开或创建子 agent 的 transcript
+// openSession 打开或创建子 agent 的 transcript。
+// 会话号直接使用任务号,续跑时先校验已有会话头身份
 func (r *Runner) openSession(spec taskpkg.AgentSpec, transcriptPath, cwd string) (*session.SessionManager, error) {
 	if !spec.Continuation {
-		return session.NewAt(cwd, transcriptPath), nil
+		return session.NewAt(cwd, transcriptPath, spec.ID)
 	}
 	if _, err := os.Stat(transcriptPath); err != nil {
 		return nil, fmt.Errorf("subagent: transcript %q is unavailable: %w", transcriptPath, err)
 	}
-	return session.Open(transcriptPath, cwd)
+	return session.OpenWithID(transcriptPath, spec.ID)
+}
+
+// transcriptPathFor 返回任务的记录文件路径。任务号是唯一文件名主体,
+// 创建与恢复共用同一条规则
+func transcriptPathFor(sessionDir, taskID string) string {
+	return filepath.Join(sessionDir, "subagents", taskID+".jsonl")
 }
 
 // loadDefinition 读取非内置、非 fork 类型对应的 agent 定义。

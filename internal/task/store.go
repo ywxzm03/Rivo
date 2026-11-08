@@ -83,9 +83,7 @@ type RegisterSpec struct {
 	ID           string
 	Type         Type
 	Description  string
-	ToolUseID    string
 	OutputFile   string
-	AgentID      string
 	Prompt       string
 	AgentType    string
 	Model        *llm.Model
@@ -118,7 +116,7 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 	}
 	s.nextToken++
 	token := s.nextToken
-	base := StateBase{ID: id, Type: spec.Type, Status: StatusRunning, Description: spec.Description, ToolUseID: spec.ToolUseID, StartTime: time.Now(), OutputFile: spec.OutputFile, LifecycleToken: token}
+	base := StateBase{ID: id, Type: spec.Type, Status: StatusRunning, Description: spec.Description, StartTime: time.Now(), OutputFile: spec.OutputFile, LifecycleToken: token}
 	var state State
 	switch spec.Type {
 	case TypeBash:
@@ -132,7 +130,6 @@ func (s *Store) Register(spec RegisterSpec) (string, uint64, error) {
 			spec.AgentState = &AgentState{}
 		}
 		spec.AgentState.StateBase = base
-		spec.AgentState.AgentID = id
 		spec.AgentState.Prompt = spec.Prompt
 		spec.AgentState.AgentType = spec.AgentType
 		spec.AgentState.Model = cloneModelPtr(spec.Model)
@@ -381,18 +378,18 @@ func (s *Store) KillAllRunningBashTasks() int {
 	return killed
 }
 
-// KillBashTasksForAgent 终止某子 agent 启动且仍在运行的后台 bash 任务,
+// KillBashTasksForTask 终止某子 agent 启动且仍在运行的后台 bash 任务,
 // 返回成功终止的数量。子 agent 结束后它的 query loop 不再运行,
 // 这些任务没人能再停止,因此必须在子 agent 收尾时回收
-func (s *Store) KillBashTasksForAgent(agentID string) int {
-	if agentID == "" {
+func (s *Store) KillBashTasksForTask(taskID string) int {
+	if taskID == "" {
 		return 0
 	}
 	s.mu.Lock()
 	var ids []string
 	for id, state := range s.tasks {
 		bash, ok := state.(*BashState)
-		if !ok || bash.ParentAgentID != agentID || bash.Base().Status != StatusRunning {
+		if !ok || bash.ParentTaskID != taskID || bash.Base().Status != StatusRunning {
 			continue
 		}
 		ids = append(ids, id)
@@ -804,12 +801,10 @@ func (s *Store) RegisterContinuation(id string, runtime Runtime, prompt string) 
 			Type:           TypeAgent,
 			Status:         StatusRunning,
 			Description:    old.Base().Description,
-			ToolUseID:      old.Base().ToolUseID,
 			StartTime:      old.Base().StartTime,
 			OutputFile:     old.Base().OutputFile,
 			LifecycleToken: token,
 		},
-		AgentID:      old.AgentID,
 		Prompt:       prompt,
 		AgentType:    old.AgentType,
 		Model:        cloneModelPtr(old.Model),

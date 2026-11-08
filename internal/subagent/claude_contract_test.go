@@ -31,12 +31,12 @@ func TestClaudeContractKillingAsyncAgentNotifiesParentAsStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusRunning)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusRunning)
 
-	if err := taskpkg.KillAgent(launched.AgentID, manager.Store()); err != nil {
+	if err := taskpkg.KillAgent(launched.TaskID, manager.Store()); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusKilled)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusKilled)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -124,7 +124,7 @@ func TestClaudeContractCancellationNotifiesAbortedReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusKilled)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusKilled)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -157,8 +157,8 @@ func TestClaudeContractWorkerEventsUpdateProgressProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
-	state, ok := manager.Store().Task(launched.AgentID)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
+	state, ok := manager.Store().Task(launched.TaskID)
 	if !ok {
 		t.Fatal("task disappeared")
 	}

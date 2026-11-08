@@ -85,7 +85,10 @@ func TestStoreHistoryAndEarlierResults(t *testing.T) {
 }
 
 func TestOutputBudgetAndSpill(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
+	tempDir := t.TempDir()
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, tempDir)
+	}
 	ctx := scriptContext(context.Background(), nil, nil)
 	for _, budget := range []int{0, 4} {
 		code := fmt.Sprintf("// @options: {\"max_output_tokens\":%d}\ntext(\"你好-alpha\\nbeta\\ngamma-tail\");console.log(\"console-tail\");", budget)
@@ -120,7 +123,9 @@ func TestOutputBudgetAndSpill(t *testing.T) {
 	if !ok || last.Text != codeDetails(t, failed).Error {
 		t.Fatalf("error must be a separate final block: %+v", failed.Content)
 	}
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, filepath.Join(tempDir, "missing"))
+	}
 	ioFailure := runCode(t, ctx, "// @options: {\"max_output_tokens\":0}\nstore(\"key\",1);text(\"cannot spill\");", scriptHistory{})
 	if !ioFailure.IsError || codeDetails(t, ioFailure).StoreWrites != nil || codeDetails(t, ioFailure).FullOutputPath != "" {
 		t.Fatalf("spill I/O failure committed state: %+v", ioFailure)

@@ -462,7 +462,7 @@ func decodeMessage(raw json.RawMessage) (llm.Message, error) {
 			msg.Usage = &usage
 		}
 		if len(wire.Details) > 0 && !bytes.Equal(bytes.TrimSpace(wire.Details), []byte("null")) {
-			details, err := llm.DecodeToolDetails(json.RawMessage(append([]byte(nil), wire.Details...)))
+			details, err := llm.DecodeToolDetails(wire.ToolName, json.RawMessage(append([]byte(nil), wire.Details...)))
 			if err != nil {
 				return nil, err
 			}

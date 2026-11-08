@@ -3,7 +3,6 @@ package agenttool
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 
 	taskpkg "github.com/ywxzm03/Rivo/internal/task"
@@ -28,13 +27,13 @@ func ResumeResolver(sessionDir string) taskpkg.ResumeResolver {
 		if taskID == "" || strings.ContainsAny(taskID, `/\`) || strings.Contains(taskID, "..") {
 			return taskpkg.ResumeSource{}, false
 		}
-		transcript := filepath.Join(sessionDir, "subagents", "agent-"+taskID+".jsonl")
+		transcript := transcriptPathFor(sessionDir, taskID)
 		if _, err := os.Stat(transcript); err != nil {
 			return taskpkg.ResumeSource{}, false
 		}
-		source := taskpkg.ResumeSource{ID: taskID, OutputFile: transcript, AgentType: "work"}
+		source := taskpkg.ResumeSource{OutputFile: transcript, AgentType: "work"}
 		// 2.元数据缺失时退回 work;存在但损坏则说明落盘有问题,直接判为不可恢复
-		data, err := os.ReadFile(filepath.Join(sessionDir, "subagents", "agent-"+taskID+".meta.json"))
+		data, err := os.ReadFile(metadataPathFor(sessionDir, taskID))
 		if err != nil {
 			if os.IsNotExist(err) {
 				return source, true

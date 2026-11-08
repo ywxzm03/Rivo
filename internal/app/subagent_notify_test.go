@@ -46,7 +46,7 @@ func TestIdleMainAgentWakesForTaskNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "victim"}) {
@@ -91,7 +91,7 @@ func TestNotificationReachesMainAgentContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "done"}) {
@@ -134,7 +134,7 @@ func TestShutdownStopsNotificationRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 
@@ -163,7 +163,7 @@ func TestBackgroundRunEndHookFires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "job"}) {
@@ -229,8 +229,8 @@ func TestClaudeContractStopSubagentReachesParentAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	taskIDCh <- launched.AgentID
-	if err := a.StopSubagent(launched.AgentID); err != nil {
+	taskIDCh <- launched.TaskID
+	if err := a.StopSubagent(launched.TaskID); err != nil {
 		t.Fatal(err)
 	}
 

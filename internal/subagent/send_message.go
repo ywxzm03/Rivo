@@ -11,14 +11,14 @@ import (
 )
 
 type SendMessageResult struct {
-	TaskID  string `json:"taskId"`
+	TaskID  string `json:"task_id"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
 }
 
 func (SendMessageResult) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[SendMessageResult]("taskId") }
+func init() { llm.RegisterToolDetails[SendMessageResult]("SendMessage", "task_id") }
 
 // SendMessage 把输入投递给任务。运行中的任务把消息排入其下一轮工具调用;
 // 终态任务按 continuation 恢复;store 中已缺失的任务则从 sidechain transcript 重建。

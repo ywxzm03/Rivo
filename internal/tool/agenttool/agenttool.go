@@ -79,5 +79,5 @@ func (t *Tool) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("Started subagent %s", launched.AgentID)}}, Details: launched}, nil
+	return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("Started subagent %s", launched.TaskID)}}, Details: launched}, nil
 }
