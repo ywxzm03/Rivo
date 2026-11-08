@@ -79,7 +79,7 @@ func SessionsRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent", "sessions"), nil
+	return filepath.Join(home, ".rivo", "sessions"), nil
 }
 
 func listSessionsInDir(dir string) ([]SessionInfo, error) {

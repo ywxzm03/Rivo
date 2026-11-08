@@ -32,7 +32,7 @@ func TestDirDefaultsToHomeAndProfile(t *testing.T) {
 		t.Fatalf("Dir() error = %v", err)
 	}
 	// 无覆盖时回落用户主目录；Windows 的 UserHomeDir 读 USERPROFILE，Unix 读 HOME
-	if want := filepath.Join(home, ".rivo", "agent"); dir != want {
+	if want := filepath.Join(home, ".rivo"); dir != want {
 		t.Errorf("Dir() = %q, want %q", dir, want)
 	}
 }

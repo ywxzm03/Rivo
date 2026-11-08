@@ -44,7 +44,7 @@ func LoadDefinition(cwd, agentDir, name string) (*Definition, error) {
 		return nil, fmt.Errorf("subagent: invalid agent name %q", name)
 	}
 	paths := []string{
-		filepath.Join(cwd, ".rivo", "agent", "agents", name+".md"),
+		filepath.Join(cwd, ".rivo", "agents", name+".md"),
 		filepath.Join(agentDir, "agents", name+".md"),
 	}
 	for _, path := range paths {

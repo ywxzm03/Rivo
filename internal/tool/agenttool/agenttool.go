@@ -55,7 +55,7 @@ func agentTypeEnumDescription() string {
 		"- explore: " + agentTypeDescriptions["explore"] + "\n" +
 		"- plan: " + agentTypeDescriptions["plan"] + "\n" +
 		"- work: " + agentTypeDescriptions["work"] + "\n" +
-		"Custom agent names defined in .rivo/agent/agents/<name>.md or the user agent directory are also accepted."
+		"Custom agent names defined in .rivo/agents/<name>.md or the user agent directory are also accepted."
 }
 
 func (t *Tool) PromptSnippet() string                { return agentToolSnippet }

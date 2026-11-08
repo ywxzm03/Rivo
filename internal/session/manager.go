@@ -41,13 +41,13 @@ type SessionManager struct {
 
 const maxSessionWarnings = 100
 
-// DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/agent/sessions/--<编码后的cwd>--/
+// DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/sessions/--<编码后的cwd>--/
 func DefaultDir(cwd string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent", "sessions", dirName(cwd)), nil
+	return filepath.Join(home, ".rivo", "sessions", dirName(cwd)), nil
 }
 
 // dirName 把 cwd 编码为安全的目录名：去掉首个路径分隔符，/、\、: 替换为 -，以 -- 包裹
