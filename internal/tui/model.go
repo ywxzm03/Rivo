@@ -66,6 +66,56 @@ type ThinkingBlockView struct {
 	Text  string
 }
 
+// CodemodeCallStatus 是嵌套调用的显示阶段
+type CodemodeCallStatus string
+
+const (
+	CodemodeQueued    CodemodeCallStatus = "queued"
+	CodemodeRunning   CodemodeCallStatus = "running"
+	CodemodeOK        CodemodeCallStatus = "ok"
+	CodemodeError     CodemodeCallStatus = "error"
+	CodemodeCancelled CodemodeCallStatus = "cancelled"
+)
+
+// CodemodeCallView 保存成功展开时的逐调用摘要
+type CodemodeCallView struct {
+	ID         string
+	Name       string
+	Args       string
+	Status     CodemodeCallStatus
+	DurationMS *int64 // 未启动为 nil，0 有效
+	Error      string
+}
+
+// CodemodeToolCountView 保存同名工具的阶段计数
+type CodemodeToolCountView struct {
+	Name       string
+	Success    int
+	Failure    int
+	Unfinished int
+}
+
+// CodemodeSummaryView 保存预先投影的分组统计
+type CodemodeSummaryView struct {
+	Complete bool // 是否收到最终完整快照
+	Groups   []CodemodeToolCountView
+}
+
+// CodemodeOutputView 保存正文之外的最终元数据
+type CodemodeOutputView struct {
+	DurationMS     *int64 // 最终耗时，nil 表示未知
+	LineCount      int    // 预算裁剪前的输出行数
+	FullOutputPath string
+}
+
+// CodemodeView 只保留父工具行需要的显示数据
+type CodemodeView struct {
+	Calls   []CodemodeCallView
+	Summary CodemodeSummaryView
+	Output  CodemodeOutputView
+	Error   string // 父脚本完整错误
+}
+
 // ToolCallView 保存完整工具状态，compact/full 只改变展示方式
 type ToolCallView struct {
 	ID, Name string
@@ -79,6 +129,7 @@ type ToolCallView struct {
 	// ArgsComplete 表示模型已写完参数，行是否仍在进行由它判断
 	ArgsComplete bool
 	StartedAt    time.Time
+	Codemode     *CodemodeView // 结构化 codemode 显示数据，无详情时为 nil
 }
 
 // ToolGroupView 将连续 thinking 和工具调用作为一个可折叠工作块

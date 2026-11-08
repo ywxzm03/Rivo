@@ -13,6 +13,22 @@ func (g *ToolGroupView) Clone() *ToolGroupView {
 	}
 	cloned := *g
 	cloned.Calls = append([]ToolCallView(nil), g.Calls...)
+	for i := range cloned.Calls {
+		if source := g.Calls[i].Codemode; source != nil {
+			view := *source
+			view.Calls = append([]CodemodeCallView(nil), source.Calls...)
+			view.Summary.Groups = append([]CodemodeToolCountView(nil), source.Summary.Groups...)
+			for j := range view.Calls {
+				if duration := source.Calls[j].DurationMS; duration != nil {
+					view.Calls[j].DurationMS = new(*duration)
+				}
+			}
+			if duration := source.Output.DurationMS; duration != nil {
+				view.Output.DurationMS = new(*duration)
+			}
+			cloned.Calls[i].Codemode = &view
+		}
+	}
 	cloned.Thinking = append([]ThinkingBlockView(nil), g.Thinking...)
 	return &cloned
 }

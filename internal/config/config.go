@@ -20,11 +20,17 @@ const APIOpenAICompletions = "openai-completions"
 // agentDirEnv 是 agent 配置目录的环境变量覆盖名
 const agentDirEnv = "RIVO_AGENT_DIR"
 
-// Settings 对应 ~/.rivo/agent/settings.json，只消费默认模型相关字段
+// Settings 对应 ~/.rivo/agent/settings.json
 type Settings struct {
-	DefaultProvider      string `json:"defaultProvider"`
-	DefaultModel         string `json:"defaultModel"`
-	DefaultThinkingLevel string `json:"defaultThinkingLevel"`
+	DefaultProvider      string           `json:"defaultProvider"`
+	DefaultModel         string           `json:"defaultModel"`
+	DefaultThinkingLevel string           `json:"defaultThinkingLevel"`
+	Codemode             CodemodeSettings `json:"codemode"`
+}
+
+// CodemodeSettings 保留显式开关，缺省值由装配层解析
+type CodemodeSettings struct {
+	Enabled *bool `json:"enabled"` // nil 表示使用默认开启
 }
 
 // Model 是 models.json 中 provider 下的模型条目

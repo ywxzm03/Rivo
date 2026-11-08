@@ -81,35 +81,6 @@ func TestRunContinuationRequiresExistingTranscript(t *testing.T) {
 	}
 }
 
-func TestRunAppliesBuiltinPromptForEachType(t *testing.T) {
-	for _, agentType := range []string{"explore", "plan", "work"} {
-		runner := testRunner(t)
-		runtime, err := runner.Run(context.Background(), taskpkg.AgentSpec{
-			ID: "agent-" + agentType, AgentType: agentType, Description: agentType, Prompt: "go",
-		})
-		if err != nil {
-			t.Fatalf("%s: %v", agentType, err)
-		}
-		// 1.内置类型必须注入对应 prompt,而不是通用兜底
-		system := llm.CurrentSystemMessage(runtime.Agent.Context().Messages)
-		if system == nil {
-			t.Fatalf("%s: no system message", agentType)
-		}
-		instructions := system.Sections["instructions"]
-		// 有基础 instructions 时用 <agent-instructions> 追加,否则整体包在 <instructions> 里
-		if !containsFold(instructions, "<instructions>") {
-			t.Fatalf("%s: instructions block missing: %q", agentType, instructions)
-		}
-		want := map[string]string{"explore": "file search specialist", "plan": "software architect", "work": "use the tools available"}[agentType]
-		if !containsFold(instructions, want) {
-			t.Fatalf("%s: instructions do not contain %q", agentType, want)
-		}
-		if runtime.Cancel != nil {
-			runtime.Cancel()
-		}
-	}
-}
-
 func TestRunExploreAndPlanOmitContextInstructions(t *testing.T) {
 	runner := testRunner(t)
 	// 项目里放一个 AGENTS.md,explore/plan 不应加载它

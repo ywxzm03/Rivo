@@ -203,12 +203,14 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 	manager := subagent.NewManager(taskpkg.NewStore(), nil)
 	manager.Store().SetTranscriptReader(session.ReadMessages)
 	tools := registry.Build(registry.Deps{
-		WorkingDir:     cwd,
-		SupportsImages: model.SupportsImages,
-		FileHistory:    tool.Tracker(sm.FileHistory()),
-		Store:          manager.Store(),
-		Launcher:       manager,
-		Messenger:      manager,
+		WorkingDir:      cwd,
+		SupportsImages:  model.SupportsImages,
+		FileHistory:     tool.Tracker(sm.FileHistory()),
+		Store:           manager.Store(),
+		Launcher:        manager,
+		Messenger:       manager,
+		CodemodeEnabled: cfg.Codemode.Enabled == nil || *cfg.Codemode.Enabled,
+		CodemodeHistory: sm,
 	})
 
 	coord := NewCoordinator(sm, onEvent)

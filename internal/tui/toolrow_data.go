@@ -6,6 +6,22 @@ import (
 	"strings"
 )
 
+// codemodeCodeTitle 取首个非空源码行，后续源码只用省略号提示
+func codemodeCodeTitle(code string) string {
+	first := ""
+	for line := range strings.SplitSeq(strings.ReplaceAll(code, "\r", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if first != "" {
+			return first + " …"
+		}
+		first = line
+	}
+	return first
+}
+
 // toolRowOutcome 是结果句：read/grep/find/ls/write/edit 用一句话说明结果，
 // 命令与自定义工具直接铺输出，因此返回空串
 func toolRowOutcome(call ToolCallView) string {

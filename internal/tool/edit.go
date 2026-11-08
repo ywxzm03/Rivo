@@ -93,7 +93,7 @@ func (e *Edit) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
-	absPath, err := resolveEditPathFrom(path, e.WorkingDir)
+	absPath, err := resolveEditPathFrom(path, toolWorkingDir(ctx, e.WorkingDir))
 	if err != nil {
 		return llm.ToolResult{}, err
 	}

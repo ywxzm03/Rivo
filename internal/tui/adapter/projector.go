@@ -166,12 +166,15 @@ func (r *Runtime) sealToolGroupLocked() {
 	if index < 0 || current == nil {
 		return
 	}
+	changed := false
 	for i := range current.Calls {
-		if current.Calls[i].Status == tui.ToolPending {
-			current.Calls[i].Status = tui.ToolInterrupted
+		if interruptToolCall(&current.Calls[i]) {
+			changed = true
 		}
 	}
-	r.messages[index].Revision++
+	if changed {
+		r.messages[index].Revision++
+	}
 	r.activeToolAnchorID = ""
 }
 
@@ -196,20 +199,33 @@ func (r *Runtime) toolStartLocked(event llm.ToolExecutionStartEvent) tui.Message
 }
 
 func (r *Runtime) toolUpdateLocked(event llm.ToolExecutionUpdateEvent) tui.Message {
+	if r.terminalToolCallLocked(event.ToolCallID) {
+		return tui.Message{}
+	}
 	group := r.ensureToolGroupLocked(r.currentAssistantID)
 	index := findToolCall(group, event.ToolCallID)
+	changed := index < 0
 	if index < 0 {
 		group.Calls = append(group.Calls, tui.ToolCallView{ID: event.ToolCallID, Name: event.ToolName, Round: r.assistantTurn, Arguments: encodeToolArguments(event.Arguments), Status: tui.ToolPending, ArgsComplete: true})
 		index = len(group.Calls) - 1
 	}
-	if event.ToolName != "" {
-		group.Calls[index].Name = event.ToolName
+	call := &group.Calls[index]
+	if event.ToolName != "" && call.Name != event.ToolName {
+		call.Name = event.ToolName
+		changed = true
 	}
 	if event.Arguments != nil {
-		group.Calls[index].Arguments = encodeToolArguments(event.Arguments)
+		if arguments := encodeToolArguments(event.Arguments); call.Arguments != arguments {
+			call.Arguments = arguments
+			changed = true
+		}
 	}
-	group.Calls[index].Result = formatToolResult(event.PartialResult)
-	group.Calls[index].Details = encodeToolDetails(event.PartialResult.Details)
+	if applyToolProgress(call, event.PartialResult) {
+		changed = true
+	}
+	if !changed {
+		return tui.Message{}
+	}
 	r.setToolGroupLocked(group)
 	return r.messages[r.groupAnchorIndexLocked()]
 }
@@ -223,8 +239,7 @@ func (r *Runtime) toolEndLocked(event llm.ToolExecutionEndEvent) tui.Message {
 	}
 	group.Calls[index].Name = event.ToolName
 	group.Calls[index].ArgsComplete = true
-	group.Calls[index].Result = formatToolResult(event.Result)
-	group.Calls[index].Details = encodeToolDetails(event.Result.Details)
+	applyToolFinal(&group.Calls[index], event.Result)
 	group.Calls[index].Status = tui.ToolSuccess
 	if event.IsError || event.Result.IsError {
 		group.Calls[index].Status = tui.ToolError
@@ -367,9 +382,7 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 		if groupIndex >= 0 && group != nil {
 			copy := group.Clone()
 			for i := range copy.Calls {
-				if copy.Calls[i].Status == tui.ToolPending {
-					copy.Calls[i].Status = tui.ToolInterrupted
-				}
+				interruptToolCall(&copy.Calls[i])
 			}
 			projected[groupIndex].ToolGroup = copy
 		}
@@ -449,8 +462,7 @@ func (r *Runtime) projectContext(view ctxview.ContextView) []tui.Message {
 					toolIndex = len(group.Calls) - 1
 				}
 				group.Calls[toolIndex].Name = current.ToolName
-				group.Calls[toolIndex].Result = formatToolResult(llm.ToolResult{Content: current.Content, IsError: current.IsError})
-				group.Calls[toolIndex].Details = encodeToolDetails(current.Details)
+				applyToolFinal(&group.Calls[toolIndex], llm.ToolResult{Content: current.Content, Details: current.Details, IsError: current.IsError})
 				group.Calls[toolIndex].Status = tui.ToolSuccess
 				if current.IsError {
 					group.Calls[toolIndex].Status = tui.ToolError
@@ -546,7 +558,9 @@ func (r *Runtime) applyEventLocked(event llm.AgentEvent, result *eventResult) {
 		result.message = &converted
 	case llm.ToolExecutionUpdateEvent:
 		converted := r.toolUpdateLocked(event)
-		result.message = &converted
+		if converted.ID != "" {
+			result.message = &converted
+		}
 	case llm.ToolExecutionEndEvent:
 		converted := r.toolEndLocked(event)
 		result.message = &converted

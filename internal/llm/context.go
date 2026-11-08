@@ -12,6 +12,14 @@ type userMessageContextKey struct{}
 type toolContextKey struct{}
 type workingDirKey struct{}
 
+// ToolRuntime 保存当前父调用的执行能力，嵌套工具不继承这些回调
+type ToolRuntime struct {
+	CallID         string                                     // 当前调用 ID
+	EarlierResults []ToolResultMessage                        // 同批已完成但未提交的只读结果
+	ExecuteNested  func(context.Context, ToolCall) ToolResult // 当前工具快照的归一化执行入口
+	Update         func(ToolResult) error                     // 由工具 owner 发布父调用进度
+}
+
 // ToolContext 把执行中 agent 的上下文交给需要派发或协调子任务的工具,
 // 同时不暴露 Agent 实现
 type ToolContext struct {
@@ -22,7 +30,8 @@ type ToolContext struct {
 	ForkChild bool
 	// TaskID 是子 agent 的任务 ID,主 agent 为空。后台 bash 任务据此记录
 	// 归属,子 agent 结束时可以回收它留下的孤儿进程
-	TaskID string
+	TaskID  string
+	Runtime ToolRuntime // 当前调用能力，不暴露 agent 或 session 对象
 }
 
 func WithToolContext(ctx context.Context, toolContext ToolContext) context.Context {

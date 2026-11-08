@@ -26,6 +26,13 @@ linters:
       - linters: [misspell]
         path: internal/llm/api/openai/responses/stream_abort_test.go
         text: cancelled
+      # cancelled 是 codemode 持久化契约中的状态值
+      - linters: [misspell]
+        path: internal/tool/codemode/types.go
+        text: cancelled
+      - linters: [misspell]
+        path: internal/tui/model.go
+        text: cancelled
       # Cancelling 是用户可见的界面文案，英式拼写是产品选择
       - linters: [misspell]
         path: internal/tui/editor.go
