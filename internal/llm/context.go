@@ -20,9 +20,9 @@ type ToolContext struct {
 	// ForkChild 表示当前 agent 本身是 fork 子 agent。fork 保留 Agent 工具
 	// 是为了工具定义与父缓存一致,递归派发由调用方据此拒绝
 	ForkChild bool
-	// AgentID 是子 agent 的任务 ID,主 agent 为空。后台 bash 任务据此记录
+	// TaskID 是子 agent 的任务 ID,主 agent 为空。后台 bash 任务据此记录
 	// 归属,子 agent 结束时可以回收它留下的孤儿进程
-	AgentID string
+	TaskID string
 }
 
 func WithToolContext(ctx context.Context, toolContext ToolContext) context.Context {
@@ -82,7 +82,7 @@ type ToolDetails interface {
 	ToolDetails()
 }
 
-// detailsRegistry 按 JSON 里的标志字段还原具体详情类型。
+// detailsRegistry 按工具名与 JSON 标志字段还原具体详情类型。
 // 各实现包在 init 里注册，避免 llm 反向依赖上层包
 var (
 	detailsMu       sync.RWMutex
@@ -90,16 +90,19 @@ var (
 )
 
 type detailsEntry struct {
-	// marker 是能唯一标识该类型的 JSON 字段名
+	// toolName 限定该详情所属的工具,同名标志字段不会跨工具误判
+	toolName string
+	// marker 是能唯一标识该工具内某种详情变体的 JSON 字段名
 	marker string
 	decode func(json.RawMessage) (ToolDetails, error)
 }
 
 // RegisterToolDetails 注册一种详情类型的还原方式。
-// marker 必须选该类型独有的字段，否则会误判
-func RegisterToolDetails[T ToolDetails](marker string) {
+// toolName 必须与工具 Name() 一致;marker 只需在该工具内部唯一
+func RegisterToolDetails[T ToolDetails](toolName, marker string) {
 	detailsRegistry = append(detailsRegistry, detailsEntry{
-		marker: marker,
+		toolName: toolName,
+		marker:   marker,
 		decode: func(raw json.RawMessage) (ToolDetails, error) {
 			var value T
 			if err := json.Unmarshal(raw, &value); err != nil {
@@ -110,9 +113,9 @@ func RegisterToolDetails[T ToolDetails](marker string) {
 	})
 }
 
-// DecodeToolDetails 把落盘的原始 JSON 还原成具体详情类型，
+// DecodeToolDetails 把落盘的原始 JSON 还原成指定工具的具体详情类型，
 // 没有注册项或都不匹配时返回 nil，调用方按「无详情」处理
-func DecodeToolDetails(raw json.RawMessage) (ToolDetails, error) {
+func DecodeToolDetails(toolName string, raw json.RawMessage) (ToolDetails, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
@@ -123,6 +126,9 @@ func DecodeToolDetails(raw json.RawMessage) (ToolDetails, error) {
 		return nil, err
 	}
 	for _, entry := range detailsRegistry {
+		if entry.toolName != toolName {
+			continue
+		}
 		if _, ok := probe[entry.marker]; !ok {
 			continue
 		}

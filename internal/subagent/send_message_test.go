@@ -38,19 +38,19 @@ func TestSendMessageQueuesForRunningTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	result, err := manager.SendMessage(context.Background(), launched.AgentID, "extra work")
+	result, err := manager.SendMessage(context.Background(), launched.TaskID, "extra work")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 运行中的任务只入队,不启动第二个 query
-	if result.Status != "queued" || result.TaskID != launched.AgentID {
+	if result.Status != "queued" || result.TaskID != launched.TaskID {
 		t.Fatalf("send result = %#v", result)
 	}
-	if pending := manager.Store().PendingMessages(launched.AgentID); len(pending) != 1 {
+	if pending := manager.Store().PendingMessages(launched.TaskID); len(pending) != 1 {
 		t.Fatalf("pending = %#v, want one queued message", pending)
 	}
 	close(release)
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 }
 
 func TestSendMessageResumesTerminalTask(t *testing.T) {
@@ -59,19 +59,19 @@ func TestSendMessageResumesTerminalTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 	manager.Store().DrainNotifications()
 
-	result, err := manager.SendMessage(context.Background(), launched.AgentID, "BETA")
+	result, err := manager.SendMessage(context.Background(), launched.TaskID, "BETA")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "resumed" || result.TaskID != launched.AgentID {
+	if result.Status != "resumed" || result.TaskID != launched.TaskID {
 		t.Fatalf("send result = %#v", result)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 	notifications := manager.Store().DrainNotifications()
-	if len(notifications) != 1 || notifications[0].TaskID != launched.AgentID || notifications[0].Result != "BETA" {
+	if len(notifications) != 1 || notifications[0].TaskID != launched.TaskID || notifications[0].Result != "BETA" {
 		t.Fatalf("continuation notifications = %#v", notifications)
 	}
 }
@@ -88,7 +88,7 @@ func TestSendMessageResumesEvictedTaskFromResolver(t *testing.T) {
 		if taskID != "agent-evicted-1" {
 			return taskpkg.ResumeSource{}, false
 		}
-		return taskpkg.ResumeSource{ID: taskID, AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl", WorktreePath: "/tmp/wt"}, true
+		return taskpkg.ResumeSource{AgentType: "explore", Description: "old work", OutputFile: "/tmp/agent-evicted-1.jsonl", WorktreePath: "/tmp/wt"}, true
 	})
 
 	result, err := manager.SendMessage(context.Background(), "agent-evicted-1", "continue please")
@@ -120,7 +120,7 @@ func TestSendMessageResumeKeepsOwnedWorktree(t *testing.T) {
 	// 元数据标明该 worktree 由子 agent 创建,恢复时依然不能回收
 	manager.SetResumeResolver(func(string) (taskpkg.ResumeSource, bool) {
 		return taskpkg.ResumeSource{
-			ID: "agent-evicted-2", AgentType: "work", Description: "old work",
+			AgentType: "work", Description: "old work",
 			OutputFile: "/tmp/agent-evicted-2.jsonl", WorktreePath: "/tmp/wt", WorktreeOwned: true,
 		}, true
 	})

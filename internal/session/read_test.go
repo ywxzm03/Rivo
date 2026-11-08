@@ -13,7 +13,10 @@ import (
 func TestReadMessagesReturnsCompleteLinesOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
-	sm := NewAt(dir, path)
+	sm, err := NewAt(dir, path, "read-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sm.AppendMessages([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "one"}}},
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "two"}}},
@@ -51,7 +54,10 @@ func TestReadMessagesReturnsCompleteLinesOnly(t *testing.T) {
 func TestReadMessagesPropagatesIOError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
-	sm := NewAt(dir, path)
+	sm, err := NewAt(dir, path, "read-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sm.AppendMessages([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "one"}}},
 	}); err != nil {
@@ -71,7 +77,10 @@ func TestReadMessagesPropagatesIOError(t *testing.T) {
 func TestReadMessagesDeliversOversizedEntry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
-	sm := NewAt(dir, path)
+	sm, err := NewAt(dir, path, "read-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sm.AppendMessages([]llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "before"}}},
 	}); err != nil {

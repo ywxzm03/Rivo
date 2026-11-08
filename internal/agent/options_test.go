@@ -23,7 +23,7 @@ func TestNewAgentFromOptions(t *testing.T) {
 		WorkingDir: "/tmp/work",
 		MaxTurns:   7,
 		ForkChild:  true,
-		AgentID:    "agent-1",
+		TaskID:     "agent-1",
 	})
 	if a.Config().Model.ID != "gpt-5.6" || a.Config().Model.Provider != "openai" {
 		t.Errorf("Config() = %+v, want the model from options", a.Config())
@@ -31,9 +31,9 @@ func TestNewAgentFromOptions(t *testing.T) {
 	if len(a.Context().Messages) != 1 {
 		t.Errorf("Context().Messages = %d, want 1", len(a.Context().Messages))
 	}
-	if a.WorkingDir() != "/tmp/work" || a.MaxTurns() != 7 || !a.ForkChild() || a.AgentID() != "agent-1" {
-		t.Errorf("runtime fields = %q/%d/%v/%q, want values from options",
-			a.WorkingDir(), a.MaxTurns(), a.ForkChild(), a.AgentID())
+	if a.WorkingDir() != "/tmp/work" || a.MaxTurns() != 7 || !a.ForkChild() {
+		t.Errorf("runtime fields = %q/%d/%v, want values from options",
+			a.WorkingDir(), a.MaxTurns(), a.ForkChild())
 	}
 	if err := a.emit(llm.WarningEvent{Message: "probe"}); err != nil {
 		t.Fatalf("emit() error = %v", err)

@@ -23,10 +23,10 @@ type Agent struct {
 	maxTurns int
 	// forkChild 标记该 agent 是 fork 子 agent,工具层据此拒绝递归派发
 	forkChild bool
-	// agentID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
+	// taskID 是子 agent 的任务 ID,主 agent 留空。工具层据此把后台任务
 	// 归属到发起它的子 agent
-	agentID string
-	hooks   Hooks
+	taskID string
+	hooks  Hooks
 
 	runGuardOnce  sync.Once
 	runGuard      chan struct{}
@@ -357,9 +357,9 @@ type Options struct {
 	MaxTurns int
 	// ForkChild 标记该 agent 是 fork 子 agent
 	ForkChild bool
-	// AgentID 是子 agent 的任务 ID，主 agent 留空
-	AgentID string
-	Hooks   Hooks
+	// TaskID 是子 agent 的任务 ID，主 agent 留空
+	TaskID string
+	Hooks  Hooks
 }
 
 // Hooks 是宿主注入的边界回调，核心不持有会话或压缩协调器
@@ -380,7 +380,7 @@ func New(opts Options) *Agent {
 		workingDir: opts.WorkingDir,
 		maxTurns:   opts.MaxTurns,
 		forkChild:  opts.ForkChild,
-		agentID:    opts.AgentID,
+		taskID:     opts.TaskID,
 		hooks:      opts.Hooks,
 	}
 }
@@ -422,7 +422,6 @@ func (a *Agent) Stream() llm.StreamFn    { return a.stream }
 func (a *Agent) WorkingDir() string      { return a.workingDir }
 func (a *Agent) MaxTurns() int           { return a.maxTurns }
 func (a *Agent) ForkChild() bool         { return a.forkChild }
-func (a *Agent) AgentID() string         { return a.agentID }
 func (a *Agent) Hooks() Hooks            { return a.hooks }
 
 // acquireRunGuard 独占一次运行的执行权，并发 Run 在此排队且等待期间可被取消
@@ -1217,7 +1216,7 @@ func (a *Agent) executeParallelBatch(ctx context.Context, calls []llm.ToolCall) 
 
 func executeToolCall(ctx context.Context, a *Agent, call llm.ToolCall) (llm.ToolResult, bool) {
 	// 工具需要执行中 agent 的上下文来派发子任务,但不该看到 Agent 本身
-	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.ctx, Config: a.cfg, ForkChild: a.forkChild, AgentID: a.agentID})
+	ctx = llm.WithToolContext(ctx, llm.ToolContext{Context: a.ctx, Config: a.cfg, ForkChild: a.forkChild, TaskID: a.taskID})
 	ctx = llm.WithWorkingDir(ctx, a.workingDir)
 	result, err := a.execute(ctx, call.Name, call.Arguments)
 	if err != nil {

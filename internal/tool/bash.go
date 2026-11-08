@@ -137,7 +137,10 @@ type ShellDetails struct {
 
 func (ShellDetails) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[ShellDetails]("truncation") }
+func init() { llm.RegisterToolDetails[ShellDetails]("bash", "truncation") }
+
+// powershell 与前台 bash 共用截断详情,但必须单独登记,否则按工具名还原时找不到
+func init() { llm.RegisterToolDetails[ShellDetails]("powershell", "truncation") }
 
 // ShellTruncation 描述尾部截断的规模
 type ShellTruncation struct {

@@ -65,15 +65,15 @@ func (r *runner) RunBackground(ctx context.Context, args map[string]any) (llm.To
 	}
 	process := &backgroundProcess{cmd: cmd, file: output, capture: backgroundOutput, cancel: cancel}
 	// 记录发起者,子 agent 结束时据此回收它留下的孤儿进程
-	parentAgentID, _ := llm.CurrentToolContext(ctx)
+	parentTask, _ := llm.CurrentToolContext(ctx)
 	id, token, err := r.store.Register(task.RegisterSpec{
 		Type:        task.TypeBash,
 		Description: command,
 		OutputFile:  path,
 		BashState: &task.BashState{
-			Command:       command,
-			Process:       process,
-			ParentAgentID: parentAgentID.AgentID,
+			Command:      command,
+			Process:      process,
+			ParentTaskID: parentTask.TaskID,
 		},
 	})
 	if err != nil {
@@ -94,7 +94,7 @@ type BackgroundOutput struct {
 
 func (BackgroundOutput) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[BackgroundOutput]("output_file") }
+func init() { llm.RegisterToolDetails[BackgroundOutput]("bash", "output_file") }
 
 type backgroundProcess struct {
 	cmd     *exec.Cmd

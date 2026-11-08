@@ -57,7 +57,7 @@ func TestCleanupWorktreeKeepsDirtyTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = exec.Command("git", "-C", parent, "worktree", "remove", "--force", path).Run() }()
-	metadata := metadataPathFor(path, sessionDir, "agent-3")
+	metadata := metadataPathFor(sessionDir, "agent-3")
 	if err := os.WriteFile(metadata, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestCleanupWorktreeKeepsDirtyTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "dirty.txt"), []byte("work"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if cleanupSubagentWorktree(path, parent, base, metadataPathFor(path, sessionDir, "agent-4")) {
+	if cleanupSubagentWorktree(path, parent, base, metadataPathFor(sessionDir, "agent-4")) {
 		t.Fatal("dirty worktree should be preserved")
 	}
 	if _, err := os.Stat(filepath.Join(path, "dirty.txt")); err != nil {
@@ -104,7 +104,7 @@ func TestCleanupWorktreeKeepsUnmergedCommits(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitAll(t, path, "subagent commit")
-	metadata := metadataPathFor(path, sessionDir, "agent-5")
+	metadata := metadataPathFor(sessionDir, "agent-5")
 	if err := os.WriteFile(metadata, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -124,8 +124,8 @@ func TestCleanupWorktreeKeepsUnmergedCommits(t *testing.T) {
 }
 
 func TestMetadataPathFor(t *testing.T) {
-	got := metadataPathFor("/wt", "/sessions", "agent-9")
-	if want := filepath.Join("/sessions", "subagents", "agent-agent-9.meta.json"); got != want {
+	got := metadataPathFor("/sessions", "agent-9")
+	if want := filepath.Join("/sessions", "subagents", "agent-9.meta.json"); got != want {
 		t.Fatalf("metadata path = %q, want %q", got, want)
 	}
 }

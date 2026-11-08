@@ -11,7 +11,7 @@ func newTerminalTask(t *testing.T, store *Store, description string) (string, ui
 	id, token, err := store.Register(RegisterSpec{
 		Type:        TypeAgent,
 		Description: description,
-		AgentState:  &AgentState{AgentID: description, AgentType: "Work", Prompt: "go"},
+		AgentState:  &AgentState{AgentType: "Work", Prompt: "go"},
 	})
 	if err != nil {
 		t.Fatal(err)

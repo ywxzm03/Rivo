@@ -48,12 +48,12 @@ func TestRunWritesTranscriptAndMetadata(t *testing.T) {
 		}
 	}()
 	// 1.transcript 路径落在 sessionDir/subagents 下
-	want := filepath.Join(runner.SessionDir, "subagents", "agent-agent-1.jsonl")
+	want := filepath.Join(runner.SessionDir, "subagents", "agent-1.jsonl")
 	if runtime.OutputFile != want {
 		t.Fatalf("output file = %q, want %q", runtime.OutputFile, want)
 	}
 	// 2.元数据记录 agentType 与 description,供 eviction 后恢复
-	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-agent-1.meta.json"))
+	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-1.meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +206,9 @@ func TestRunForkReusesParentConfigAndTools(t *testing.T) {
 	if !containsFold(last, "Your directive: carry on") {
 		t.Fatalf("fork directive = %q", last)
 	}
-	// 3.fork 使用独立的 session ID
-	if runtime.Agent.Config().SessionID == "parent-session" {
-		t.Fatal("fork reused the parent session ID")
+	// 3.fork 使用任务号作为独立会话号,不能继承主会话号
+	if runtime.Agent.Config().SessionID != "agent-fork" {
+		t.Fatalf("fork session id = %q, want task id", runtime.Agent.Config().SessionID)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestRunInstallsWorktreeCleanupForNewWorktree(t *testing.T) {
 	if runtime.WorktreePath == "" || runtime.WorktreeCleanup == nil {
 		t.Fatalf("runtime = %#v, want cleanup hook", runtime)
 	}
-	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-agent-wt.meta.json"))
+	data, err := os.ReadFile(filepath.Join(runner.SessionDir, "subagents", "agent-wt.meta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,10 @@ func TestRunSkipsWorktreeCleanupForResumedWorktree(t *testing.T) {
 		_ = exec.Command("git", "-C", runner.ParentCwd, "worktree", "remove", "--force", first.WorktreePath).Run()
 	}()
 	// continuation 要求 transcript 已落盘,直接建一个带首轮消息的会话文件
-	sm := session.NewAt(runner.ParentCwd, first.OutputFile)
+	sm, err := session.NewAt(runner.ParentCwd, first.OutputFile, "agent-wt")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sm.AppendMessages([]llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go"}}}}); err != nil {
 		t.Fatal(err)
 	}

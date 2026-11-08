@@ -30,7 +30,7 @@ func TestMessageRoundtrip(t *testing.T) {
 	}
 	toolResult := llm.ToolResultMessage{
 		ToolCallID: "call_1",
-		ToolName:   "read",
+		ToolName:   "edit",
 		Content:    []llm.Content{llm.TextContent{Text: "file content"}},
 		Details:    tool.EditDetails{Patch: "1-10"},
 		IsError:    true,

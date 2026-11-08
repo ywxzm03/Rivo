@@ -22,7 +22,7 @@ func shellModelStore(t *testing.T) *task.Store {
 	}
 	if _, _, err := store.Register(task.RegisterSpec{
 		Type: task.TypeAgent, Description: "write gin demo",
-		AgentState: &task.AgentState{AgentID: "a1", AgentType: "Work", Prompt: "go"},
+		AgentState: &task.AgentState{AgentType: "Work", Prompt: "go"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestShellStopAllDoesNotStopSubagents(t *testing.T) {
 	}
 	agentID, _, err := store.Register(task.RegisterSpec{
 		Type: task.TypeAgent, Description: "work",
-		AgentState: &task.AgentState{AgentID: "a1", AgentType: "Work", Prompt: "go"},
+		AgentState: &task.AgentState{AgentType: "Work", Prompt: "go"},
 	})
 	if err != nil {
 		t.Fatal(err)

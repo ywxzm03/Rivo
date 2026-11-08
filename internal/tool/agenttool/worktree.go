@@ -38,8 +38,8 @@ func createSubagentWorktree(parentCwd, sessionDir, id string) (string, string, e
 }
 
 // metadataPathFor 返回任务元数据文件的固定位置
-func metadataPathFor(_ string, sessionDir, id string) string {
-	return filepath.Join(sessionDir, "subagents", "agent-"+id+".meta.json")
+func metadataPathFor(sessionDir, taskID string) string {
+	return strings.TrimSuffix(transcriptPathFor(sessionDir, taskID), ".jsonl") + ".meta.json"
 }
 
 // cleanupSubagentWorktree 回收干净 worktree;有未提交改动或未合并提交时保留用户工作

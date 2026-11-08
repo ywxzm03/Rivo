@@ -90,7 +90,7 @@ func (m *Manager) Start(ctx context.Context, input taskpkg.AgentInput) (taskpkg.
 		m.finishLaunchFailure(stateID, token, input)
 		return taskpkg.AgentLaunched{}, err
 	}
-	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: stateID, Description: input.Description, Prompt: input.Prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
+	return taskpkg.AgentLaunched{Status: "async_launched", TaskID: stateID, Description: input.Description, Prompt: input.Prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
 }
 
 // finishLaunchFailure 保留启动窗口内已被停止的任务,让父 agent 仍能收到终态通知
@@ -166,7 +166,7 @@ func (m *Manager) Continue(ctx context.Context, taskID, prompt string) (taskpkg.
 	}); err != nil {
 		return taskpkg.AgentLaunched{}, err
 	}
-	return taskpkg.AgentLaunched{Status: "async_launched", AgentID: taskID, Description: task.Base().Description, Prompt: prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
+	return taskpkg.AgentLaunched{Status: "async_launched", TaskID: taskID, Description: task.Base().Description, Prompt: prompt, SubagentType: agentType, State: taskpkg.StatusRunning, OutputFile: runtime.OutputFile, WorktreePath: runtime.WorktreePath}, nil
 }
 
 // launch 校验 runtime、绑定 lifecycle context 并在后台启动任务
@@ -228,7 +228,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 			m.store.RemoveRuntime(taskID, token)
 			// 先回收孤儿 bash 再关闭 Done:Continue 只等 Done,
 			// 提前关闭会让新 lifecycle 与旧进程并发,清理还会误杀新任务
-			m.store.KillBashTasksForAgent(taskID)
+			m.store.KillBashTasksForTask(taskID)
 			close(runtime.DoneChan)
 		}()
 		// 收尾路径自身的 panic 只记录,不能带崩进程
@@ -267,7 +267,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 				m.store.FailAgent(taskID, token, fmt.Errorf("agent: stop after cancellation failed: %w", err))
 			}
 		}
-		partialResult := agentResult(taskID, runtime.Agent.Context().Messages, runtime.MessageStart, partial, time.Since(started))
+		partialResult := agentResult(runtime.Agent.Context().Messages, runtime.MessageStart, partial, time.Since(started))
 		status := taskpkg.StatusKilled
 		if task, ok := m.store.Task(taskID); ok && task.Base().Status == taskpkg.StatusFailed {
 			status = taskpkg.StatusFailed
@@ -282,7 +282,7 @@ func (m *Manager) runAgent(ctx context.Context, taskID string, token uint64, run
 	} else if runErr != nil {
 		m.failAgent(taskID, token, runtime, input, runErr, started)
 	} else {
-		result := agentResult(taskID, runtime.Agent.Context().Messages, runtime.MessageStart, reply, time.Since(started))
+		result := agentResult(runtime.Agent.Context().Messages, runtime.MessageStart, reply, time.Since(started))
 		transitioned := m.store.CompleteAgent(taskID, token, &result)
 		notification := m.notification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: input.Description, Result: joinText(result.Content), TotalTokens: result.TotalTokens, DurationMs: result.TotalDurationMs, ToolUses: result.TotalToolUseCount})
 		m.cleanupWorktree(taskID, token, runtime)
@@ -329,7 +329,6 @@ func (m *Manager) notification(taskID string, token uint64, notification taskpkg
 	if !ok || task.Base().LifecycleToken != token {
 		return notification
 	}
-	notification.ToolUseID = task.Base().ToolUseID
 	notification.OutputFile = task.Base().OutputFile
 	if agentTask, ok := task.(*taskpkg.AgentState); ok {
 		notification.WorktreePath = agentTask.WorktreePath
@@ -403,8 +402,8 @@ func (m *Manager) updateProgress(taskID string, token uint64, event llm.AgentEve
 
 // agentResult 汇总整个 transcript 的用量。
 // tool call 数与 token 都要跨轮累加,只取最后一条 assistant 会严重低估多轮子任务
-func agentResult(taskID string, messages []llm.Message, start int, reply *llm.AssistantMessage, duration time.Duration) taskpkg.AgentResult {
-	result := taskpkg.AgentResult{AgentID: taskID, TotalDurationMs: duration.Milliseconds()}
+func agentResult(messages []llm.Message, start int, reply *llm.AssistantMessage, duration time.Duration) taskpkg.AgentResult {
+	result := taskpkg.AgentResult{TotalDurationMs: duration.Milliseconds()}
 	// fork 继承的父消息不算子任务的用量
 	if start > 0 && start <= len(messages) {
 		messages = messages[start:]

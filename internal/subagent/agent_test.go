@@ -27,7 +27,7 @@ func TestManagerStartRunsAndPublishesTerminalNotification(t *testing.T) {
 	if launched.Status != "async_launched" || launched.State != taskpkg.StatusRunning {
 		t.Fatalf("launch result = %#v", launched)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 	notifications := manager.Store().DrainNotifications()
 	if len(notifications) != 1 || notifications[0].Status != taskpkg.StatusCompleted || notifications[0].Result != "finished" {
 		t.Fatalf("notifications = %#v", notifications)
@@ -46,17 +46,17 @@ func TestManagerContinueReusesTaskID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), first.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), first.TaskID, taskpkg.StatusCompleted)
 	manager.Store().DrainNotifications()
-	second, err := manager.Continue(context.Background(), first.AgentID, "follow up")
+	second, err := manager.Continue(context.Background(), first.TaskID, "follow up")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.AgentID != first.AgentID || second.Status != "async_launched" {
+	if second.TaskID != first.TaskID || second.Status != "async_launched" {
 		t.Fatalf("continuation result = %#v", second)
 	}
-	waitForTaskStatus(t, manager.Store(), first.AgentID, taskpkg.StatusCompleted)
-	if got := manager.Store().DrainNotifications(); len(got) != 1 || got[0].TaskID != first.AgentID {
+	waitForTaskStatus(t, manager.Store(), first.TaskID, taskpkg.StatusCompleted)
+	if got := manager.Store().DrainNotifications(); len(got) != 1 || got[0].TaskID != first.TaskID {
 		t.Fatalf("continuation notifications = %#v", got)
 	}
 }
@@ -85,11 +85,11 @@ func TestManagerStartDetachesFromToolBatchContext(t *testing.T) {
 	<-started
 	cancel()
 	time.Sleep(20 * time.Millisecond)
-	if task, ok := manager.Store().Task(launched.AgentID); !ok || task.Base().Status != taskpkg.StatusRunning {
+	if task, ok := manager.Store().Task(launched.TaskID); !ok || task.Base().Status != taskpkg.StatusRunning {
 		t.Fatalf("background task stopped with the tool batch context: %#v", task)
 	}
 	close(release)
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 }
 
 func TestManagerNormalizesClaudeGeneralPurposeAliasToWork(t *testing.T) {
@@ -108,7 +108,7 @@ func TestManagerNormalizesClaudeGeneralPurposeAliasToWork(t *testing.T) {
 	if launched.SubagentType != "work" {
 		t.Fatalf("normalized type = %q, want work", launched.SubagentType)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 }
 
 func TestManagerRecoversPanickingRuntime(t *testing.T) {
@@ -129,8 +129,8 @@ func TestManagerRecoversPanickingRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusFailed)
-	task, ok := manager.Store().Task(launched.AgentID)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusFailed)
+	task, ok := manager.Store().Task(launched.TaskID)
 	if !ok || !strings.Contains(task.(*taskpkg.AgentState).Error, "panic: runtime blew up") {
 		t.Fatalf("task error = %#v", task)
 	}
@@ -181,12 +181,12 @@ func TestClaudeContractAsyncAgentsRunConcurrently(t *testing.T) {
 			t.Fatalf("only %d background agents started: %v", len(seen), seen)
 		}
 	}
-	if !seen[first.AgentID] || !seen[second.AgentID] {
-		t.Fatalf("started agents = %v, want %q and %q", seen, first.AgentID, second.AgentID)
+	if !seen[first.TaskID] || !seen[second.TaskID] {
+		t.Fatalf("started agents = %v, want %q and %q", seen, first.TaskID, second.TaskID)
 	}
 	close(release)
-	waitForTaskStatus(t, manager.Store(), first.AgentID, taskpkg.StatusCompleted)
-	waitForTaskStatus(t, manager.Store(), second.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), first.TaskID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), second.TaskID, taskpkg.StatusCompleted)
 }
 
 func waitForTaskStatus(t *testing.T, store *taskpkg.Store, id string, want taskpkg.Status) {
@@ -221,7 +221,7 @@ func TestStartRejectsForkChild(t *testing.T) {
 func TestRunAgentKillsOrphanedBashTasks(t *testing.T) {
 	store := taskpkg.NewStore()
 	orphanID, orphanToken, err := store.Register(taskpkg.RegisterSpec{
-		Type: taskpkg.TypeBash, Description: "orphan", BashState: &taskpkg.BashState{ParentAgentID: "agent-1"},
+		Type: taskpkg.TypeBash, Description: "orphan", BashState: &taskpkg.BashState{ParentTaskID: "agent-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestAgentResultSumsAcrossTurns(t *testing.T) {
 		}, Usage: llm.Usage{InputTokens: 500, OutputTokens: 40, TotalTokens: 540}},
 	}
 	reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, Usage: llm.Usage{InputTokens: 500, OutputTokens: 40}}
-	result := agentResult("agent-1", messages, 0, reply, time.Second)
+	result := agentResult(messages, 0, reply, time.Second)
 	if result.TotalToolUseCount != 3 {
 		t.Fatalf("tool uses = %d, want 3", result.TotalToolUseCount)
 	}
@@ -293,7 +293,7 @@ func TestAgentResultSkipsInheritedMessages(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "c1", Name: "grep"}}, Usage: llm.Usage{OutputTokens: 7}},
 	)
 	reply := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, Usage: llm.Usage{OutputTokens: 3}}
-	result := agentResult("agent-1", child, len(parent), reply, time.Second)
+	result := agentResult(child, len(parent), reply, time.Second)
 	if result.TotalToolUseCount != 1 {
 		t.Fatalf("tool uses = %d, want 1 child call", result.TotalToolUseCount)
 	}
@@ -359,7 +359,7 @@ func TestStartNormalizesGeneralPurposeAlias(t *testing.T) {
 	if launched.SubagentType != "work" {
 		t.Fatalf("subagent type = %q, want work", launched.SubagentType)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 }
 
 // factory 失败时任务不能残留在 store 里
@@ -415,11 +415,11 @@ func TestContinueRejectsRunningTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Continue(context.Background(), launched.AgentID, "again"); err == nil {
+	if _, err := manager.Continue(context.Background(), launched.TaskID, "again"); err == nil {
 		t.Fatal("continuation of a running task was accepted")
 	}
 	close(block)
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusCompleted)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusCompleted)
 }
 
 // run 失败时任务转 failed 并投递 failed 通知,不能留在 running
@@ -432,7 +432,7 @@ func TestRunFailureTransitionsToFailedWithNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusFailed)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusFailed)
 	notifications := manager.Store().DrainNotifications()
 	if len(notifications) != 1 || notifications[0].Status != taskpkg.StatusFailed {
 		t.Fatalf("notifications = %#v, want one failed notification", notifications)
@@ -452,7 +452,7 @@ func TestRunPanicTransitionsToFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusFailed)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusFailed)
 	notifications := manager.Store().DrainNotifications()
 	if len(notifications) != 1 || notifications[0].Status != taskpkg.StatusFailed {
 		t.Fatalf("notifications = %#v, want one failed notification", notifications)
@@ -481,10 +481,10 @@ func TestKilledTaskDeliversPartialResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	if err := taskpkg.KillAgentWithReason(launched.AgentID, manager.Store(), taskpkg.StopReasonUserStop); err != nil {
+	if err := taskpkg.KillAgentWithReason(launched.TaskID, manager.Store(), taskpkg.StopReasonUserStop); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskStatus(t, manager.Store(), launched.AgentID, taskpkg.StatusKilled)
+	waitForTaskStatus(t, manager.Store(), launched.TaskID, taskpkg.StatusKilled)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		notifications := manager.Store().PeekNotifications()

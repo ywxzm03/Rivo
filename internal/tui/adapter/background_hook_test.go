@@ -54,7 +54,7 @@ func TestNotificationPathSurvivesSessionSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{AgentID: taskID}) {
+	if !store.CompleteAgent(taskID, token, &taskpkg.AgentResult{}) {
 		t.Fatal("task did not transition to completed")
 	}
 	if !store.EnqueueNotification(taskID, token, taskpkg.Notification{TaskID: taskID, Status: taskpkg.StatusCompleted, Summary: "job"}) {

@@ -34,7 +34,7 @@ func TestStorePendingMessagesFIFOAndNotificationDeduplication(t *testing.T) {
 	if got := store.DrainPendingMessages(id, token); got != nil {
 		t.Fatalf("second drain = %#v, want empty", got)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	notification := Notification{TaskID: id, Status: StatusCompleted, Summary: "done"}
 	if !store.EnqueueNotification(id, token, notification) || store.EnqueueNotification(id, token, notification) {
 		t.Fatal("notification should be enqueued once")
@@ -132,7 +132,7 @@ func TestRegisterContinuationRejectsStaleLifecycleCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store.CompleteAgent(id, oldToken, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, oldToken, &AgentResult{}) {
 		t.Fatal("initial completion failed")
 	}
 	runtime := &fakeRuntime{done: make(chan struct{})}
@@ -143,10 +143,10 @@ func TestRegisterContinuationRejectsStaleLifecycleCallbacks(t *testing.T) {
 	if newToken == oldToken {
 		t.Fatal("continuation reused lifecycle token")
 	}
-	if store.CompleteAgent(id, oldToken, &AgentResult{AgentID: id}) {
+	if store.CompleteAgent(id, oldToken, &AgentResult{}) {
 		t.Fatal("stale completion changed the replacement lifecycle")
 	}
-	if !store.CompleteAgent(id, newToken, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, newToken, &AgentResult{}) {
 		t.Fatal("replacement completion was rejected")
 	}
 }
@@ -184,7 +184,7 @@ func TestContinuationWaitsForOldRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	done := make(chan struct{})
 	runtime := &fakeRuntime{done: done}
 	store.mu.Lock()
@@ -227,7 +227,10 @@ func TestStoreEnterViewTracksViewingTaskWithoutLoadingTranscript(t *testing.T) {
 // transcript 常驻磁盘:ReadTaskMessages 按偏移增量返回,不缓存完整历史
 func TestStoreReadTaskMessagesIsIncremental(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "child.jsonl")
-	manager := session.NewAt("/project", path)
+	manager, err := session.NewAt("/project", path, "child-session")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.AppendMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "first"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +281,7 @@ func TestStoreEvictKeepsQueuedNotifications(t *testing.T) {
 	if store.Evict(id) {
 		t.Fatal("running task must not be evicted")
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted})
 	// 2.终态任务淘汰后从根投影消失,但未消费的通知必须留在队列里
 	if !store.Evict(id) {
@@ -298,7 +301,7 @@ func TestStoreEvictExpiredReclaimsTerminalTaskAfterGracePeriod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted})
 	task, ok := store.Task(id)
 	if !ok {
@@ -340,7 +343,7 @@ func TestStoreEvictExpiredSkipsUnnotifiedAndRetainedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(unnotified, unnotifiedToken, &AgentResult{AgentID: unnotified})
+	store.CompleteAgent(unnotified, unnotifiedToken, &AgentResult{})
 	retained, retainedToken, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "retained", AgentType: "Work"})
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +351,7 @@ func TestStoreEvictExpiredSkipsUnnotifiedAndRetainedTasks(t *testing.T) {
 	store.mu.Lock()
 	store.tasks[retained].(*AgentState).Retain = true
 	store.mu.Unlock()
-	store.CompleteAgent(retained, retainedToken, &AgentResult{AgentID: retained})
+	store.CompleteAgent(retained, retainedToken, &AgentResult{})
 	store.EnqueueNotification(retained, retainedToken, Notification{TaskID: retained, Status: StatusCompleted})
 	if task, _ := store.Task(retained); task.(*AgentState).EvictAfter != nil {
 		t.Fatal("retained task must not get an eviction deadline")
@@ -374,7 +377,7 @@ func TestStoreEvictExpiredSkipsViewedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted})
 	if !store.EnterView(id) {
 		t.Fatal("could not enter the task view")
@@ -494,7 +497,7 @@ func TestStoreEvictKeepsBashOutputForLateReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(agentID, agentToken, &AgentResult{AgentID: agentID})
+	store.CompleteAgent(agentID, agentToken, &AgentResult{})
 
 	if !store.Evict(bashID) {
 		t.Fatal("bash task was not evicted")
@@ -516,17 +519,17 @@ func TestStoreEvictKeepsBashOutputForLateReads(t *testing.T) {
 }
 
 // 子 agent 结束时回收它启动的后台 bash,避免留下没人能停的孤儿进程
-func TestStoreKillBashTasksForAgent(t *testing.T) {
+func TestStoreKillBashTasksForTask(t *testing.T) {
 	store := NewStore()
-	ownedID, ownedToken, err := store.Register(RegisterSpec{Type: TypeBash, Description: "owned", BashState: &BashState{ParentAgentID: "agent-1"}})
+	ownedID, ownedToken, err := store.Register(RegisterSpec{Type: TypeBash, Description: "owned", BashState: &BashState{ParentTaskID: "agent-1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherID, otherToken, err := store.Register(RegisterSpec{Type: TypeBash, Description: "other", BashState: &BashState{ParentAgentID: "agent-2"}})
+	otherID, otherToken, err := store.Register(RegisterSpec{Type: TypeBash, Description: "other", BashState: &BashState{ParentTaskID: "agent-2"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if killed := store.KillBashTasksForAgent("agent-1"); killed != 1 {
+	if killed := store.KillBashTasksForTask("agent-1"); killed != 1 {
 		t.Fatalf("killed %d owned tasks, want 1", killed)
 	}
 	if task, ok := store.Task(ownedID); !ok || task.Base().Status != StatusKilled {
@@ -546,7 +549,7 @@ func TestStoreEnterViewRetainsTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted})
 	if !store.EnterView(id) {
 		t.Fatal("could not enter the view")
@@ -574,7 +577,7 @@ func TestStoreSnapshotIsolatesMutableResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(agentID, agentToken, &AgentResult{AgentID: agentID, Content: []TextBlock{{Text: "ok"}}})
+	store.CompleteAgent(agentID, agentToken, &AgentResult{Content: []TextBlock{{Text: "ok"}}})
 
 	for _, state := range store.Snapshot() {
 		switch task := state.(type) {
@@ -610,7 +613,7 @@ func TestStoreAckKeepsAgentTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted, OutputFile: transcript})
 	store.AckNotifications(1)
 	if _, err := os.Stat(transcript); err != nil {
@@ -625,7 +628,7 @@ func TestStoreSnapshotIsolatesEvictDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	for _, state := range store.Snapshot() {
 		if state.Base().EvictAfter != nil {
 			*state.Base().EvictAfter = time.Time{}
@@ -645,7 +648,7 @@ func TestStoreRegisterContinuationClonesModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	old, _ := store.Task(id)
 	if _, err := store.RegisterContinuation(id, nil, "next"); err != nil {
 		t.Fatal(err)
@@ -664,12 +667,12 @@ func TestStoreEnterViewReleasesPreviousTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(first, firstToken, &AgentResult{AgentID: first})
+	store.CompleteAgent(first, firstToken, &AgentResult{})
 	second, secondToken, err := store.Register(RegisterSpec{Type: TypeAgent, Description: "second"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(second, secondToken, &AgentResult{AgentID: second})
+	store.CompleteAgent(second, secondToken, &AgentResult{})
 
 	store.EnterView(first)
 	store.EnterView(second)
@@ -694,7 +697,7 @@ func TestStoreEvictRejectsRetainedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	store.EnterView(id)
 	if store.Evict(id) {
 		t.Fatal("retained task was evicted")
@@ -718,7 +721,7 @@ func TestStoreSnapshotIsolatesNestedSamplingParams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(id, token, &AgentResult{AgentID: id})
+	store.CompleteAgent(id, token, &AgentResult{})
 	for _, state := range store.Snapshot() {
 		params := state.(*AgentState).Model.SamplingParams
 		params["nested"].(map[string]any)["list"].([]any)[0] = "mutated"
@@ -744,7 +747,7 @@ func TestStoreKillAllRunningTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.CompleteAgent(doneID, doneToken, &AgentResult{AgentID: doneID})
+	store.CompleteAgent(doneID, doneToken, &AgentResult{})
 
 	if killed := store.KillAllRunningTasks(); killed != 2 {
 		t.Fatalf("killed %d tasks, want 2", killed)
@@ -879,7 +882,7 @@ func newAgentTask(t *testing.T, store *Store, description string) (string, uint6
 func TestEnqueueNotificationDeduplicates(t *testing.T) {
 	store := NewStore()
 	id, token := newAgentTask(t, store, "child")
-	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, token, &AgentResult{}) {
 		t.Fatal("complete failed")
 	}
 	if !store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {
@@ -898,7 +901,7 @@ func TestEnqueueNotificationDeduplicates(t *testing.T) {
 func TestEnqueueNotificationRejectsStaleToken(t *testing.T) {
 	store := NewStore()
 	id, token := newAgentTask(t, store, "child")
-	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, token, &AgentResult{}) {
 		t.Fatal("complete failed")
 	}
 	if store.EnqueueNotification(id, token+1, Notification{TaskID: id, Status: StatusCompleted}) {
@@ -930,7 +933,7 @@ func TestEnqueueNotificationInvokesHookOutsideLock(t *testing.T) {
 		woke <- struct{}{}
 	})
 	id, token := newAgentTask(t, store, "child")
-	if !store.CompleteAgent(id, token, &AgentResult{AgentID: id}) {
+	if !store.CompleteAgent(id, token, &AgentResult{}) {
 		t.Fatal("complete failed")
 	}
 	if !store.EnqueueNotification(id, token, Notification{TaskID: id, Status: StatusCompleted}) {

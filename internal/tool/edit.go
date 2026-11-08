@@ -33,7 +33,7 @@ type EditDetails struct {
 
 func (EditDetails) ToolDetails() {}
 
-func init() { llm.RegisterToolDetails[EditDetails]("patch") }
+func init() { llm.RegisterToolDetails[EditDetails]("edit", "patch") }
 
 type textEdit struct {
 	oldText string
