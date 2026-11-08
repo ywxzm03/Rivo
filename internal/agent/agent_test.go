@@ -1001,11 +1001,14 @@ func TestAgentEventSinkErrorStopsRunAndCancelsModelStream(t *testing.T) {
 
 func TestAgentToolEventSinkErrorCancelsOtherParallelTools(t *testing.T) {
 	sentinel := errors.New("tool event sink failed")
+	started := make(chan struct{})
 	canceled := make(chan struct{})
 	fast := &controlledTool{
 		name: "fast",
 		mode: llm.ToolExecutionParallel,
 		run: func(context.Context) (llm.ToolResult, error) {
+			// 等 slow 进入执行再返回,避免取消发生在 slow 启动前导致它根本没运行
+			<-started
 			return llm.ToolResult{Content: []llm.Content{llm.TextContent{Text: "done"}}}, nil
 		},
 	}
@@ -1013,6 +1016,7 @@ func TestAgentToolEventSinkErrorCancelsOtherParallelTools(t *testing.T) {
 		name: "slow",
 		mode: llm.ToolExecutionParallel,
 		run: func(ctx context.Context) (llm.ToolResult, error) {
+			close(started)
 			<-ctx.Done()
 			close(canceled)
 			return llm.ToolResult{}, ctx.Err()
