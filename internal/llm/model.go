@@ -19,6 +19,8 @@ type Model struct {
 	ContextWindow int
 	// MaxTokens 为 0 表示未知；已知时用于区分输出截断与上下文耗尽
 	MaxTokens int
+	// ReserveTokens 是上下文压缩预留 token；0 表示未配置，回退到默认值
+	ReserveTokens int
 
 	// ThinkingLevelMap 把思考等级映射为该模型的 reasoning effort；值为 nil 表示禁用，
 	// 缺失的等级透传或收敛（xhigh/max 须显式映射才可用）

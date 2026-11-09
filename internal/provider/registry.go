@@ -198,6 +198,7 @@ func modelFromConfig(providerID string, provider config.Provider, definition con
 		SupportsImages:   definition.SupportsImages || hasImageInput(definition.Input),
 		ContextWindow:    contextWindow,
 		MaxTokens:        maxTokens,
+		ReserveTokens:    definition.ReserveTokens,
 		ThinkingLevelMap: thinkingLevelMap(definition.ThinkingLevelMap),
 		SamplingParams:   copyParams(definition.SamplingParams),
 	}
@@ -252,6 +253,9 @@ func applyModelOverride(model llm.Model, override config.ModelOverride) llm.Mode
 	}
 	if override.MaxTokens != nil {
 		model.MaxTokens = *override.MaxTokens
+	}
+	if override.ReserveTokens != nil {
+		model.ReserveTokens = *override.ReserveTokens
 	}
 	if override.ThinkingLevelMap != nil {
 		if model.ThinkingLevelMap == nil {

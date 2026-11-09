@@ -292,3 +292,29 @@ func TestLoadModelsRejectsCaseInsensitiveDuplicateProviderID(t *testing.T) {
 		t.Fatalf("LoadModels() error = %v, want duplicate entry error", err)
 	}
 }
+
+func TestLoadSettingsReadsReserveTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RIVO_AGENT_DIR", home)
+	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"reserveTokens":600000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSettings()
+	if err != nil {
+		t.Fatalf("LoadSettings() error = %v", err)
+	}
+	if s.ReserveTokens != 600000 {
+		t.Errorf("ReserveTokens = %d, want 600000", s.ReserveTokens)
+	}
+}
+
+func TestLoadModelsReadsReserveTokens(t *testing.T) {
+	writeModelsFile(t, `{"providers":{"custom":{"baseUrl":"http://custom/v1","models":[{"id":"m","reserveTokens":600000}]}}}`)
+	m, err := LoadModels()
+	if err != nil {
+		t.Fatalf("LoadModels() error = %v", err)
+	}
+	if got := m.Providers[0].Provider.Models[0].ReserveTokens; got != 600000 {
+		t.Errorf("model ReserveTokens = %d, want 600000", got)
+	}
+}

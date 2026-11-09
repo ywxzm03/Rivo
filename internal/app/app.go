@@ -237,7 +237,7 @@ func newAppWithModel(cfg provider.Config, providerID, modelID string, sm *sessio
 	coord.setModel(model)
 	// 模型窗口已知时启用上下文压缩，摘要调用按默认策略重试瞬时错误
 	if model.ContextWindow > 0 {
-		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
+		coord.Compactor = &compaction.Compactor{StreamFn: streamFn, Model: model, Config: compaction.ConfigFor(model.ContextWindow, model.ReserveTokens), Retry: compaction.DefaultRetryPolicy()}
 	}
 
 	// 2.资源加载：AGENTS.md 链与 skills 读盘一次，后续由 Reload 刷新
@@ -619,11 +619,11 @@ func (a *App) installModel(resolved provider.Resolved) {
 	}
 	if model.ContextWindow > 0 {
 		if a.coordinator.Compactor == nil {
-			a.coordinator.Compactor = &compaction.Compactor{Config: compaction.DefaultConfig(model.ContextWindow), Retry: compaction.DefaultRetryPolicy()}
+			a.coordinator.Compactor = &compaction.Compactor{Config: compaction.ConfigFor(model.ContextWindow, model.ReserveTokens), Retry: compaction.DefaultRetryPolicy()}
 		}
 		a.coordinator.Compactor.Model = model
 		a.coordinator.Compactor.StreamFn = streamFn
-		a.coordinator.Compactor.Config = compaction.DefaultConfig(model.ContextWindow)
+		a.coordinator.Compactor.Config = compaction.ConfigFor(model.ContextWindow, model.ReserveTokens)
 	} else {
 		a.coordinator.Compactor = nil
 	}

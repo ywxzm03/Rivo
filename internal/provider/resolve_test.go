@@ -159,3 +159,57 @@ func TestApplyOverridesProviderPrefixWithoutModelName(t *testing.T) {
 		t.Fatalf("ApplyOverrides() error = %v, want missing-model-name error", err)
 	}
 }
+
+func TestResolveUsesGlobalReserveTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RIVO_AGENT_DIR", home)
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"custom","defaultModel":"m","reserveTokens":600000}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"custom":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"m"}]}}}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	resolved, err := cfg.Resolve("custom", "m")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Model.ReserveTokens != 600000 {
+		t.Errorf("ReserveTokens = %d, want 600000 from settings", resolved.Model.ReserveTokens)
+	}
+}
+
+func TestResolveKeepsModelReserveTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RIVO_AGENT_DIR", home)
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"custom","defaultModel":"m","reserveTokens":600000}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"custom":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"m","reserveTokens":1234}]}}}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	resolved, err := cfg.Resolve("custom", "m")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Model.ReserveTokens != 1234 {
+		t.Errorf("ReserveTokens = %d, want 1234 from model", resolved.Model.ReserveTokens)
+	}
+}
+
+func TestResolveAppliesModelOverrideReserveTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("RIVO_AGENT_DIR", home)
+	writeAgentConfig(t, home, "settings.json", `{"defaultProvider":"custom","defaultModel":"m","reserveTokens":600000}`)
+	writeAgentConfig(t, home, "models.json", `{"providers":{"custom":{"baseUrl":"http://x/v1","apiKey":"k","models":[{"id":"m"}],"modelOverrides":{"m":{"reserveTokens":4321}}}}}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	resolved, err := cfg.Resolve("custom", "m")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Model.ReserveTokens != 4321 {
+		t.Errorf("ReserveTokens = %d, want 4321 from override", resolved.Model.ReserveTokens)
+	}
+}

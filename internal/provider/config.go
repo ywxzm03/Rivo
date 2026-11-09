@@ -18,6 +18,8 @@ type Config struct {
 	ModelID       string
 	ThinkingLevel llm.ThinkingLevel
 	Codemode      config.CodemodeSettings
+	// ReserveTokens 是 settings 中的全局压缩预留 token；0 表示使用默认值
+	ReserveTokens int
 	// Warnings 是加载期的非致命警告，由调用方输出到 stderr
 	Warnings []string
 	// registry 是内置与 models.json 自定义 provider 的合并注册表
@@ -51,6 +53,7 @@ func Load() (Config, error) {
 		cfg.Warnings = append(cfg.Warnings, err.Error())
 	}
 	cfg.Codemode = settings.Codemode
+	cfg.ReserveTokens = settings.ReserveTokens
 	models, err := config.LoadModels()
 	if err != nil {
 		cfg.Warnings = append(cfg.Warnings, err.Error())
@@ -166,6 +169,10 @@ func (c Config) Resolve(providerID, modelID string) (Resolved, error) {
 	model, err := FindModel(spec.id, models, modelID)
 	if err != nil {
 		return Resolved{}, err
+	}
+	// 模型未单独配置时沿用 settings 的全局预留量
+	if model.ReserveTokens <= 0 {
+		model.ReserveTokens = c.ReserveTokens
 	}
 	return Resolved{ProviderID: spec.id, Model: model, Stream: streamFn}, nil
 }

@@ -389,3 +389,16 @@ func TestSummarizeOncePassesMaxTokensOption(t *testing.T) {
 		t.Errorf("MaxTokens = %d, want 8192", got.MaxTokens)
 	}
 }
+
+func TestConfigForReserveTokens(t *testing.T) {
+	// 预留量为 0 时沿用默认值
+	cfg := ConfigFor(1_000_000, 0)
+	if cfg.ReserveTokens != DefaultReserveTokens {
+		t.Errorf("ReserveTokens = %d, want default %d", cfg.ReserveTokens, DefaultReserveTokens)
+	}
+	// 显式预留量覆盖默认值，其余字段仍按默认填充
+	cfg = ConfigFor(1_000_000, 600000)
+	if cfg.ContextWindow != 1_000_000 || cfg.ReserveTokens != 600000 || cfg.KeepRecentTokens != DefaultKeepRecentTokens {
+		t.Errorf("ConfigFor() = %+v, want window 1000000, reserve 600000, keep %d", cfg, DefaultKeepRecentTokens)
+	}
+}

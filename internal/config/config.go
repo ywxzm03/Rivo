@@ -22,10 +22,12 @@ const agentDirEnv = "RIVO_AGENT_DIR"
 
 // Settings 对应 ~/.rivo/settings.json
 type Settings struct {
-	DefaultProvider      string           `json:"defaultProvider"`
-	DefaultModel         string           `json:"defaultModel"`
-	DefaultThinkingLevel string           `json:"defaultThinkingLevel"`
-	Codemode             CodemodeSettings `json:"codemode"`
+	DefaultProvider      string `json:"defaultProvider"`
+	DefaultModel         string `json:"defaultModel"`
+	DefaultThinkingLevel string `json:"defaultThinkingLevel"`
+	// ReserveTokens 是上下文压缩预留 token；0 表示使用内置默认值
+	ReserveTokens int              `json:"reserveTokens"`
+	Codemode      CodemodeSettings `json:"codemode"`
 }
 
 // CodemodeSettings 保留显式开关，缺省值由装配层解析
@@ -40,7 +42,9 @@ type Model struct {
 	API           string `json:"api"`
 	ContextWindow int    `json:"contextWindow"`
 	MaxTokens     int    `json:"maxTokens"`
-	Reasoning     bool   `json:"reasoning"`
+	// ReserveTokens 是上下文压缩预留 token；0 表示使用 settings 的全局默认
+	ReserveTokens int  `json:"reserveTokens"`
+	Reasoning     bool `json:"reasoning"`
 	// SupportsImages 影响 read 工具是否把图片降级为文字说明
 	SupportsImages bool `json:"supportsImages"`
 	// Input 包含 image 时表示模型接受图片
@@ -89,6 +93,7 @@ type ModelOverride struct {
 	Cost             *CostOverride      `json:"cost"`
 	ContextWindow    *int               `json:"contextWindow"`
 	MaxTokens        *int               `json:"maxTokens"`
+	ReserveTokens    *int               `json:"reserveTokens"`
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 	SamplingParams   map[string]any     `json:"samplingParams"`
 }

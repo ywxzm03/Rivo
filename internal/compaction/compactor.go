@@ -21,11 +21,14 @@ type Config struct {
 	KeepRecentTokens int
 }
 
-// DefaultConfig 以模型窗口大小生成默认配置
-func DefaultConfig(contextWindow int) Config {
+// ConfigFor 用模型窗口和预留量生成配置；预留量 <=0 时使用默认值
+func ConfigFor(contextWindow, reserveTokens int) Config {
+	if reserveTokens <= 0 {
+		reserveTokens = DefaultReserveTokens
+	}
 	return Config{
 		ContextWindow:    contextWindow,
-		ReserveTokens:    DefaultReserveTokens,
+		ReserveTokens:    reserveTokens,
 		KeepRecentTokens: DefaultKeepRecentTokens,
 	}
 }
