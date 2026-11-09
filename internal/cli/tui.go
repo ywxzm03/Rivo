@@ -76,7 +76,6 @@ func runTUI(cfg provider.Config, target sessionTarget, initialPrompt string, std
 		RestoreSteeringMessages: runtime.RestoreSteeringMessages,
 		EnqueueFollowUpMessage:  runtime.EnqueueFollowUpMessage,
 		RestoreFollowUpMessages: runtime.RestoreFollowUpMessages,
-		ClearFollowUp:           runtime.ClearFollowUp,
 		ReadClipboardData:       readClipboardData,
 		SubagentRequest:         runtime.SubagentRequest,
 		SubagentSnapshot:        runtime.SubagentSnapshot,

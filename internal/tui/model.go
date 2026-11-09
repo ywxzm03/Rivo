@@ -224,7 +224,6 @@ type Handlers struct {
 	EnqueueFollowUpMessage  func(ComposerPayload) error
 	// RestoreFollowUpMessages 原子取出后台尚未消费的 follow-up
 	RestoreFollowUpMessages func() []ComposerPayload
-	ClearFollowUp           func() []ComposerPayload
 	ReadClipboard           func() (string, error)
 	ReadClipboardData       func() (ClipboardData, error)
 	WriteClipboard          func(string) error
@@ -1316,23 +1315,6 @@ func (m *Model) restoreQueuedMessages() int {
 	m.composer.completion, m.composer.completionHidden = 0, true
 	m.layout()
 	return len(steering) + len(followUp)
-}
-
-func (m *Model) clearQueuedFollowUp() int {
-	var count int
-	if m.handlers.ClearFollowUp != nil {
-		count = len(m.handlers.ClearFollowUp())
-	} else {
-		count = len(m.state.FollowUp)
-	}
-	count += len(m.takeCompactionMessages(queuedFollowUp))
-	m.state.FollowUp = nil
-	m.state.FollowUpInputs = nil
-	m.queues.followUpRevision++
-	m.state.FollowUpRevision = m.queues.followUpRevision
-	m.queues.followUpRestored = true
-	m.layout()
-	return count
 }
 
 func (m *Model) notice(value string) {

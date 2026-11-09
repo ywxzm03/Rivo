@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -25,7 +24,6 @@ var commands = []slashCommand{
 	{"clear", "Clear the current conversation context"},
 	{"delete", "Delete the current session and exit Rivo"},
 	{"compact", "[instructions] — Compact the conversation"},
-	{"clear-follow-up", "Clear queued follow-up messages"},
 	{"status", "Show model, context usage and session info"},
 	{"ps", "List background shells"},
 	{"stop", "Stop all background shells"},
@@ -461,14 +459,6 @@ func (m *Model) submitCommand(name, arg string) tea.Cmd {
 		return m.openSelector("resume", arg)
 	case "/compact":
 		return m.dispatch(RequestCompact, arg)
-	case "/clear-follow-up":
-		if arg != "" {
-			m.notice("Usage: /clear-follow-up")
-			return nil
-		}
-		count := m.clearQueuedFollowUp()
-		m.notice(fmt.Sprintf("Cleared %d follow-up message(s)", count))
-		return nil
 	case "/status":
 		if arg != "" {
 			m.notice("Usage: /status")
@@ -608,10 +598,10 @@ func (m *Model) handleTaskKillKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 // runnableWhileBusy 报告命令能否在 agent 运行中执行。
 // /ps 只读后台 shell 状态,/stop 只发终止信号,都不改动对话上下文,
-// 因此与 /clear-follow-up 一样不受忙碌态限制
+// 因此不受忙碌态限制
 func runnableWhileBusy(name string) bool {
 	switch name {
-	case "/clear-follow-up", "/ps", "/stop":
+	case "/ps", "/stop":
 		return true
 	default:
 		return false

@@ -588,16 +588,6 @@ func (r *Runtime) RestoreFollowUpMessages() []tui.ComposerPayload {
 	return payloadsFromMessages(queueUserMessagesFrom(activeApp, agent.QueueFollowUp))
 }
 
-func (r *Runtime) ClearFollowUp() []tui.ComposerPayload {
-	r.mu.Lock()
-	activeApp := r.app
-	r.mu.Unlock()
-	if activeApp == nil {
-		return nil
-	}
-	return payloadsFromMessages(queueUserMessagesFrom(activeApp, agent.QueueFollowUp))
-}
-
 func (r *Runtime) EnqueueFollowUpMessage(value tui.ComposerPayload) error {
 	r.mu.Lock()
 	activeApp := r.app

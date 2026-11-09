@@ -239,21 +239,6 @@ func TestBusyTabRoutesPlainTextToFollowUp(t *testing.T) {
 	}
 }
 
-func TestBusyFollowUpControlCommandClearsQueue(t *testing.T) {
-	m := testModel(60, 15)
-	m.busy, m.status = true, "Working"
-	m.state.FollowUp = []string{"follow-up"}
-	m.state.FollowUpInputs = []ComposerPayload{textPayload("follow-up")}
-	typeText(m, "/clear-follow-up")
-	press(m, tea.KeyEnter)
-	if len(m.state.FollowUp) != 0 || len(m.state.FollowUpInputs) != 0 {
-		t.Fatalf("follow-up state = %v/%v, want empty", m.state.FollowUp, m.state.FollowUpInputs)
-	}
-	if !strings.Contains(m.state.Messages[len(m.state.Messages)-1].Text, "Cleared 1 follow-up message") {
-		t.Fatalf("clear notice = %+v", m.state.Messages[len(m.state.Messages)-1])
-	}
-}
-
 func TestCompactionStagesEnterAndTabThenFlushesByQueue(t *testing.T) {
 	m := testModel(60, 15)
 	var routed []string
