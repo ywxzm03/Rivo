@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 func TestPasteFoldLargePaste(t *testing.T) {
@@ -17,7 +16,7 @@ func TestPasteFoldLargePaste(t *testing.T) {
 	if got := m.editor.Value(); !strings.Contains(got, "[paste #1 +11 lines]") {
 		t.Fatalf("large paste should fold to marker: %q", got)
 	}
-	if stored := m.pastes[1]; stored != body {
+	if stored := m.composer.pastes[1]; stored != body {
 		t.Fatalf("paste content not stored verbatim: %d runes vs %d", len([]rune(stored)), len([]rune(body)))
 	}
 }
@@ -31,19 +30,16 @@ func TestClipboardImagePasteBuildsStructuredUserMessage(t *testing.T) {
 		return nil
 	}}
 	typeText(m, "describe ")
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}})
 	press(m, tea.KeyEnter)
-	if request.Message == nil {
-		t.Fatal("image submission did not build a structured message")
+	if request.Payload == nil {
+		t.Fatal("image submission did not build a payload")
 	}
-	if len(request.Message.Content) != 2 {
-		t.Fatalf("content = %#v, want text and image", request.Message.Content)
+	if request.Payload.Text != "describe " {
+		t.Fatalf("payload text = %q, want %q", request.Payload.Text, "describe ")
 	}
-	if text, ok := request.Message.Content[0].(llm.TextContent); !ok || text.Text != "describe " {
-		t.Fatalf("content[0] = %#v, want text", request.Message.Content[0])
-	}
-	if image, ok := request.Message.Content[1].(llm.ImageContent); !ok || image.MIMEType != "image/png" {
-		t.Fatalf("content[1] = %#v, want image", request.Message.Content[1])
+	if len(request.Payload.Images) != 1 || request.Payload.Images[0].MIMEType != "image/png" {
+		t.Fatalf("payload images = %#v, want one png", request.Payload.Images)
 	}
 }
 
@@ -54,7 +50,7 @@ func TestImageOnlyPasteIsVisibleAndRequiresVisionModel(t *testing.T) {
 		called = true
 		return nil
 	}}
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}})
 	if !strings.Contains(m.editor.Value(), "[Image #1]") {
 		t.Fatalf("image placeholder missing: %q", m.editor.Value())
 	}
@@ -71,12 +67,12 @@ func TestImageHistoryRestoresAttachment(t *testing.T) {
 	m := testModel(80, 24)
 	m.state.Models[0].SupportsImages = true
 	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}})
 	press(m, tea.KeyEnter)
 	m.busy = false
 	press(m, tea.KeyUp)
-	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
-		t.Fatalf("history did not restore image draft: value=%q images=%d", m.editor.Value(), len(m.images))
+	if m.editor.Value() != "[Image #1]" || len(m.composer.images) != 1 {
+		t.Fatalf("history did not restore image draft: value=%q images=%d", m.editor.Value(), len(m.composer.images))
 	}
 }
 
@@ -85,25 +81,25 @@ func TestImageHistoryIgnoresLiteralImageMarkers(t *testing.T) {
 	m.state.Models[0].SupportsImages = true
 	m.handlers = Handlers{Request: func(Request) tea.Cmd { return nil }}
 	typeText(m, "literal [Image #1] then ")
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}})
 	press(m, tea.KeyEnter)
 	m.busy = false
 	press(m, tea.KeyUp)
-	message, ok := m.buildUserMessage()
-	if !ok || !messageHasImages(message) || len(m.images) != 1 {
-		t.Fatalf("history image restore = message=%#v images=%d", message, len(m.images))
+	payload, ok := m.buildPayload()
+	if !ok || !payloadHasImages(payload) || len(m.composer.images) != 1 {
+		t.Fatalf("history image restore = payload=%#v images=%d", payload, len(m.composer.images))
 	}
-	if _, ok := m.images[2]; !ok {
-		t.Fatalf("restored image map = %#v, want actual image marker #2", m.images)
+	if _, ok := m.composer.images[2]; !ok {
+		t.Fatalf("restored image map = %#v, want actual image marker #2", m.composer.images)
 	}
-	if _, ok := message.Content[len(message.Content)-1].(llm.ImageContent); !ok {
-		t.Fatalf("restored content = %#v, want image after literal marker", message.Content)
+	if len(payload.Images) == 0 {
+		t.Fatalf("restored payload = %#v, want image after literal marker", payload)
 	}
 }
 
 func TestBackspaceDeletesLastImageMarker(t *testing.T) {
 	m := testModel(80, 24)
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{
 		{Data: "one", MIMEType: "image/png"},
 		{Data: "two", MIMEType: "image/png"},
 	}}})
@@ -111,8 +107,8 @@ func TestBackspaceDeletesLastImageMarker(t *testing.T) {
 	if got := m.editor.Value(); got != "[Image #1]" {
 		t.Fatalf("editor after deleting last image = %q", got)
 	}
-	if len(m.images) != 1 {
-		t.Fatalf("images after deleting last image = %d, want 1", len(m.images))
+	if len(m.composer.images) != 1 {
+		t.Fatalf("images after deleting last image = %d, want 1", len(m.composer.images))
 	}
 }
 
@@ -120,13 +116,13 @@ func TestSteeringImageEnqueueFailureRestoresAttachment(t *testing.T) {
 	m := testModel(80, 24)
 	m.state.Models[0].SupportsImages = true
 	m.busy = true
-	m.handlers = Handlers{EnqueueSteeringMessage: func(llm.UserMessage) error {
+	m.handlers = Handlers{EnqueueSteeringMessage: func(ComposerPayload) error {
 		return errors.New("queue unavailable")
 	}}
-	m.Update(clipboardReadMsg{data: ClipboardData{Images: []llm.ImageContent{{Data: "aGk=", MIMEType: "image/png"}}}})
+	m.Update(clipboardReadMsg{data: ClipboardData{Images: []ImagePart{{Data: "aGk=", MIMEType: "image/png"}}}})
 	press(m, tea.KeyEnter)
-	if m.editor.Value() != "[Image #1]" || len(m.images) != 1 {
-		t.Fatalf("failed steering restore = value=%q images=%d", m.editor.Value(), len(m.images))
+	if m.editor.Value() != "[Image #1]" || len(m.composer.images) != 1 {
+		t.Fatalf("failed steering restore = value=%q images=%d", m.editor.Value(), len(m.composer.images))
 	}
 }
 
@@ -146,8 +142,8 @@ func TestPasteNoFoldSmall(t *testing.T) {
 	if got := m.editor.Value(); got != body {
 		t.Fatalf("small paste should insert verbatim: %q", got)
 	}
-	if len(m.pastes) != 0 {
-		t.Fatalf("small paste should not register: %v", m.pastes)
+	if len(m.composer.pastes) != 0 {
+		t.Fatalf("small paste should not register: %v", m.composer.pastes)
 	}
 }
 
@@ -165,8 +161,8 @@ func TestManualTypingNoFold(t *testing.T) {
 	if strings.Contains(m.editor.Value(), "[paste #") {
 		t.Fatal("manual typing must never fold")
 	}
-	if len(m.pastes) != 0 {
-		t.Fatalf("manual typing should not register: %v", m.pastes)
+	if len(m.composer.pastes) != 0 {
+		t.Fatalf("manual typing should not register: %v", m.composer.pastes)
 	}
 }
 
@@ -184,12 +180,12 @@ func TestSubmitExpandsPaste(t *testing.T) {
 	if dispatched != body+"tail" {
 		t.Fatalf("submit should expand markers, got %q", dispatched)
 	}
-	if len(m.pastes) != 0 || m.editor.Value() != "" {
-		t.Fatalf("submit should clear pastes and editor: %v %q", m.pastes, m.editor.Value())
+	if len(m.composer.pastes) != 0 || m.editor.Value() != "" {
+		t.Fatalf("submit should clear pastes and editor: %v %q", m.composer.pastes, m.editor.Value())
 	}
-	if len(m.history) != 1 || m.history[0] != body+"tail" {
-		t.Fatalf("history should keep expanded text: %q", m.history)
-	}
+	m.busy = false
+	press(m, tea.KeyUp)
+	assertHistoryText(t, m, body+"tail")
 }
 
 func TestSubmitLiteralMarker(t *testing.T) {
@@ -211,14 +207,14 @@ func TestBackspaceDeletesMarker(t *testing.T) {
 	pasteText(m, strings.Repeat("line\n", 10)+"line")
 	typeText(m, "after")
 	// 光标在 "after" 末尾，先退 5 次到标记尾部
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		press(m, tea.KeyBackspace)
 	}
 	press(m, tea.KeyBackspace)
 	if strings.Contains(m.editor.Value(), "[paste #") {
 		t.Fatalf("marker should be deleted atomically: %q", m.editor.Value())
 	}
-	if _, ok := m.pastes[1]; ok {
+	if _, ok := m.composer.pastes[1]; ok {
 		t.Fatal("registry entry should be removed with the marker")
 	}
 }
@@ -231,7 +227,7 @@ func TestBackspaceDeletesMarkerAfterMultibytePrefix(t *testing.T) {
 	if got := m.editor.Value(); got != "中文前缀" {
 		t.Fatalf("multibyte marker deletion = %q", got)
 	}
-	if len(m.pastes) != 0 {
+	if len(m.composer.pastes) != 0 {
 		t.Fatal("deleted marker remained registered")
 	}
 }
@@ -245,8 +241,8 @@ func TestDeleteNoRenumber(t *testing.T) {
 	press(m, tea.KeyBackspace)
 	press(m, tea.KeyBackspace)
 	press(m, tea.KeyBackspace)
-	if got := m.editor.Value(); got != "" || len(m.pastes) != 0 {
-		t.Fatalf("markers and separator should be gone: %q %v", got, m.pastes)
+	if got := m.editor.Value(); got != "" || len(m.composer.pastes) != 0 {
+		t.Fatalf("markers and separator should be gone: %q %v", got, m.composer.pastes)
 	}
 	// 重新粘贴两次（id 从 #3 继续），验证删除其中一个后剩余标记仍按原 id 展开：
 	// 用 ctrl+a 回到行首，再从行首向后逐字符左移不可行；改为整删 #4（尾部 backspace），
@@ -260,8 +256,8 @@ func TestDeleteNoRenumber(t *testing.T) {
 	}
 	press(m, tea.KeyBackspace) // 删空格
 	press(m, tea.KeyBackspace) // 整删 #3
-	if got := m.editor.Value(); got != "" || len(m.pastes) != 0 {
-		t.Fatalf("all markers should be gone: %q %v", got, m.pastes)
+	if got := m.editor.Value(); got != "" || len(m.composer.pastes) != 0 {
+		t.Fatalf("all markers should be gone: %q %v", got, m.composer.pastes)
 	}
 	pasteText(m, strings.Repeat("a\n", 10)+"a")
 	var dispatched string

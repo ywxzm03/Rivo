@@ -8,10 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -40,13 +41,13 @@ type SessionManager struct {
 
 const maxSessionWarnings = 100
 
-// DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/agent/sessions/--<编码后的cwd>--/
+// DefaultDir 返回 cwd 对应的默认会话目录 ~/.rivo/sessions/--<编码后的cwd>--/
 func DefaultDir(cwd string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent", "sessions", dirName(cwd)), nil
+	return filepath.Join(home, ".rivo", "sessions", dirName(cwd)), nil
 }
 
 // dirName 把 cwd 编码为安全的目录名：去掉首个路径分隔符，/、\、: 替换为 -，以 -- 包裹
@@ -89,6 +90,17 @@ func newWithID(cwd, dir, id string) *SessionManager {
 	}
 }
 
+// NewAt 创建调用方指定路径与 ID 的会话。子任务用它把任务号同时作为会话号,
+// 不再额外生成一份随机标识
+func NewAt(cwd, path, id string) (*SessionManager, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	m := newWithID(cwd, filepath.Dir(path), id)
+	m.sessionFile = path
+	return m, nil
+}
+
 // Open 加载指定会话文件，加载成功即视为已完成首次 flush；
 // 0 字节文件按新会话处理，文件末尾缺换行时补写一个，防止追加与残行粘连
 func Open(path, cwd string) (*SessionManager, error) {
@@ -102,6 +114,34 @@ func Open(path, cwd string) (*SessionManager, error) {
 		_ = os.Remove(path)
 		return m, nil
 	}
+	return openData(path, data)
+}
+
+// OpenWithID 打开必须已存在且身份匹配的会话。
+// 空白文件、缺失会话头与 ID 不匹配都拒绝,不能退回新建或删除文件
+func OpenWithID(path, expectedID string) (*SessionManager, error) {
+	if err := ValidateID(expectedID); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("session: failed to read session file: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, fmt.Errorf("session: %s is empty and cannot be reopened as %s", path, expectedID)
+	}
+	m, err := openData(path, data)
+	if err != nil {
+		return nil, err
+	}
+	if m.header.ID != expectedID {
+		return nil, fmt.Errorf("session: %s belongs to %s, want %s", path, m.header.ID, expectedID)
+	}
+	return m, nil
+}
+
+// openData 从已读入的文件内容重建会话,调用方负责空文件与身份校验
+func openData(path string, data []byte) (*SessionManager, error) {
 	header, entries, records, warnings, err := parseFileWithRecords(data)
 	if err != nil {
 		return nil, err
@@ -132,6 +172,8 @@ func (m *SessionManager) LastEntryID() string {
 	return m.entries[len(m.entries)-1].base().ID
 }
 
+func (m *SessionManager) LeafEntryID() string { return m.leafID }
+
 func (m *SessionManager) AppendMessage(msg llm.Message) error {
 	return m.appendEntry(&MessageEntry{Message: priceMessage(msg)})
 }
@@ -148,7 +190,7 @@ func (m *SessionManager) AppendThinkingLevelChange(level string) error {
 func (m *SessionManager) AppendSessionInfo(name string) error {
 	name = strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(name))
 	if name == "" {
-		return errors.New("Usage: /rename <new Name>")
+		return errors.New("usage: /rename <new Name>")
 	}
 	return m.appendEntry(&SessionInfoEntry{Name: name})
 }
@@ -171,7 +213,7 @@ func (m *SessionManager) AppendUsage(kind, provider, model string, usage llm.Usa
 		Kind:     kind,
 		Provider: provider,
 		Model:    model,
-		Usage:    usageWire(usage),
+		Usage:    cloneUsage(usage),
 		Note:     note,
 	})
 }
@@ -181,7 +223,7 @@ func (m *SessionManager) AppendCompaction(summary, firstKeptEntryID string, toke
 	return m.AppendCompactionWithDetails(summary, firstKeptEntryID, tokensBefore, systemMessage, usage, nil)
 }
 
-func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *compact.FileLists) error {
+func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID string, tokensBefore int, systemMessage *llm.SystemMessage, usage *llm.Usage, details *ctxview.FileLists) error {
 	e := &CompactionEntry{
 		Summary:          summary,
 		FirstKeptEntryID: firstKeptEntryID,
@@ -190,8 +232,8 @@ func (m *SessionManager) AppendCompactionWithDetails(summary, firstKeptEntryID s
 		SystemMessage:    systemMessage,
 	}
 	if usage != nil {
-		wire := usageWire(*usage)
-		e.Usage = &wire
+		cloned := cloneUsage(*usage)
+		e.Usage = &cloned
 	}
 	if firstKeptEntryID == "" {
 		e.ID = m.newEntryID()
@@ -271,11 +313,9 @@ func (m *SessionManager) AddWarning(warning string) {
 		return
 	}
 	m.persistMu.Lock()
-	for _, existing := range m.warnings {
-		if existing == warning {
-			m.persistMu.Unlock()
-			return
-		}
+	if slices.Contains(m.warnings, warning) {
+		m.persistMu.Unlock()
+		return
 	}
 	if len(m.warnings) >= maxSessionWarnings {
 		copy(m.warnings, m.warnings[len(m.warnings)-maxSessionWarnings+1:])

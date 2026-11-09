@@ -480,7 +480,7 @@ func TestBranchMovesLeafOnly(t *testing.T) {
 
 func TestEncodingFailureDoesNotLeavePartialFileOrPublishEntries(t *testing.T) {
 	m := New("/project", t.TempDir())
-	if err := m.AppendMessage(llm.ToolResultMessage{Details: make(chan int)}); err == nil {
+	if err := m.AppendMessage(llm.ToolResultMessage{Details: unencodableDetails{}}); err == nil {
 		t.Fatal("want encoding failure")
 	}
 	if len(m.entries) != 0 || m.leafID != "" {
@@ -506,4 +506,13 @@ func TestDirNameEncoding(t *testing.T) {
 			t.Errorf("dirName(%q) = %q, want %q", tt.cwd, got, tt.want)
 		}
 	}
+}
+
+// unencodableDetails 用于验证编码失败时不会留下半截状态
+type unencodableDetails struct{}
+
+func (unencodableDetails) ToolDetails() {}
+
+func (unencodableDetails) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("unencodable details")
 }

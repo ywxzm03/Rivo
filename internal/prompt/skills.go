@@ -30,7 +30,10 @@ func discoverSkills(cwd, agentDir string) []Skill {
 	seenFiles := make(map[string]bool)
 	add := func(skill Skill) {
 		// 同一份 SKILL.md 通过多个软链接出现时只保留第一次结果
-		fileKey := skillFileKey(skill.FilePath)
+		fileKey := skill.fileKey
+		if fileKey == "" {
+			fileKey = skillFileKey(skill.FilePath)
+		}
 		if seenFiles[fileKey] {
 			return
 		}
@@ -54,47 +57,71 @@ func discoverSkills(cwd, agentDir string) []Skill {
 
 // loadSkillsFromDir 扫描 skills 根目录及其子目录，目录不存在或读取失败按空结果处理
 func loadSkillsFromDir(dir string) []Skill {
-	return loadSkillsFromDirRecursive(dir, make(map[string]bool))
-}
-
-// loadSkillsFromDirRecursive 递归扫描目录并按真实路径防止软链接循环
-func loadSkillsFromDirRecursive(dir string, visited map[string]bool) []Skill {
 	dirKey, ok := skillFileKeyIfExists(dir)
-	if !ok || visited[dirKey] {
+	if !ok {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	return loadSkillsFromDirRecursive(dir, dirKey, make(map[string]bool))
+}
+
+// loadSkillsFromDirRecursive 递归扫描目录并按真实路径防止软链接循环；
+// dir 是展示路径，dirKey 是对应的规范真实路径，只有目录项本身是软链接时才重新解析
+func loadSkillsFromDirRecursive(dir, dirKey string, visited map[string]bool) []Skill {
+	if visited[dirKey] {
 		return nil
 	}
 	visited[dirKey] = true
-	// 当前目录声明了 Skill 时，优先使用它并停止向下递归
-	for _, entry := range entries {
-		if entry.Name() != "SKILL.md" {
-			continue
-		}
-		rootSkillPath := filepath.Join(dir, entry.Name())
-		info, err := os.Stat(rootSkillPath)
-		if err != nil || !info.Mode().IsRegular() {
+	// 当前目录声明了 Skill 时，优先使用它并停止向下递归；直接 Lstat 候选文件，
+	// 避免为一个 skill 目录多付一次 ReadDir
+	rootSkillPath := filepath.Join(dir, "SKILL.md")
+	if info, err := os.Lstat(rootSkillPath); err == nil {
+		fileKey := filepath.Join(dirKey, "SKILL.md")
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, ok := skillFileKeyIfExists(rootSkillPath)
+			if !ok {
+				return nil
+			}
+			fileKey = resolved
+			target, err := os.Stat(rootSkillPath)
+			if err != nil || !target.Mode().IsRegular() {
+				return nil
+			}
+		} else if !info.Mode().IsRegular() {
 			return nil
 		}
-		if skill, ok := loadSkillFromFile(rootSkillPath, dir); ok {
+		if skill, ok := loadSkillFromFile(rootSkillPath, dir, fileKey); ok {
 			return []Skill{skill}
 		}
 		return nil
 	}
 
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
 	var skills []Skill
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || name == "node_modules" {
 			continue
 		}
-		skillDir := filepath.Join(dir, entry.Name())
-		info, err := os.Stat(skillDir)
-		if err != nil || !info.IsDir() {
+		skillDir := filepath.Join(dir, name)
+		childKey := filepath.Join(dirKey, name)
+		// 用 Lstat 结果判断类型，不依赖 DirEntry.Type：部分文件系统返回 DT_UNKNOWN
+		info, err := entry.Info()
+		if err != nil {
 			continue
 		}
-		skills = append(skills, loadSkillsFromDirRecursive(skillDir, visited)...)
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, ok := skillFileKeyIfExists(skillDir)
+			if !ok {
+				continue
+			}
+			childKey = resolved
+		} else if !info.IsDir() {
+			continue
+		}
+		skills = append(skills, loadSkillsFromDirRecursive(skillDir, childKey, visited)...)
 	}
 	return skills
 }
@@ -124,7 +151,7 @@ func skillFileKeyIfExists(path string) (string, bool) {
 }
 
 // loadSkillFromFile 解析单个 SKILL.md：frontmatter 非法或校验失败时跳过
-func loadSkillFromFile(path, baseDir string) (Skill, bool) {
+func loadSkillFromFile(path, baseDir, fileKey string) (Skill, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Skill{}, false
@@ -151,6 +178,7 @@ func loadSkillFromFile(path, baseDir string) (Skill, bool) {
 		FilePath:               path,
 		BaseDir:                baseDir,
 		DisableModelInvocation: frontmatter.DisableModelInvocation,
+		fileKey:                fileKey,
 	}, true
 }
 

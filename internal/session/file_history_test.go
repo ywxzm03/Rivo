@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -200,7 +201,7 @@ func TestOpenSkipsMalformedFileHistoryRecordAndRecordsWarning(t *testing.T) {
 
 func TestWarningsAreBoundedAndDeduplicated(t *testing.T) {
 	m := New("/project", t.TempDir())
-	for index := 0; index < maxSessionWarnings+10; index++ {
+	for index := range maxSessionWarnings + 10 {
 		m.AddWarning(fmt.Sprintf("warning-%d", index))
 	}
 	m.AddWarning("warning-109")
@@ -232,10 +233,5 @@ func splitLines(data []byte) [][]byte {
 }
 
 func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }

@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 const (
@@ -122,7 +122,7 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 		return llm.ToolResult{}, err
 	}
 	// 2.转化为绝对路径
-	absPath, isDirectory, err := resolveGrepPath(options.searchPath, g.WorkingDir)
+	absPath, isDirectory, err := resolveGrepPath(options.searchPath, toolWorkingDir(ctx, g.WorkingDir))
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
@@ -138,40 +138,44 @@ func (g *Grep) Execute(ctx context.Context, args map[string]any) (llm.ToolResult
 	return llm.ToolResult{Content: formatGrepOutput(result, options.limit, options.contextLines, absPath, isDirectory)}, nil
 }
 
-func parseGrepArgs(args map[string]any) (grepOptions, error) {
-	pattern, ok := args["pattern"].(string)
-	if !ok {
+// grepParams 是 grep 工具的参数形状
+type grepParams struct {
+	Pattern    string `json:"pattern"`
+	Path       string `json:"path"`
+	Glob       string `json:"glob"`
+	IgnoreCase bool   `json:"ignoreCase"`
+	Literal    bool   `json:"literal"`
+	Context    int    `json:"context"`
+	// Limit 用指针区分「未提供」与「显式传 0」
+	Limit *int `json:"limit"`
+}
+
+func parseGrepArgs(values map[string]any) (grepOptions, error) {
+	params, err := toolargs.Decode[grepParams](values)
+	if err != nil {
+		return grepOptions{}, err
+	}
+	if params.Pattern == "" {
 		return grepOptions{}, fmt.Errorf("grep: missing required parameter: pattern")
 	}
-	searchPath, _ := args["path"].(string)
+	searchPath := params.Path
 	if searchPath == "" {
 		searchPath = "."
 	}
-	contextLines, _ := argInt(args, "context")
-	if contextLines < 0 {
-		contextLines = 0
+	contextLines := max(params.Context, 0)
+	limit := grepDefaultLimit
+	if params.Limit != nil {
+		limit = max(*params.Limit, 1)
 	}
-	limit, hasLimit := argInt(args, "limit")
-	if !hasLimit {
-		limit = grepDefaultLimit
-	} else if limit < 1 {
-		limit = 1
-	}
-	glob, _ := args["glob"].(string)
 	return grepOptions{
-		pattern:      pattern,
+		pattern:      params.Pattern,
 		searchPath:   searchPath,
-		glob:         glob,
-		ignoreCase:   boolArg(args, "ignoreCase"),
-		literal:      boolArg(args, "literal"),
+		glob:         params.Glob,
+		ignoreCase:   params.IgnoreCase,
+		literal:      params.Literal,
 		contextLines: contextLines,
 		limit:        limit,
 	}, nil
-}
-
-func boolArg(args map[string]any, key string) bool {
-	value, _ := args[key].(bool)
-	return value
 }
 
 func resolveGrepPath(searchPath, workingDir string) (string, bool, error) {
@@ -182,7 +186,7 @@ func resolveGrepPath(searchPath, workingDir string) (string, bool, error) {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", false, fmt.Errorf("Path not found: %s", absPath)
+			return "", false, fmt.Errorf("path not found: %s", absPath)
 		}
 		return "", false, err
 	}
@@ -205,39 +209,16 @@ func buildRipgrepArgs(options grepOptions, absPath string) []string {
 
 // runRipgrep 执行 rg，流式解析匹配和上下文事件
 func runRipgrep(ctx context.Context, rgPath string, args []string, absPath string, isDirectory bool, options grepOptions) (grepResult, error) {
-	// 1.执行 rg 命令
-	command := exec.CommandContext(ctx, rgPath, args...)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return grepResult{}, err
-	}
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	configureShellProcess(command)
-	if err := command.Start(); err != nil {
-		return grepResult{}, err
-	}
-
 	result := grepResult{matches: make([]grepMatch, 0)}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	killedDueToLimit := false
-	// 2.逐条解析 match 事件，达到匹配上限后停止搜索
-	for scanner.Scan() {
-		if killedDueToLimit {
-			break
-		}
+	stopped, err := runRipgrepStream(ctx, rgPath, "", args, func(line []byte) bool {
 		var event ripgrepEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			continue
-		}
-		if event.Type != "match" {
-			continue
+		if err := json.Unmarshal(line, &event); err != nil || event.Type != "match" {
+			return false
 		}
 		path := event.Data.Path.Text
 		lineNumber := event.Data.LineNumber
 		if path == "" || lineNumber <= 0 {
-			continue
+			return false
 		}
 		result.matches = append(result.matches, grepMatch{
 			filePath:   path,
@@ -247,26 +228,14 @@ func runRipgrep(ctx context.Context, rgPath string, args []string, absPath strin
 		result.matchCount++
 		if result.matchCount >= options.limit {
 			result.matchLimitReached = true
-			killedDueToLimit = true
-			killShellProcessTree(command)
-			break
+			return true
 		}
-	}
-	// 3.等待进程结束，并区分主动终止、无匹配与执行错误
-	if err := scanner.Err(); err != nil {
-		if !killedDueToLimit {
-			killShellProcessTree(command)
-		}
-		_ = command.Wait()
+		return false
+	})
+	if err != nil {
 		return grepResult{}, err
 	}
-	waitErr := command.Wait()
-	if err := ctx.Err(); err != nil {
-		return grepResult{}, err
-	}
-	if err := ripgrepExitError(waitErr, stderr.String(), killedDueToLimit); err != nil {
-		return grepResult{}, err
-	}
+	_ = stopped
 	return result, nil
 }
 

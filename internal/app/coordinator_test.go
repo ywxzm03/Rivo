@@ -15,6 +15,7 @@ import (
 
 	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
@@ -88,14 +89,14 @@ func TestCoordinatorNotificationDoesNotOwnPersistence(t *testing.T) {
 
 func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
-	coord.compacting = true
+	coord.compaction.compacting = true
 	if err := coord.EnqueueSteering("during compact"); !errors.Is(err, ErrSteeringDuringCompaction) {
 		t.Fatalf("EnqueueSteering() error = %v, want compaction error", err)
 	}
 	if len(runner.appended) != 0 {
 		t.Fatal("steering reached runner during compaction")
 	}
-	coord.compacting = false
+	coord.compaction.compacting = false
 	if err := coord.EnqueueSteering("after compact"); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +105,8 @@ func TestCoordinatorRejectsSteeringDuringCompaction(t *testing.T) {
 	}
 }
 
-func TestCoordinatorRejectsImagesForLegacyRunner(t *testing.T) {
-	coord, _, _ := newTestCoordinator(t, t.TempDir(), nil)
+func TestCoordinatorKeepsImagesForStructuredSteering(t *testing.T) {
+	coord, runner, _ := newTestCoordinator(t, t.TempDir(), nil)
 	message := llm.UserMessage{Content: []llm.Content{
 		llm.TextContent{Text: "describe"},
 		llm.ImageContent{Data: "aGk=", MIMEType: "image/png"},
@@ -113,8 +114,16 @@ func TestCoordinatorRejectsImagesForLegacyRunner(t *testing.T) {
 	if _, err := coord.RunMessage(context.Background(), message); err == nil {
 		t.Fatal("RunMessage accepted image input through a text-only runner")
 	}
-	if err := coord.EnqueueSteeringMessage(message); err == nil {
-		t.Fatal("EnqueueSteeringMessage accepted image input through a text-only runner")
+	// 结构化入口保留图片：runner 必须原样收到带图的用户消息
+	if err := coord.EnqueueSteeringMessage(message); err != nil {
+		t.Fatalf("EnqueueSteeringMessage() error = %v, want image steering accepted", err)
+	}
+	if len(runner.appended) != 1 {
+		t.Fatalf("runner appended = %d, want 1", len(runner.appended))
+	}
+	got, ok := runner.appended[0].(llm.UserMessage)
+	if !ok || len(got.Content) != 2 {
+		t.Fatalf("steered message = %+v, want text+image", runner.appended[0])
 	}
 }
 
@@ -160,13 +169,14 @@ func sessionEntries(t *testing.T, sm *session.SessionManager) []session.Entry {
 		if err := json.Unmarshal(line, &kind); err != nil {
 			t.Fatal(err)
 		}
-		if kind.Type == session.TypeCompaction {
+		switch kind.Type {
+		case session.TypeCompaction:
 			var e session.CompactionEntry
 			if err := json.Unmarshal(line, &e); err != nil {
 				t.Fatal(err)
 			}
 			entries = append(entries, &e)
-		} else if kind.Type == session.TypeContextEdit {
+		case session.TypeContextEdit:
 			var e session.ContextEditEntry
 			if err := json.Unmarshal(line, &e); err != nil {
 				t.Fatal(err)
@@ -213,6 +223,21 @@ func (f *fakeRunner) Steer(input string) error {
 	return nil
 }
 
+func (f *fakeRunner) FollowUp(input string) error {
+	f.appended = append(f.appended, textMsg(input))
+	return nil
+}
+
+func (f *fakeRunner) SteerMessage(message llm.UserMessage) error {
+	f.appended = append(f.appended, message)
+	return nil
+}
+
+func (f *fakeRunner) FollowUpMessage(message llm.UserMessage) error {
+	f.appended = append(f.appended, message)
+	return nil
+}
+
 func (f *fakeRunner) ReplaceMessages(messages []llm.Message) {
 	f.replaced = append(f.replaced, messages)
 }
@@ -248,7 +273,7 @@ func seedHistory(t *testing.T, coord *Coordinator, a *agent.Agent) {
 			t.Fatal(err)
 		}
 	}
-	a.AgentContext.Messages = append(a.AgentContext.Messages, seed...)
+	a.ReplaceMessages(append(a.Context().Messages, seed...))
 }
 
 func TestCoordinatorOverflowRecovery(t *testing.T) {
@@ -269,9 +294,13 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		Model:    llm.Model{ID: "m1"},
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  modelStreamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -306,7 +335,7 @@ func TestCoordinatorOverflowRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	hasOmission, hasCompaction := false, false
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		var obj struct {
 			Type        string           `json:"type"`
 			Replacement *json.RawMessage `json:"replacement"`
@@ -374,9 +403,13 @@ func TestCoordinatorOverflowRecoveryOnlyOnce(t *testing.T) {
 		Model:    llm.Model{ID: "m1"},
 		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
 	}
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, modelStreamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  modelStreamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
@@ -570,6 +603,45 @@ func TestCoordinatorManualCompact(t *testing.T) {
 	}
 }
 
+// compaction 结束事件是 TUI 转发暂存输入的触发点，此时入队边界必须已经打开
+func TestCoordinatorCompactionEndEventAllowsQueueEnqueue(t *testing.T) {
+	dir := t.TempDir()
+	summaryStreamFn := countingStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}})
+	sm := session.New("/project", dir)
+	runner := &fakeRunner{}
+	var steeringErr, followUpErr error
+	var enqueued bool
+	var coord *Coordinator
+	coord = NewCoordinator(sm, func(event llm.AgentEvent) error {
+		if _, ok := event.(llm.CompactionEndEvent); ok && !enqueued {
+			enqueued = true
+			steeringErr = coord.EnqueueSteering("staged steering")
+			followUpErr = coord.EnqueueFollowUp("staged follow-up")
+		}
+		return nil
+	})
+	coord.Compactor = &compaction.Compactor{
+		StreamFn: summaryStreamFn,
+		Model:    llm.Model{ID: "m1"},
+		Config:   compaction.Config{ContextWindow: 10000, ReserveTokens: 500, KeepRecentTokens: 3},
+	}
+	coord.Agent = runner
+	for _, msg := range []llm.Message{textMsg("u1 content"), textMsg("u2 content")} {
+		if err := coord.m.AppendMessage(msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coord.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if !enqueued {
+		t.Fatal("compaction end event not forwarded")
+	}
+	if steeringErr != nil || followUpErr != nil {
+		t.Fatalf("enqueue after compaction = %v / %v, want both accepted", steeringErr, followUpErr)
+	}
+}
+
 func TestCoordinatorPersistsCompactionFileLists(t *testing.T) {
 	dir := t.TempDir()
 	summaryStreamFn := countingStreamFn(new(int), llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: summaryText}}})
@@ -657,7 +729,7 @@ func TestCoordinatorCompactsTwiceWithoutReserializingPreviousSummary(t *testing.
 	if summaryCalls != 2 {
 		t.Fatalf("summary calls = %d, want 2", summaryCalls)
 	}
-	if strings.Contains(prompts[1], compaction.WrappedSummary("FIRST-SUMMARY")) {
+	if strings.Contains(prompts[1], ctxview.WrappedSummary("FIRST-SUMMARY")) {
 		t.Error("second compaction prompt reserialized the previous wrapped summary")
 	}
 	if got := strings.Count(prompts[1], "<previous-summary>\nFIRST-SUMMARY\n</previous-summary>"); got != 1 {
@@ -680,16 +752,20 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 		llm.AssistantMessage{StopReason: llm.StopReasonError},
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "done"}}, StopReason: llm.StopReasonStop},
 	)
-	a := agent.NewAgent(llm.AgentConfig{Model: llm.Model{ID: "m1"}}, llm.Context{}, streamFn, coord.Handle)
-	a.PrepareRequest = coord.PrepareRequest
-	a.CommitMessages = coord.CommitMessages
+	a := agent.New(agent.Options{
+		Config:  llm.AgentConfig{Model: llm.Model{ID: "m1"}},
+		Context: llm.Context{},
+		Stream:  streamFn,
+		Events:  coord.Handle,
+		Hooks:   agent.Hooks{PrepareRequest: coord.PrepareRequest, CommitMessages: coord.CommitMessages},
+	})
 	coord.Agent = a
 	seedHistory(t, coord, a)
 
 	runner := &fakeRunner{coord: coord}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 模拟真实 Agent：溢出收场时先通知编排层
-		coord.pendingRecovery = true
+		coord.compaction.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "boom"}}, StopReason: llm.StopReasonError}
 		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)
@@ -721,7 +797,7 @@ func TestCoordinatorRecoveryWithoutCompactorKeepsError(t *testing.T) {
 	}
 	// WillRetry 不得报告不会发生的重试
 	coord.next = rec.handle
-	coord.pendingRecovery = true
+	coord.compaction.pendingRecovery = true
 	if err := coord.Handle(llm.AgentEndEvent{}); err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +832,7 @@ func TestCoordinatorRecoveryFailureSurfacesError(t *testing.T) {
 	}
 	runner.runFn = func() (*llm.AssistantMessage, error) {
 		// 可恢复的长度截断：正常返回无错误，恢复失败的原因必须透出
-		coord.pendingRecovery = true
+		coord.compaction.pendingRecovery = true
 		msg := llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "truncated"}}, StopReason: llm.StopReasonLength, Usage: llm.Usage{OutputTokens: 50}}
 		if err := coord.m.AppendMessage(msg); err != nil {
 			t.Fatal(err)

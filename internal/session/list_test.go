@@ -160,6 +160,28 @@ func TestListSessionsUsesDefaultDir(t *testing.T) {
 	}
 }
 
+func TestSessionDirsLiveUnderRivoRoot(t *testing.T) {
+	// 会话与配置共用 ~/.rivo 根目录，不再有中间的 agent 层
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cwd := t.TempDir()
+	dir, err := DefaultDir(cwd)
+	if err != nil {
+		t.Fatalf("DefaultDir() error = %v", err)
+	}
+	if want := filepath.Join(home, ".rivo", "sessions", dirName(cwd)); dir != want {
+		t.Errorf("DefaultDir() = %q, want %q", dir, want)
+	}
+	root, err := SessionsRoot()
+	if err != nil {
+		t.Fatalf("SessionsRoot() error = %v", err)
+	}
+	if want := filepath.Join(home, ".rivo", "sessions"); root != want {
+		t.Errorf("SessionsRoot() = %q, want %q", root, want)
+	}
+}
+
 func TestListAllSessionsIncludesProjectMetadata(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

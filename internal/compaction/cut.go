@@ -1,6 +1,9 @@
 package compaction
 
-import "github.com/ywxzm03/Rivo/internal/llm"
+import (
+	"github.com/ywxzm03/Rivo/internal/ctxview"
+	"github.com/ywxzm03/Rivo/internal/llm"
+)
 
 // CutPlan 描述一次压缩的切割位置：CutIndex 为保留尾部起点，
 // IsSplitTurn 表示切点落在轮次中间，TurnStartIndex 指向被截断轮次的 user entry
@@ -12,7 +15,7 @@ type CutPlan struct {
 
 // FindCutPoint 从最新 entry 向前累计 token，预算用尽处就近定位合法切割点：
 // 切点只会落在 user/assistant entry 之前，保留尾部以 assistant 开头时按 split turn 记录轮次起点
-func FindCutPoint(entries []ContextEntry, start, keepRecentTokens int) CutPlan {
+func FindCutPoint(entries []ctxview.ContextEntry, start, keepRecentTokens int) CutPlan {
 	plan := CutPlan{CutIndex: start, TurnStartIndex: -1}
 	if start < 0 {
 		start = 0
@@ -53,7 +56,7 @@ func FindCutPoint(entries []ContextEntry, start, keepRecentTokens int) CutPlan {
 	return plan
 }
 
-func markSplitTurn(plan *CutPlan, entries []ContextEntry, start, cut int) {
+func markSplitTurn(plan *CutPlan, entries []ctxview.ContextEntry, start, cut int) {
 	if cut >= len(entries) {
 		return
 	}
@@ -69,7 +72,7 @@ func markSplitTurn(plan *CutPlan, entries []ContextEntry, start, cut int) {
 	}
 }
 
-func entryTokens(entry ContextEntry) int {
+func entryTokens(entry ctxview.ContextEntry) int {
 	total := 0
 	for _, message := range entry.Messages {
 		total += MessageTokens(message)
@@ -78,7 +81,7 @@ func entryTokens(entry ContextEntry) int {
 }
 
 // entryRole 返回 entry 中首个对话消息的角色，system/tool-only entry 不构成切点
-func entryRole(entry ContextEntry) llm.Role {
+func entryRole(entry ctxview.ContextEntry) llm.Role {
 	for _, message := range entry.Messages {
 		switch message.Role() {
 		case llm.RoleUser, llm.RoleAssistant:
@@ -88,8 +91,8 @@ func entryRole(entry ContextEntry) llm.Role {
 	return ""
 }
 
-func isCutBoundary(entry ContextEntry) bool {
-	if entry.Kind == ContextCompaction {
+func isCutBoundary(entry ctxview.ContextEntry) bool {
+	if entry.Kind == ctxview.ContextCompaction {
 		return false
 	}
 	role := entryRole(entry)

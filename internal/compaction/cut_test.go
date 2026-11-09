@@ -3,6 +3,7 @@ package compaction
 import (
 	"testing"
 
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
@@ -20,11 +21,11 @@ func turnFixture() []llm.Message {
 	}
 }
 
-func entryFixture() []ContextEntry {
+func entryFixture() []ctxview.ContextEntry {
 	messages := turnFixture()
-	entries := make([]ContextEntry, 0, len(messages))
+	entries := make([]ctxview.ContextEntry, 0, len(messages))
 	for i, message := range messages {
-		entries = append(entries, ContextEntry{SourceID: string(rune('a' + i)), Kind: ContextMessage, Messages: []llm.Message{message}})
+		entries = append(entries, ctxview.ContextEntry{SourceID: string(rune('a' + i)), Kind: ctxview.ContextMessage, Messages: []llm.Message{message}})
 	}
 	return entries
 }
@@ -96,10 +97,10 @@ func TestFindCutPointRespectsStartOffset(t *testing.T) {
 }
 
 func TestFindCutPointSmallHistoryCutsAtEarliestBoundary(t *testing.T) {
-	entries := []ContextEntry{
-		{SourceID: "u1", Kind: ContextMessage, Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
-		{SourceID: "a1", Kind: ContextMessage, Messages: []llm.Message{llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
-		{SourceID: "u2", Kind: ContextMessage, Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
+	entries := []ctxview.ContextEntry{
+		{SourceID: "u1", Kind: ctxview.ContextMessage, Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
+		{SourceID: "a1", Kind: ctxview.ContextMessage, Messages: []llm.Message{llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
+		{SourceID: "u2", Kind: ctxview.ContextMessage, Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: textOf(400)}}}}},
 	}
 	// 历史总量小于保留预算：切在最早合法切点上，摘要区为空时由调用方放弃压缩
 	plan := FindCutPoint(entries, 0, 20000)

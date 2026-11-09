@@ -137,10 +137,10 @@ func TestFindPathValidation(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execFind(t, map[string]any{"pattern": "*", "path": filepath.Join(dir, "missing")}); err == nil || !strings.Contains(err.Error(), "Path not found") {
+	if _, err := execFind(t, map[string]any{"pattern": "*", "path": filepath.Join(dir, "missing")}); err == nil || !strings.Contains(err.Error(), "path not found") {
 		t.Errorf("missing path error = %v", err)
 	}
-	if _, err := execFind(t, map[string]any{"pattern": "*", "path": file}); err == nil || !strings.Contains(err.Error(), "Not a directory") {
+	if _, err := execFind(t, map[string]any{"pattern": "*", "path": file}); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Errorf("file path error = %v", err)
 	}
 	if _, err := execFind(t, map[string]any{}); err == nil || !strings.Contains(err.Error(), "missing required parameter: pattern") {

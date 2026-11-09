@@ -52,5 +52,5 @@ func findPowerShell() (string, error) {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH.")
+	return "", fmt.Errorf("no PowerShell executable found: install PowerShell or add powershell.exe/pwsh.exe to PATH")
 }

@@ -3,6 +3,8 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	sdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
@@ -71,12 +73,6 @@ var reservedParamKeys = map[string]bool{
 	"prompt_cache_key": true, "prompt_cache_options": true, "prompt_cache_retention": true,
 }
 
-// thinkingLevels 是扩展思考等级体系，顺序从低到高
-var thinkingLevels = []llm.ThinkingLevel{
-	llm.ThinkingLevelOff, llm.ThinkingLevelMinimal, llm.ThinkingLevelLow, llm.ThinkingLevelMedium,
-	llm.ThinkingLevelHigh, llm.ThinkingLevelXHigh, llm.ThinkingLevelMax,
-}
-
 // resolveReasoningEffort 把思考等级解析为 reasoning effort：无显式等级沿用模型默认值，
 // 有显式等级时先收敛到模型支持的最近可用等级；非 reasoning 模型不经此函数
 func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffort {
@@ -105,13 +101,11 @@ func resolveReasoningEffort(model llm.Model, opts llm.Options) llm.ReasoningEffo
 // clampThinkingLevel 把请求的思考等级收敛到模型支持的最近可用等级
 func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLevel {
 	available := supportedThinkingLevels(model)
-	for _, l := range available {
-		if l == level {
-			return level
-		}
+	if slices.Contains(available, level) {
+		return level
 	}
 	requestedIndex := -1
-	for i, l := range thinkingLevels {
+	for i, l := range llm.ThinkingLevels {
 		if l == level {
 			requestedIndex = i
 			break
@@ -120,14 +114,14 @@ func clampThinkingLevel(model llm.Model, level llm.ThinkingLevel) llm.ThinkingLe
 	if requestedIndex == -1 {
 		return firstThinkingLevel(available)
 	}
-	for i := requestedIndex; i < len(thinkingLevels); i++ {
-		if containsThinkingLevel(available, thinkingLevels[i]) {
-			return thinkingLevels[i]
+	for i := requestedIndex; i < len(llm.ThinkingLevels); i++ {
+		if containsThinkingLevel(available, llm.ThinkingLevels[i]) {
+			return llm.ThinkingLevels[i]
 		}
 	}
 	for i := requestedIndex - 1; i >= 0; i-- {
-		if containsThinkingLevel(available, thinkingLevels[i]) {
-			return thinkingLevels[i]
+		if containsThinkingLevel(available, llm.ThinkingLevels[i]) {
+			return llm.ThinkingLevels[i]
 		}
 	}
 	return firstThinkingLevel(available)
@@ -140,7 +134,7 @@ func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
 		return []llm.ThinkingLevel{llm.ThinkingLevelOff}
 	}
 	var levels []llm.ThinkingLevel
-	for _, level := range thinkingLevels {
+	for _, level := range llm.ThinkingLevels {
 		mapped, ok := model.ThinkingLevelMap[level]
 		if ok && mapped == nil {
 			continue
@@ -154,12 +148,7 @@ func supportedThinkingLevels(model llm.Model) []llm.ThinkingLevel {
 }
 
 func containsThinkingLevel(levels []llm.ThinkingLevel, level llm.ThinkingLevel) bool {
-	for _, l := range levels {
-		if l == level {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(levels, level)
 }
 
 func firstThinkingLevel(levels []llm.ThinkingLevel) llm.ThinkingLevel {
@@ -282,11 +271,11 @@ func assistantMessageID(msgIndex, textIndex int) string {
 func toolResultItem(m llm.ToolResultMessage) responses.ResponseInputItemUnionParam {
 	var output responses.ResponseInputItemFunctionCallOutputOutputUnionParam
 	if allText(m.Content) {
-		var text string
+		var text strings.Builder
 		for _, c := range m.Content {
-			text += c.(llm.TextContent).Text
+			text.WriteString(c.(llm.TextContent).Text)
 		}
-		output.OfString = sdk.String(text)
+		output.OfString = sdk.String(text.String())
 	} else {
 		var items responses.ResponseFunctionCallOutputItemListParam
 		for _, c := range m.Content {
@@ -354,29 +343,9 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "reasoning":
-			reasoning := item.AsReasoning()
-			var thinking string
-			for i, part := range reasoning.Summary {
-				if i > 0 {
-					thinking += "\n\n"
-				}
-				thinking += part.Text
-			}
-			if thinking == "" {
-				for i, part := range reasoning.Content {
-					if i > 0 {
-						thinking += "\n\n"
-					}
-					thinking += part.Text
-				}
-			}
-			signature := reasoning.RawJSON()
-			if signature == "" {
-				data, err := json.Marshal(reasoning)
-				if err != nil {
-					return nil, nil, fmt.Errorf("openai: marshal reasoning item: %w", err)
-				}
-				signature = string(data)
+			thinking, signature, err := reasoningThinking(item)
+			if err != nil {
+				return nil, nil, err
 			}
 			msg.Content = append(msg.Content, llm.ThinkingContent{
 				Thinking:          thinking,
@@ -384,9 +353,10 @@ func BuildAssistantMessage(resp responses.Response) (*llm.AssistantMessage, []ll
 			})
 		case "message":
 			for _, part := range item.Content {
-				if part.Type == "output_text" {
+				switch part.Type {
+				case "output_text":
 					msg.Content = append(msg.Content, llm.TextContent{Text: part.Text})
-				} else if part.Type == "refusal" {
+				case "refusal":
 					msg.Content = append(msg.Content, llm.TextContent{Text: part.Refusal})
 				}
 			}
@@ -451,4 +421,35 @@ func toolCallFromItem(item responses.ResponseOutputItemUnion) (llm.ToolCall, err
 		}
 	}
 	return llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args}, nil
+}
+
+// reasoningThinking 从 reasoning item 提取思考文本与签名。
+// Summary 为空时退回 Content；签名优先用原始 JSON，缺失时重新序列化
+func reasoningThinking(item responses.ResponseOutputItemUnion) (thinking, signature string, err error) {
+	reasoning := item.AsReasoning()
+	thinking = joinReasoningParts(reasoning.Summary, func(part responses.ResponseReasoningItemSummary) string { return part.Text })
+	if thinking == "" {
+		thinking = joinReasoningParts(reasoning.Content, func(part responses.ResponseReasoningItemContent) string { return part.Text })
+	}
+	signature = reasoning.RawJSON()
+	if signature == "" {
+		data, marshalErr := json.Marshal(reasoning)
+		if marshalErr != nil {
+			return "", "", fmt.Errorf("openai: marshal reasoning item: %w", marshalErr)
+		}
+		signature = string(data)
+	}
+	return thinking, signature, nil
+}
+
+// joinReasoningParts 用空行连接各段文本；Summary 与 Content 元素类型不同，用泛型加取值函数统一
+func joinReasoningParts[T any](parts []T, text func(T) string) string {
+	var builder strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString(text(part))
+	}
+	return builder.String()
 }

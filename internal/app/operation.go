@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/session"
@@ -33,6 +34,8 @@ type OperationRequest struct {
 	Value       string
 	Message     *llm.UserMessage
 	RestoreMode filehistory.RestoreMode
+	// NotificationOnly 表示这轮 run 只为投递子任务通知,不追加用户输入
+	NotificationOnly bool
 }
 
 type OperationResult struct {
@@ -75,6 +78,21 @@ func (a *App) EnqueueSteeringMessage(input llm.UserMessage) error {
 		return ErrSteeringUnavailable
 	}
 	return a.coordinator.EnqueueSteeringMessage(input)
+}
+
+var ErrFollowUpUnavailable = errors.New("app: follow-up is unavailable")
+
+func (a *App) EnqueueFollowUp(input string) error {
+	return a.EnqueueFollowUpMessage(llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: input}}})
+}
+
+func (a *App) EnqueueFollowUpMessage(input llm.UserMessage) error {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.active == nil || a.active.kind != OperationRun || a.active.closing {
+		return ErrFollowUpUnavailable
+	}
+	return a.coordinator.EnqueueFollowUpMessage(input)
 }
 
 // Start 接受后立即执行操作，一个 App 同时只接受一个会话修改，不隐式排队
@@ -156,13 +174,13 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 		if result.Err = a.session.RetryPending(); result.Err != nil {
 			return result
 		}
+		a.acknowledgePendingInputs(messages)
 		a.pendingRequest = nil
-		a.acknowledgePendingSteering(messages)
 		if result.Err = a.restoreCommittedSettings(); result.Err != nil {
 			return result
 		}
 		result.Replayed = true
-		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.pendingRecovery {
+		if pendingEdit != nil && pendingEdit.Replacement == nil && a.coordinator.compaction.pendingRecovery {
 			resume := previous != nil && equalOperationRequest(*previous, request) && request.Kind == OperationRun
 			result.Reply, result.Err = a.coordinator.retryOverflowRecovery(ctx, resume)
 			if result.Err != nil || resume {
@@ -222,16 +240,24 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 			result.Err = errors.New("app: current model does not support image input")
 			return result
 		}
-		if request.Message != nil {
+		switch {
+		case request.NotificationOnly:
+			// 通知已作为 transient 附件挂到请求上,空 Continue 只跑这一轮
+			result.Reply, result.Err = a.coordinator.Continue(ctx)
+		case request.Message != nil:
 			result.Reply, result.Err = a.coordinator.RunMessage(ctx, *request.Message)
-		} else {
+		default:
 			result.Reply, result.Err = a.coordinator.Run(ctx, request.Value)
 		}
 		result = a.continueQueuedSteering(ctx, result)
 	case OperationCompact:
 		result.Err = a.coordinator.Compact(ctx, request.Value)
 	case OperationModel:
-		provider, model, _ := strings.Cut(request.Value, "/")
+		provider, model, ok := strings.Cut(request.Value, "/")
+		if !ok {
+			result.Err = fmt.Errorf("app: model switch value %q must be provider/model", request.Value)
+			break
+		}
 		result.Err = a.setModel(provider, model)
 	case OperationThinking:
 		result.Err = a.setThinkingLevel(llm.ThinkingLevel(request.Value))
@@ -255,6 +281,9 @@ func (a *App) executeOperation(ctx context.Context, request OperationRequest) (r
 	default:
 		result.Err = errors.New("app: unknown operation")
 	}
+	if result.Err == nil && result.Next != nil {
+		result.Next.BindInputHistory(a.boundInputHistory())
+	}
 	return result
 }
 
@@ -277,43 +306,84 @@ func pendingMessagesHaveImages(messages []llm.Message) bool {
 }
 
 func equalOperationRequest(left, right OperationRequest) bool {
-	return reflect.DeepEqual(left, right)
+	if left.Kind != right.Kind || left.Value != right.Value || left.RestoreMode != right.RestoreMode || left.NotificationOnly != right.NotificationOnly {
+		return false
+	}
+	if left.Message == nil || right.Message == nil {
+		return left.Message == nil && right.Message == nil
+	}
+	return left.Message.Hidden == right.Message.Hidden && reflect.DeepEqual(left.Message.Content, right.Message.Content)
 }
 
-// continueQueuedSteering 在释放操作所有权前消费已接受的 steering，并关闭收尾窗口
+// continueQueuedSteering 在释放操作所有权前完成收尾：steering 优先，follow-up 后继，
+// 最后才是子任务通知；每完成一次后继 run 都重新检查三类来源，
+// 避免收尾窗口内新入队的消息或新到达的通知被遗留
 func (a *App) continueQueuedSteering(ctx context.Context, result OperationResult) OperationResult {
 	for result.Err == nil && ctx.Err() == nil {
 		a.operationMu.Lock()
-		continueRun := a.active != nil && !a.active.closing && a.agent.HasSteering()
-		if !continueRun && a.active != nil {
-			a.active.closing = true
+		open := a.active != nil && !a.active.closing
+		steering := open && a.agent.Len(agent.QueueSteering) > 0
+		followUp := open && !steering && a.agent.Len(agent.QueueFollowUp) > 0
+		notified := open && !steering && !followUp && a.hasPendingNotification()
+		if !steering && !followUp && !notified {
+			// 最终队列检查与关闭收尾窗口必须同处一个临界区，
+			// 否则检查通过后的新入队会留在队列里无人消费
+			if a.active != nil {
+				a.active.closing = true
+			}
+			a.operationMu.Unlock()
+			return result
 		}
 		a.operationMu.Unlock()
-		if !continueRun {
-			break
+		var reply *llm.AssistantMessage
+		var err error
+		switch {
+		case steering:
+			reply, err = a.coordinator.ContinueQueued(ctx)
+		case followUp:
+			reply, err = a.coordinator.ContinueFollowUp(ctx)
+		default:
+			// 通知是 transient 请求附件,空 Continue 只带着它跑一轮
+			reply, err = a.coordinator.Continue(ctx)
 		}
-		reply, err := a.coordinator.ContinueQueued(ctx)
 		if reply != nil {
 			result.Reply = reply
 		}
 		result.Err = err
 	}
+	a.operationMu.Lock()
+	if a.active != nil {
+		a.active.closing = true
+	}
+	a.operationMu.Unlock()
 	return result
 }
 
-func (a *App) acknowledgePendingSteering(messages []llm.Message) {
+// hasPendingNotification 报告根 store 是否还有待投递的子任务终态通知
+func (a *App) hasPendingNotification() bool {
+	store := a.SubagentStore()
+	return store != nil && len(store.PeekNotifications()) > 0
+}
+
+// acknowledgePendingInputs 使用补写批次保留的来源，先确认实际移除的队列项。
+func (a *App) acknowledgePendingInputs(messages []llm.Message) {
 	for _, message := range messages {
 		user, ok := message.(llm.UserMessage)
-		if !ok {
+		if !ok || user.Hidden {
 			continue
 		}
-		if a.agent.AcknowledgeSteeringMessage(user) {
+		if a.agent.AcknowledgePending(agent.PayloadFromMessage(user)) {
 			continue
 		}
 		if len(user.Content) == 1 {
 			if text, ok := user.Content[0].(llm.TextContent); ok {
-				a.agent.AcknowledgeSteering(text.Text)
+				if a.agent.AcknowledgePendingText(text.Text) {
+					continue
+				}
 			}
+		}
+		if user.Origin != nil {
+			a.inputAccepted(*user.Origin)
 		}
 	}
 }
@@ -408,13 +478,12 @@ func (a *App) restoreBranchSettings() error {
 	}
 	if provider != "" {
 		if model == "" {
-			spec, err := a.cfg.lookupProvider(provider)
-			if err != nil {
-				return err
+			model = a.cfg.DefaultModelID(provider)
+			if model == "" {
+				return fmt.Errorf("unknown provider %q", provider)
 			}
-			model = spec.defaultModel
 		}
-		if err := a.applyModel(provider, model, false); err != nil {
+		if err := a.switchModel(provider, model); err != nil {
 			return err
 		}
 	}
@@ -425,19 +494,19 @@ func (a *App) restoreBranchSettings() error {
 	if level == "" {
 		level = llm.ThinkingLevelOff
 	}
-	a.agent.AgentConfig.ThinkingLevel = level
+	a.agent.SetThinkingLevel(level)
 	return nil
 }
 
 func (a *App) restoreCommittedSettings() error {
 	view := a.session.BuildContext()
 	if view.Provider != "" && view.Model != "" {
-		if err := a.applyModel(view.Provider, view.Model, false); err != nil {
+		if err := a.switchModel(view.Provider, view.Model); err != nil {
 			return err
 		}
 	}
 	if view.HasThinkingLevel {
-		a.agent.AgentConfig.ThinkingLevel = llm.ThinkingLevel(view.ThinkingLevel)
+		a.agent.SetThinkingLevel(llm.ThinkingLevel(view.ThinkingLevel))
 	}
 	a.agent.ReplaceMessages(view.Messages())
 	return nil

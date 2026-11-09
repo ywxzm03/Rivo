@@ -79,7 +79,7 @@ func SessionsRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("session: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent", "sessions"), nil
+	return filepath.Join(home, ".rivo", "sessions"), nil
 }
 
 func listSessionsInDir(dir string) ([]SessionInfo, error) {
@@ -155,7 +155,8 @@ func readSessionMetadata(path string) (id, cwd, name, summary string) {
 					if !hasSummary {
 						entry, decodeErr := decodeEntry(probe.Type, string(trimmed))
 						if decodeErr == nil {
-							if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" {
+							// 摘要取首条真实用户输入,通知这类隐藏消息不参与
+							if me, ok := entry.(*MessageEntry); ok && messageRole(me.Message) == "user" && !llm.IsHiddenMessage(me.Message) {
 								// 多行输入折叠为空格，避免破坏会话列表排版
 								summary = truncateRunes(strings.Join(strings.Fields(userText(me.Message)), " "), summaryMaxRunes)
 								hasSummary = true

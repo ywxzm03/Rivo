@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/ywxzm03/Rivo/internal/llm"
 )
 
 // 大粘贴折叠阈值
@@ -34,34 +33,34 @@ func (m *Model) handlePaste(text string) {
 	lines := strings.Count(text, "\n") + 1
 	runes := len([]rune(text))
 	if lines > pasteMaxLines || runes > pasteMaxChars {
-		m.pasteCounter++
-		id := m.pasteCounter
-		if m.pastes == nil {
-			m.pastes = make(map[int]string)
+		m.composer.pasteCounter++
+		id := m.composer.pasteCounter
+		if m.composer.pastes == nil {
+			m.composer.pastes = make(map[int]string)
 		}
-		m.pastes[id] = text
+		m.composer.pastes[id] = text
 		m.editor.InsertString(pasteMarker(id, text))
 	} else {
 		m.editor.InsertString(text)
 	}
 	m.clearSelection()
-	m.completion, m.completionHidden = 0, false
+	m.composer.completion, m.composer.completionHidden = 0, false
 	m.layout()
 }
 
-func (m *Model) handleImage(image llm.ImageContent) {
+func (m *Model) handleImage(image ImagePart) {
 	if image.Data == "" || image.MIMEType == "" {
 		return
 	}
-	if m.images == nil {
-		m.images = make(map[int]llm.ImageContent)
+	if m.composer.images == nil {
+		m.composer.images = make(map[int]ImagePart)
 	}
 	reserved := imageMarkerIDs(m.editor.Value())
-	id := m.nextImageID(reserved)
-	m.images[id] = image
+	id := nextImageID(&m.composer.imageCounter, reserved)
+	m.composer.images[id] = image
 	m.editor.InsertString(imageMarker(id))
 	m.clearSelection()
-	m.completion, m.completionHidden = 0, false
+	m.composer.completion, m.composer.completionHidden = 0, false
 	m.layout()
 }
 
@@ -69,72 +68,50 @@ func imageMarker(id int) string {
 	return "[Image #" + strconv.Itoa(id) + "]"
 }
 
-// buildUserMessage 展开文本粘贴标记，并按图片占位符位置组装用户消息
-func (m *Model) buildUserMessage() (llm.UserMessage, bool) {
+// buildPayload 展开文本粘贴标记，并按图片占位符位置组装待发送内容
+func (m *Model) buildPayload() (ComposerPayload, bool) {
 	value := strings.TrimSpace(m.expandPasteMarkers(m.editor.Value()))
 	if value == "" {
-		return llm.UserMessage{}, false
+		return ComposerPayload{}, false
 	}
-	var content []llm.Content
+	var text strings.Builder
+	var images []ImagePart
 	last := 0
 	used := make(map[int]bool)
 	for _, match := range imageMarkerRegexp.FindAllStringSubmatchIndex(value, -1) {
 		if match[0] > last {
-			content = append(content, llm.TextContent{Text: value[last:match[0]]})
+			text.WriteString(value[last:match[0]])
 		}
 		id, err := strconv.Atoi(value[match[2]:match[3]])
-		image, ok := m.images[id]
+		image, ok := m.composer.images[id]
 		if err != nil || !ok || used[id] {
-			content = append(content, llm.TextContent{Text: value[match[0]:match[1]]})
+			text.WriteString(value[match[0]:match[1]])
 		} else {
-			content = append(content, image)
+			images = append(images, image)
 			used[id] = true
 		}
 		last = match[1]
 	}
 	if last < len(value) {
-		content = append(content, llm.TextContent{Text: value[last:]})
+		text.WriteString(value[last:])
 	}
-	if len(content) == 0 {
-		return llm.UserMessage{}, false
+	payload := ComposerPayload{Text: text.String(), Images: images}
+	if payload.Text == "" && len(payload.Images) == 0 {
+		return ComposerPayload{}, false
 	}
-	return llm.UserMessage{Content: content}, true
+	return payload, true
 }
 
-func messageHasImages(message llm.UserMessage) bool {
-	for _, content := range message.Content {
-		if _, ok := content.(llm.ImageContent); ok {
-			return true
-		}
-	}
-	return false
+func payloadHasImages(payload ComposerPayload) bool {
+	return len(payload.Images) > 0
 }
 
-func (m *Model) editorTextForMessage(message llm.UserMessage) string {
-	reserved := make(map[int]bool)
-	for _, content := range message.Content {
-		text, ok := content.(llm.TextContent)
-		if ok {
-			for id := range imageMarkerIDs(text.Text) {
-				reserved[id] = true
-			}
-		}
-	}
-	var b strings.Builder
-	for _, content := range message.Content {
-		switch content := content.(type) {
-		case llm.TextContent:
-			b.WriteString(content.Text)
-		case llm.ImageContent:
-			if m.images == nil {
-				m.images = make(map[int]llm.ImageContent)
-			}
-			id := m.nextImageID(reserved)
-			m.images[id] = content
-			b.WriteString(imageMarker(id))
-		}
-	}
-	return b.String()
+// editorTextForPayload 把待发送内容还原成编辑器文本，复用相同的附件编号规则
+func (m *Model) editorTextForPayload(payload ComposerPayload) string {
+	draft := ComposerDraft{Images: m.composer.images, ImageCounter: m.composer.imageCounter}
+	appendPayloadDraft(&draft, payload)
+	m.composer.images, m.composer.imageCounter = draft.Images, draft.ImageCounter
+	return draft.Text
 }
 
 func imageMarkerIDs(text string) map[int]bool {
@@ -148,25 +125,27 @@ func imageMarkerIDs(text string) map[int]bool {
 	return ids
 }
 
-func (m *Model) nextImageID(reserved map[int]bool) int {
+func nextImageID(counter *int, reserved map[int]bool) int {
 	for {
-		m.imageCounter++
-		if !reserved[m.imageCounter] {
-			reserved[m.imageCounter] = true
-			return m.imageCounter
+		*counter = *counter + 1
+		if !reserved[*counter] {
+			reserved[*counter] = true
+			return *counter
 		}
 	}
 }
 
-func (m *Model) restoreEditorMessage(message *llm.UserMessage, fallback string) {
+func (m *Model) restoreEditorPayload(payload *ComposerPayload, fallback string) {
+	m.invalidateHistoryInput()
+	m.currentHistory().navigation.lastText = nil
 	m.resetPastes()
 	value := fallback
-	if message != nil {
-		value = m.editorTextForMessage(*message)
+	if payload != nil {
+		value = m.editorTextForPayload(*payload)
 	}
 	m.editor.SetValue(value)
 	m.editor.CursorEnd()
-	m.completion, m.completionHidden = 0, true
+	m.composer.completion, m.composer.completionHidden = 0, true
 }
 
 func pasteMarker(id int, text string) string {
@@ -193,7 +172,7 @@ func cleanPasteText(text string) string {
 
 // expandPasteMarkers 把标记替换回注册表内容，无对应 id 的字面文本原样保留
 func (m *Model) expandPasteMarkers(text string) string {
-	if len(m.pastes) == 0 || !strings.Contains(text, "[paste #") {
+	if len(m.composer.pastes) == 0 || !strings.Contains(text, "[paste #") {
 		return text
 	}
 	return pasteMarkerRegexp.ReplaceAllStringFunc(text, func(match string) string {
@@ -202,7 +181,7 @@ func (m *Model) expandPasteMarkers(text string) string {
 		if err != nil {
 			return match
 		}
-		if content, ok := m.pastes[id]; ok {
+		if content, ok := m.composer.pastes[id]; ok {
 			if match == pasteMarker(id, content) {
 				return content
 			}
@@ -212,10 +191,10 @@ func (m *Model) expandPasteMarkers(text string) string {
 }
 
 func (m *Model) resetPastes() {
-	m.pastes = nil
-	m.pasteCounter = 0
-	m.images = nil
-	m.imageCounter = 0
+	m.composer.pastes = nil
+	m.composer.pasteCounter = 0
+	m.composer.images = nil
+	m.composer.imageCounter = 0
 }
 
 // backspaceAtMarker 判断光标是否紧邻标记尾部，是则整块删除标记并移除注册项
@@ -243,17 +222,17 @@ func (m *Model) backspaceAtMarker() bool {
 	if err != nil {
 		return false
 	}
-	if _, ok := m.pastes[id]; !ok {
+	if _, ok := m.composer.pastes[id]; !ok {
 		return false
 	}
 	// 用 rune 数决定退格次数，避免多字节标记残留半个字符
 	steps := len([]rune(prefix[loc[0]:loc[1]]))
-	for i := 0; i < steps; i++ {
+	for range steps {
 		var cmd tea.Cmd
 		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 		_ = cmd
 	}
-	delete(m.pastes, id)
+	delete(m.composer.pastes, id)
 	return true
 }
 
@@ -276,7 +255,7 @@ func (m *Model) backspaceAtImageMarker() bool {
 	if err != nil {
 		return false
 	}
-	if _, ok := m.images[id]; !ok {
+	if _, ok := m.composer.images[id]; !ok {
 		return false
 	}
 	for i := 0; i < len([]rune(prefix[loc[0]:loc[1]])); i++ {
@@ -284,7 +263,7 @@ func (m *Model) backspaceAtImageMarker() bool {
 		m.editor, cmd = m.editor.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 		_ = cmd
 	}
-	delete(m.images, id)
+	delete(m.composer.images, id)
 	return true
 }
 

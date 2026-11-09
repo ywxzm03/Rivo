@@ -15,10 +15,11 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
-const helpText = `Rivo - AI coding assistant
+var helpText = `Rivo - AI coding assistant
 
 Usage:
   Rivo [options] [prompt]
@@ -33,32 +34,14 @@ Options:
       --print, -p         Non-interactive mode: process prompt and exit
       --provider <name>   Provider for --model (requires --model)
       --model <pattern>   Model id, provider/model, or substring, with optional :level suffix
-      --thinking <level>  Thinking level: off, minimal, low, medium, high, xhigh, max
+      --effort <level>    Reasoning effort: ` + strings.Join(llm.ThinkingLevelNames(), ", ") + `
 
 With a terminal, a positional prompt is submitted automatically in the TUI.
 Without a terminal, a positional prompt runs once and exits.
 With --print, the prompt comes from positional arguments or piped stdin.
 `
 
-func Repl(stdin io.Reader, stdout, stderr io.Writer) int {
-	cfg, err := app.Load()
-	if err != nil {
-		fmt.Fprintf(stderr, "Rivo: %v\n", err)
-		return 2
-	}
-	return repl(cfg, false, stdin, stdout, stderr)
-}
-
-// repl 组装 Agent 并进入交互模式，continueRecent 为 true 时恢复最近会话
-func repl(cfg app.Config, continueRecent bool, stdin io.Reader, stdout, stderr io.Writer) int {
-	target := sessionTarget{kind: targetNew}
-	if continueRecent {
-		target.kind = targetRecent
-	}
-	return replTarget(cfg, target, stdin, stdout, stderr)
-}
-
-func replTarget(cfg app.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
+func replTarget(cfg provider.Config, target sessionTarget, stdin io.Reader, stdout, stderr io.Writer) int {
 	onEvent := func(ev llm.AgentEvent) error {
 		if warning, ok := ev.(llm.WarningEvent); ok {
 			_, err := fmt.Fprintf(stderr, "[warning] %s\n", warning.Message)
@@ -135,20 +118,20 @@ func replTarget(cfg app.Config, target sessionTarget, stdin io.Reader, stdout, s
 	})
 }
 
-// resumeRecentApp 恢复最近会话，无会话时静默新建
-func resumeRecentApp(cfg app.Config, onEvent llm.AgentEventSink) (*app.App, error) {
+// resumeRecentApp 恢复最近会话，无会话时静默新建；只按 mtime 选文件，不扫描会话内容
+func resumeRecentApp(cfg provider.Config, onEvent llm.AgentEventSink) (*app.App, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get working directory: %w", err)
 	}
-	infos, err := session.ListSessions(cwd)
+	path, err := session.LatestSessionPath(cwd)
 	if err != nil {
 		return nil, err
 	}
-	if len(infos) == 0 {
+	if path == "" {
 		return app.New(cfg, onEvent)
 	}
-	return app.Open(infos[0].Path, cfg, onEvent)
+	return app.Open(path, cfg, onEvent)
 }
 
 type targetKind uint8
@@ -166,7 +149,7 @@ type sessionTarget struct {
 	id   string
 }
 
-func openSessionTarget(cfg app.Config, target sessionTarget, onEvent llm.AgentEventSink) (*app.App, error) {
+func openSessionTarget(cfg provider.Config, target sessionTarget, onEvent llm.AgentEventSink) (*app.App, error) {
 	switch target.kind {
 	case targetRecent:
 		return resumeRecentApp(cfg, onEvent)
@@ -295,7 +278,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 0
 		}
 		switch args[i] {
-		case "--cost", "--provider", "--model", "--thinking":
+		case "--cost", "--provider", "--model", "--effort":
 			i++
 		}
 	}
@@ -308,7 +291,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		costPath       string
 		providerArg    string
 		modelArg       string
-		thinkingArg    string
+		effortArg      string
 		positional     []string
 	)
 	for i := 0; i < len(args); i++ {
@@ -340,7 +323,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 		case "--print", "-p":
 			printRequested = true
-		case "--provider", "--model", "--thinking":
+		case "--provider", "--model", "--effort":
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 				fmt.Fprintf(stderr, "Rivo: flag %s requires a value\n", arg)
 				return 2
@@ -351,8 +334,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				providerArg = args[i]
 			case "--model":
 				modelArg = args[i]
-			case "--thinking":
-				thinkingArg = args[i]
+			case "--effort":
+				effortArg = args[i]
 			}
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -364,7 +347,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if costPath != "" {
-		if continueRecent || printRequested || sessionArg != "" || sessionID != "" || providerArg != "" || modelArg != "" || thinkingArg != "" || len(positional) > 0 {
+		if continueRecent || printRequested || sessionArg != "" || sessionID != "" || providerArg != "" || modelArg != "" || effortArg != "" || len(positional) > 0 {
 			fmt.Fprintln(stderr, "Rivo: --cost cannot be combined with runtime options or a prompt")
 			return 2
 		}
@@ -388,7 +371,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// 2.加载运行配置并应用 CLI 覆盖
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
@@ -396,7 +379,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintf(stderr, "Rivo: warning: %s\n", warning)
 	}
-	if err := app.ApplyOverrides(&cfg, providerArg, modelArg, thinkingArg); err != nil {
+	if err := provider.ApplyOverrides(&cfg, providerArg, modelArg, effortArg); err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)
 		return 2
 	}
@@ -501,7 +484,7 @@ type promptRunner interface {
 }
 
 // printMode 非交互执行一轮，运行错误或 error/aborted 收场时打到 stderr 并返回 1
-func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
+func printMode(cfg provider.Config, prompt string, resumeRecent bool, stdout, stderr io.Writer, runner ...promptRunner) int {
 	var run promptRunner
 	if len(runner) > 0 {
 		run = runner[0]
@@ -546,7 +529,7 @@ func printMode(cfg app.Config, prompt string, resumeRecent bool, stdout, stderr 
 	return 0
 }
 
-func printModeTarget(cfg app.Config, prompt string, target sessionTarget, stdout, stderr io.Writer) int {
+func printModeTarget(cfg provider.Config, prompt string, target sessionTarget, stdout, stderr io.Writer) int {
 	a, err := openSessionTarget(cfg, target, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "Rivo: %v\n", err)

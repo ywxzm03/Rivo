@@ -23,7 +23,7 @@ func (a *App) UsageTotals() session.UsageTotals {
 func (a *App) ContextUsage() ContextUsage {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
-	model := a.agent.AgentConfig.Model
+	model := a.agent.Config().Model
 	if model.ContextWindow <= 0 {
 		return ContextUsage{}
 	}

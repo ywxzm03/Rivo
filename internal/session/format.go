@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	compact "github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
 )
@@ -80,25 +80,14 @@ type SessionInfoEntry struct {
 }
 
 // Usage 不依附消息的 token 记录，计入会话用量但不进 LLM 上下文
-type Usage struct {
-	InputTokens        int       `json:"inputTokens"`
-	OutputTokens       int       `json:"outputTokens"`
-	CacheReadTokens    int       `json:"cacheReadTokens"`
-	CacheWriteTokens   int       `json:"cacheWriteTokens"`
-	CacheWrite1HTokens int       `json:"cacheWrite1hTokens"`
-	ReasoningTokens    int       `json:"reasoningTokens"`
-	TotalTokens        int       `json:"totalTokens"`
-	Cost               *llm.Cost `json:"cost,omitempty"`
-}
-
 // UsageEntry 记录模型用量（如缓存预热），不参与 LLM 上下文
 type UsageEntry struct {
 	EntryBase
-	Kind     string `json:"kind"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Usage    Usage  `json:"usage"`
-	Note     string `json:"note,omitempty"`
+	Kind     string    `json:"kind"`
+	Provider string    `json:"provider"`
+	Model    string    `json:"model"`
+	Usage    llm.Usage `json:"usage"`
+	Note     string    `json:"note,omitempty"`
 }
 
 // CompactionEntry 上下文压缩点
@@ -107,17 +96,17 @@ type CompactionEntry struct {
 	Summary          string             `json:"summary"`
 	FirstKeptEntryID string             `json:"firstKeptEntryId"`
 	TokensBefore     int                `json:"tokensBefore"`
-	Details          *compact.FileLists `json:"details,omitempty"`
+	Details          *ctxview.FileLists `json:"details,omitempty"`
 	SystemMessage    *llm.SystemMessage `json:"systemMessage,omitempty"`
-	Usage            *Usage             `json:"usage,omitempty"`
+	Usage            *llm.Usage         `json:"usage,omitempty"`
 }
 
 // cloneFileLists 复制结构化文件元数据，避免会话条目共享可变切片
-func cloneFileLists(details *compact.FileLists) *compact.FileLists {
+func cloneFileLists(details *ctxview.FileLists) *ctxview.FileLists {
 	if details == nil {
 		return nil
 	}
-	return &compact.FileLists{
+	return &ctxview.FileLists{
 		ReadFiles:     append([]string{}, details.ReadFiles...),
 		ModifiedFiles: append([]string{}, details.ModifiedFiles...),
 	}

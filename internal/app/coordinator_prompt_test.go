@@ -218,11 +218,11 @@ func TestSetPromptSectionsConcurrentWithRun(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			coord.SetPromptSections(prompt.Sections{"preamble": "base", "cwd": "/new"})
 		}
 	}()
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		if _, err := coord.Run(context.Background(), "hi"); err != nil {
 			t.Errorf("Run() error = %v", err)
 			break

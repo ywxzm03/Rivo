@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ywxzm03/Rivo/internal/agent"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/llm/provider/deepseek"
 	"github.com/ywxzm03/Rivo/internal/prompt"
@@ -21,9 +22,7 @@ func operationApp(t *testing.T, stream llm.StreamFn, sink llm.AgentEventSink) *A
 	t.Helper()
 	setupPromptEnv(t)
 	cfg := configWithBuiltin(deepseek.ProviderID, deepseek.DefaultModel)
-	spec := cfg.registry[deepseek.ProviderID]
-	spec.new = func(string, string) ([]llm.Model, llm.StreamFn) { return spec.models, stream }
-	cfg.registry[deepseek.ProviderID] = spec
+	cfg = cfg.WithStreamForTest(deepseek.ProviderID, cfg.AvailableModels(), stream)
 	a, err := NewWithSessionDir(cfg, t.TempDir(), sink)
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +146,10 @@ func (r *steeringWithdrawRunner) Continue(context.Context) (*llm.AssistantMessag
 
 func (r *steeringWithdrawRunner) Steer(string) error { return nil }
 
+func (r *steeringWithdrawRunner) SteerMessage(llm.UserMessage) error { return nil }
+
+func (r *steeringWithdrawRunner) FollowUpMessage(llm.UserMessage) error { return nil }
+
 func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
 	r.calls++
 	r.withdraw()
@@ -156,7 +159,7 @@ func (r *steeringWithdrawRunner) ContinueSteering(context.Context) (*llm.Assista
 func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
 	a := operationApp(t, nil, nil)
 	runner := &steeringWithdrawRunner{}
-	runner.withdraw = func() { a.agent.TakeSteering() }
+	runner.withdraw = func() { a.agent.Take(agent.QueueSteering) }
 	a.coordinator.Agent = runner
 	a.active = &Operation{kind: OperationRun}
 	if err := a.agent.Steer("withdraw me"); err != nil {
@@ -172,6 +175,112 @@ func TestContinueQueuedPreservesReplyWhenSteeringIsWithdrawn(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("ContinueSteering calls = %d, want one", runner.calls)
+	}
+}
+
+func TestContinueQueuedDrainsSteeringBeforeFollowUp(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &orderRecordingRunner{queue: a.agent}
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	if err := a.agent.Steer("steer me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.agent.FollowUp("follow me"); err != nil {
+		t.Fatal(err)
+	}
+	// 后继 run 期间再入队一条 steering，收尾循环必须重新消费它
+	runner.onContinueFollowUp = func() {
+		if err := a.agent.Steer("late steering"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	want := []string{"steering", "follow-up", "steering"}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("continuation order = %v, want %v", runner.calls, want)
+	}
+	if a.agent.Len(agent.QueueSteering) > 0 || a.agent.Len(agent.QueueFollowUp) > 0 {
+		t.Fatalf("queues not drained: %v / %v", a.agent.Messages(agent.QueueSteering), a.agent.Messages(agent.QueueFollowUp))
+	}
+	if !a.active.closing {
+		t.Fatal("operation stayed open after queues drained")
+	}
+}
+
+// orderRecordingRunner 记录 continuation 调用顺序，并可注入后继期间的入队
+type orderRecordingRunner struct {
+	queue              *agent.Agent
+	calls              []string
+	onContinueFollowUp func()
+}
+
+func (r *orderRecordingRunner) Run(context.Context, string) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) Continue(context.Context) (*llm.AssistantMessage, error) {
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) Steer(string) error { return nil }
+
+func (r *orderRecordingRunner) SteerMessage(llm.UserMessage) error { return nil }
+
+func (r *orderRecordingRunner) FollowUpMessage(llm.UserMessage) error { return nil }
+
+func (r *orderRecordingRunner) ContinueSteering(context.Context) (*llm.AssistantMessage, error) {
+	r.calls = append(r.calls, "steering")
+	r.queue.Take(agent.QueueSteering)
+	return nil, nil
+}
+
+func (r *orderRecordingRunner) ContinueFollowUp(context.Context) (*llm.AssistantMessage, error) {
+	r.calls = append(r.calls, "follow-up")
+	r.queue.Take(agent.QueueFollowUp)
+	if r.onContinueFollowUp != nil {
+		r.onContinueFollowUp()
+		r.onContinueFollowUp = nil
+	}
+	return nil, nil
+}
+
+func TestEnqueueFollowUpRejectedDuringManualCompact(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	a.active = &Operation{kind: OperationCompact}
+	if err := a.EnqueueFollowUp("during compact"); !errors.Is(err, ErrFollowUpUnavailable) {
+		t.Fatalf("EnqueueFollowUp() error = %v, want unavailable", err)
+	}
+	a.active = &Operation{kind: OperationRun}
+	if err := a.EnqueueFollowUp("during run"); err != nil {
+		t.Fatalf("EnqueueFollowUp() during run error = %v", err)
+	}
+}
+
+// 收尾窗口关闭后，新入队必须被拒绝而不是静默留在队列里
+func TestContinueQueuedClosesSubmissionWindowAtomically(t *testing.T) {
+	a := operationApp(t, nil, nil)
+	runner := &orderRecordingRunner{queue: a.agent}
+	a.coordinator.Agent = runner
+	a.active = &Operation{kind: OperationRun}
+	result := a.continueQueuedSteering(context.Background(), OperationResult{})
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if !a.active.closing {
+		t.Fatal("submission window stayed open with empty queues")
+	}
+	if err := a.EnqueueSteering("after teardown"); !errors.Is(err, ErrSteeringUnavailable) {
+		t.Fatalf("EnqueueSteering() after teardown = %v, want unavailable", err)
+	}
+	if err := a.EnqueueFollowUp("after teardown"); !errors.Is(err, ErrFollowUpUnavailable) {
+		t.Fatalf("EnqueueFollowUp() after teardown = %v, want unavailable", err)
+	}
+	if a.agent.Len(agent.QueueSteering) > 0 || a.agent.Len(agent.QueueFollowUp) > 0 {
+		t.Fatalf("rejected input leaked into queues: %v / %v", a.agent.Messages(agent.QueueSteering), a.agent.Messages(agent.QueueFollowUp))
 	}
 }
 
@@ -200,7 +309,7 @@ func TestClearOperationMovesLeafWithoutChangingFileOrSettings(t *testing.T) {
 	if result := op.Wait(); result.Err != nil || result.Exit {
 		t.Fatalf("clear result = %+v", result)
 	}
-	if a.session.LeafID() != "" || len(a.ContextView().Messages()) != 0 || len(a.agent.AgentContext.Messages) != 0 {
+	if a.session.LeafID() != "" || len(a.ContextView().Messages()) != 0 || len(a.agent.Context().Messages) != 0 {
 		t.Fatal("clear retained the active context")
 	}
 	if a.CurrentModel().Provider != model.Provider || a.CurrentModel().ID != model.ID || a.CurrentThinkingLevel() != thinking {
@@ -276,7 +385,7 @@ func TestAssistantCommitRetryReusesOutputAndEntryID(t *testing.T) {
 	if result := op.Wait(); !errors.As(result.Err, &commitErr) {
 		t.Fatalf("result = %+v, want storage failure", result)
 	}
-	if !reflect.DeepEqual(before, a.session.BuildContext()) || !reflect.DeepEqual(before.Messages(), a.agent.AgentContext.Messages) {
+	if !reflect.DeepEqual(before, a.session.BuildContext()) || !reflect.DeepEqual(before.Messages(), a.agent.Context().Messages) {
 		t.Fatal("failed assistant commit changed authoritative context")
 	}
 	restore()
@@ -338,14 +447,14 @@ func TestSteeringCommitRetryDoesNotDuplicateQueuedMessage(t *testing.T) {
 	if result := op.Wait(); result.Err == nil {
 		t.Fatal("want steering commit failure")
 	}
-	if got := a.SteeringMessages(); len(got) != 1 || got[0] != "queued" {
+	if got := a.QueueMessages(agent.QueueSteering); len(got) != 1 || got[0] != "queued" {
 		t.Fatalf("steering queue = %v, want queued message restored", got)
 	}
 	restore()
 	if _, err := a.Run(context.Background(), "next"); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.SteeringMessages(); len(got) != 0 {
+	if got := a.QueueMessages(agent.QueueSteering); len(got) != 0 {
 		t.Fatalf("steering queue after retry = %v, want empty", got)
 	}
 	queued, next := 0, 0
@@ -428,7 +537,9 @@ func TestImagePendingIsRejectedBeforeReplayOnTextOnlyModel(t *testing.T) {
 	if !a.session.HasPending() {
 		t.Fatal("image message was not retained as pending")
 	}
-	a.agent.AgentConfig.Model.SupportsImages = false
+	model := a.agent.Config().Model
+	model.SupportsImages = false
+	a.agent.SetModel(model)
 	result := a.executeOperation(context.Background(), OperationRequest{Kind: OperationRun, Value: "next"})
 	if result.Err == nil || !strings.Contains(result.Err.Error(), "pending image input") {
 		t.Fatalf("result = %+v, want pending image capability error", result)
@@ -440,7 +551,7 @@ func TestImagePendingIsRejectedBeforeReplayOnTextOnlyModel(t *testing.T) {
 
 func TestApplyModelSynchronizesCoordinatorModel(t *testing.T) {
 	a := operationApp(t, nil, nil)
-	if err := a.applyModel(deepseek.ProviderID, "deepseek-v4-pro", false); err != nil {
+	if err := a.switchModel(deepseek.ProviderID, "deepseek-v4-pro"); err != nil {
 		t.Fatal(err)
 	}
 	if a.coordinator.model.ID != "deepseek-v4-pro" {
@@ -575,7 +686,7 @@ func TestToolBatchCommitRetryDoesNotExecuteAgain(t *testing.T) {
 		return events, nil
 	}, nil)
 	tool := &trackedTool{started: make(chan struct{}, 2), release: make(chan struct{})}
-	a.agent.AgentContext.Tools = []llm.Tool{tool}
+	a.agent.SetTools([]llm.Tool{tool})
 	op, err := a.Start(context.Background(), OperationRequest{Kind: OperationRun, Value: "execute"})
 	if err != nil {
 		t.Fatal(err)
@@ -666,14 +777,14 @@ func TestPromptPatchCommitFailureDoesNotDisappearOnRetry(t *testing.T) {
 	if _, err := a.Run(context.Background(), "hello"); err == nil {
 		t.Fatal("want patch storage failure")
 	}
-	if calls != 0 || llm.CurrentSystemMessage(a.agent.AgentContext.Messages).Sections["preamble"] != "old" {
+	if calls != 0 || llm.CurrentSystemMessage(a.agent.Context().Messages).Sections["preamble"] != "old" {
 		t.Fatal("failed patch changed request state")
 	}
 	restore()
 	if _, err := a.Run(context.Background(), "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || llm.CurrentSystemMessage(a.agent.AgentContext.Messages).Sections["preamble"] != "new" {
+	if calls != 1 || llm.CurrentSystemMessage(a.agent.Context().Messages).Sections["preamble"] != "new" {
 		t.Fatal("retried request lost system patch")
 	}
 }

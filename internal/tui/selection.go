@@ -11,20 +11,20 @@ import (
 )
 
 func (m *Model) hasSelection() bool {
-	return m.selectionAnchor != m.selectionFocus
+	return m.sel.anchor != m.sel.focus
 }
 
 func (m *Model) clearSelection() {
-	m.selectionAnchor = screenPoint{}
-	m.selectionFocus = screenPoint{}
-	m.selecting = false
+	m.sel.anchor = screenPoint{}
+	m.sel.focus = screenPoint{}
+	m.sel.active = false
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	m.mousePosition = screenPoint{x: msg.X, y: msg.Y}
-	m.mousePositionSet = true
+	m.sel.mouse = screenPoint{x: msg.X, y: msg.Y}
+	m.sel.mouseSet = true
 	if mouseIsWheel(msg) {
-		if m.selector == nil {
+		if !m.overlayOpen() {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return cmd
@@ -34,7 +34,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Button == tea.MouseButtonRight && msg.Action == tea.MouseActionPress {
 		return m.readClipboard()
 	}
-	if m.selector != nil {
+	if m.overlayOpen() {
 		return nil
 	}
 	switch msg.Action {
@@ -50,27 +50,32 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if m.clock != nil {
 			now = m.clock()
 		}
-		if now.Sub(m.lastClickAt) <= 450*time.Millisecond && msg.Y == m.lastClick.y && abs(msg.X-m.lastClick.x) <= 2 {
+		if now.Sub(m.sel.lastClickAt) <= 450*time.Millisecond && msg.Y == m.sel.lastClick.y && abs(msg.X-m.sel.lastClick.x) <= 2 {
 			if left, right, ok := wordBounds(m.frameLines(), screenPoint{x: msg.X, y: msg.Y}); ok {
-				m.selectionAnchor = screenPoint{x: left, y: msg.Y}
-				m.selectionFocus = screenPoint{x: right, y: msg.Y}
-				m.selecting = false
-				m.lastClickAt = time.Time{}
+				m.sel.anchor = screenPoint{x: left, y: msg.Y}
+				m.sel.focus = screenPoint{x: right, y: msg.Y}
+				m.sel.active = false
+				m.sel.lastClickAt = time.Time{}
 				return m.copySelection()
 			}
 		}
-		m.lastClick, m.lastClickAt = screenPoint{x: msg.X, y: msg.Y}, now
-		m.selectionAnchor = screenPoint{x: msg.X, y: msg.Y}
-		m.selectionFocus = m.selectionAnchor
-		m.selecting = true
+		m.sel.lastClick, m.sel.lastClickAt = screenPoint{x: msg.X, y: msg.Y}, now
+		m.sel.anchor = screenPoint{x: msg.X, y: msg.Y}
+		m.sel.focus = m.sel.anchor
+		m.sel.active = true
 	case tea.MouseActionMotion:
-		if m.selecting {
-			m.selectionFocus = screenPoint{x: msg.X, y: msg.Y}
+		if m.sel.active {
+			m.sel.focus = screenPoint{x: msg.X, y: msg.Y}
 		}
 	case tea.MouseActionRelease:
-		if m.selecting {
-			m.selectionFocus = screenPoint{x: msg.X, y: msg.Y}
-			m.selecting = false
+		if m.sel.active {
+			m.sel.focus = screenPoint{x: msg.X, y: msg.Y}
+			m.sel.active = false
+			// 没有拖动就是一次单击：落在工具行、分组摘要或 Thinking... 上时切换展开
+			if !m.hasSelection() && m.toggleToolHit(msg.Y+m.viewport.YOffset) {
+				m.sel.lastClickAt = time.Time{}
+				return nil
+			}
 			return m.copySelection()
 		}
 	}
@@ -78,7 +83,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 }
 
 func (m *Model) scrollWheel(direction int) {
-	if m.selector != nil {
+	if m.overlayOpen() {
 		return
 	}
 	if direction > 0 {
@@ -121,7 +126,7 @@ func (m *Model) selectedText() string {
 	if len(lines) == 0 || !m.hasSelection() {
 		return ""
 	}
-	start, end := m.selectionAnchor, m.selectionFocus
+	start, end := m.sel.anchor, m.sel.focus
 	if pointBefore(end, start) {
 		start, end = end, start
 	}
@@ -176,7 +181,7 @@ func wordBounds(lines []string, point screenPoint) (int, int, bool) {
 	}
 	var cells []cell
 	column := 0
-	for _, r := range []rune(line) {
+	for _, r := range line {
 		width := ansi.StringWidth(string(r))
 		if width <= 0 {
 			width = 1

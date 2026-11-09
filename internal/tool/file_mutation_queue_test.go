@@ -56,7 +56,6 @@ func TestFileMutationQueueRunsDifferentFilesInParallel(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	for _, name := range []string{"a.txt", "b.txt"} {
-		name := name
 		go func() {
 			defer wg.Done()
 			_, _ = withFileMutationQueue(context.Background(), filepath.Join(dir, name), func() (struct{}, error) {

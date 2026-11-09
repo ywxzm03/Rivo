@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	toolargs "github.com/ywxzm03/Rivo/internal/tool/args"
 )
 
 const lsDefaultLimit = 500
@@ -52,37 +53,47 @@ func (l *Ls) Parameters() map[string]any {
 }
 
 // Execute 列出目录内容，目录带斜杠后缀，撞到条目数或字节上限时附上提示
+// lsParams 是 ls 工具的参数形状
+type lsParams struct {
+	Path  string `json:"path"`
+	Limit int    `json:"limit"`
+}
+
 func (l *Ls) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
 	// 1.取参数，limit 非正数当作没给
-	path, _ := args["path"].(string)
+	params, err := toolargs.Decode[lsParams](args)
+	if err != nil {
+		return llm.ToolResult{}, err
+	}
+	path := params.Path
 	if path == "" {
 		path = "."
 	}
-	limit, _ := argInt(args, "limit")
+	limit := params.Limit
 	if limit <= 0 {
 		limit = lsDefaultLimit
 	}
 
 	// 2.解析路径并确认是目录
-	absPath, err := resolvePathFrom(path, l.WorkingDir)
+	absPath, err := resolvePathFrom(path, toolWorkingDir(ctx, l.WorkingDir))
 	if err != nil {
 		return llm.ToolResult{}, err
 	}
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return llm.ToolResult{}, fmt.Errorf("Path not found: %s", absPath)
+			return llm.ToolResult{}, fmt.Errorf("path not found: %s", absPath)
 		}
 		return llm.ToolResult{}, err
 	}
 	if !info.IsDir() {
-		return llm.ToolResult{}, fmt.Errorf("Not a directory: %s", absPath)
+		return llm.ToolResult{}, fmt.Errorf("not a directory: %s", absPath)
 	}
 
 	// 3.列目录并按名字排序
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
-		return llm.ToolResult{}, fmt.Errorf("Cannot read directory: %w", err)
+		return llm.ToolResult{}, fmt.Errorf("cannot read directory: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

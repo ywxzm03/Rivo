@@ -5,18 +5,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/tui"
 )
 
 func TestClipboardImagesEnforceTotalLimit(t *testing.T) {
-	_, err := clipboardImages([]llm.ImageContent{{Data: strings.Repeat("a", maxClipboardImageBytes+1)}})
+	_, err := clipboardImages([]tui.ImagePart{{Data: strings.Repeat("a", maxClipboardImageBytes+1)}})
 	if err == nil || !strings.Contains(err.Error(), "32 MiB") {
 		t.Fatalf("clipboardImages error = %v, want total limit error", err)
 	}
 }
 
 func TestClipboardImagesPreserveOrder(t *testing.T) {
-	data, err := clipboardImages([]llm.ImageContent{{MIMEType: "image/png", Data: "one"}, {MIMEType: "image/jpeg", Data: "two"}})
+	data, err := clipboardImages([]tui.ImagePart{{MIMEType: "image/png", Data: "one"}, {MIMEType: "image/jpeg", Data: "two"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -34,7 +34,7 @@ func (r *Runtime) expandSkillInput(a *app.App, input string) (string, error) {
 		name, args = name[:index], strings.TrimSpace(name[index:])
 	}
 	if name == "" {
-		return "", fmt.Errorf("Usage: /skill:<name> [args]")
+		return "", fmt.Errorf("usage: /skill:<name> [args]")
 	}
 	for _, skill := range a.Skills() {
 		if skill.Name != name {
@@ -42,7 +42,7 @@ func (r *Runtime) expandSkillInput(a *app.App, input string) (string, error) {
 		}
 		body, err := prompt.ReadSkillBody(skill.FilePath)
 		if err != nil {
-			return "", fmt.Errorf("Could not load skill %q: %w", name, err)
+			return "", fmt.Errorf("could not load skill %q: %w", name, err)
 		}
 		block := fmt.Sprintf("<skill name=\"%s\" location=\"%s\">\nReferences are relative to %s.\n\n%s\n</skill>", html.EscapeString(skill.Name), html.EscapeString(skill.FilePath), skill.BaseDir, body)
 		if args != "" {
@@ -50,7 +50,7 @@ func (r *Runtime) expandSkillInput(a *app.App, input string) (string, error) {
 		}
 		return block, nil
 	}
-	return "", fmt.Errorf("Unknown skill: %s", name)
+	return "", fmt.Errorf("unknown skill: %s", name)
 }
 
 func skillInvocation(text string) *tui.SkillInvocationView {

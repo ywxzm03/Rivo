@@ -12,9 +12,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/shell"
 )
 
-type Bash struct{ WorkingDir string }
+// Bash 执行 shell 命令。Background 非空时支持 run_in_background
+type Bash struct {
+	WorkingDir string
+	Background BackgroundRunner
+}
 
 func (b *Bash) Name() string { return "bash" }
 
@@ -25,7 +30,7 @@ func (b *Bash) PromptSnippet() string { return "Execute bash commands (ls, grep,
 func (b *Bash) PromptGuidelines() []string { return nil }
 
 func (b *Bash) Description() string {
-	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", defaultMaxLines, defaultMaxBytes/1024)
+	return fmt.Sprintf("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last %d lines or %dKB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds or run_in_background=true to start a BashTask and return its task ID.", defaultMaxLines, defaultMaxBytes/1024)
 }
 
 func (b *Bash) Parameters() map[string]any {
@@ -33,8 +38,19 @@ func (b *Bash) Parameters() map[string]any {
 }
 
 func (b *Bash) Execute(ctx context.Context, args map[string]any) (llm.ToolResult, error) {
+	command, _ := args["command"].(string)
+	// 主 agent 与子 agent 共用同一层灾难性命令拦截
+	if err := guardShellCommand(command); err != nil {
+		return llm.ToolResult{}, err
+	}
+	if background, ok := args["run_in_background"].(bool); ok && background {
+		if b.Background == nil {
+			return llm.ToolResult{}, fmt.Errorf("bash: background execution is unavailable")
+		}
+		return b.Background.RunBackground(ctx, args)
+	}
 	return executeShellCommand(ctx, args, "bash", b.WorkingDir, func(commandCtx context.Context, command string) (*exec.Cmd, error) {
-		bashPath, err := findBash()
+		bashPath, err := shell.FindBash()
 		if err != nil {
 			return nil, err
 		}
@@ -64,25 +80,25 @@ func (o *shellOutputAccumulator) result() (llm.ToolResult, error) {
 	content := sanitizeShellOutput(data)
 	truncation := truncateShellTail(content)
 	text := truncation.Content
-	details := map[string]any(nil)
+	var details llm.ToolDetails
 	if truncation.Truncated {
 		fullOutputPath, err := writeShellFullOutput(content)
 		if err != nil {
 			return llm.ToolResult{}, err
 		}
-		details = map[string]any{
-			"truncation": map[string]any{
-				"truncated":       true,
-				"truncatedBy":     truncation.TruncatedBy,
-				"totalLines":      truncation.TotalLines,
-				"totalBytes":      truncation.TotalBytes,
-				"outputLines":     truncation.OutputLines,
-				"outputBytes":     truncation.OutputBytes,
-				"lastLinePartial": truncation.LastLinePartial,
-				"maxLines":        defaultMaxLines,
-				"maxBytes":        defaultMaxBytes,
+		details = ShellDetails{
+			Truncation: &ShellTruncation{
+				Truncated:       true,
+				TruncatedBy:     truncation.TruncatedBy,
+				TotalLines:      truncation.TotalLines,
+				TotalBytes:      truncation.TotalBytes,
+				OutputLines:     truncation.OutputLines,
+				OutputBytes:     truncation.OutputBytes,
+				LastLinePartial: truncation.LastLinePartial,
+				MaxLines:        defaultMaxLines,
+				MaxBytes:        defaultMaxBytes,
 			},
-			"fullOutputPath": fullOutputPath,
+			FullOutputPath: fullOutputPath,
 		}
 		text += shellTruncationNote(truncation, fullOutputPath)
 	}
@@ -111,6 +127,32 @@ func sanitizeShellOutput(data []byte) string {
 		builder.WriteRune(r)
 	}
 	return builder.String()
+}
+
+// ShellDetails 是 bash 输出的结构化详情，只在输出被截断时填充
+type ShellDetails struct {
+	Truncation     *ShellTruncation `json:"truncation,omitempty"`
+	FullOutputPath string           `json:"fullOutputPath,omitempty"`
+}
+
+func (ShellDetails) ToolDetails() {}
+
+func init() { llm.RegisterToolDetails[ShellDetails]("bash", "truncation") }
+
+// powershell 与前台 bash 共用截断详情,但必须单独登记,否则按工具名还原时找不到
+func init() { llm.RegisterToolDetails[ShellDetails]("powershell", "truncation") }
+
+// ShellTruncation 描述尾部截断的规模
+type ShellTruncation struct {
+	Truncated       bool   `json:"truncated"`
+	TruncatedBy     string `json:"truncatedBy"`
+	TotalLines      int    `json:"totalLines"`
+	TotalBytes      int    `json:"totalBytes"`
+	OutputLines     int    `json:"outputLines"`
+	OutputBytes     int    `json:"outputBytes"`
+	LastLinePartial bool   `json:"lastLinePartial"`
+	MaxLines        int    `json:"maxLines"`
+	MaxBytes        int    `json:"maxBytes"`
 }
 
 type shellTruncation struct {

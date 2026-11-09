@@ -39,14 +39,14 @@ func TestSkillCompletionMatchesBareAndFullNames(t *testing.T) {
 
 func TestSkillCompletionScrollsToEveryCandidate(t *testing.T) {
 	m := testModel(100, 30)
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		m.state.Skills = append(m.state.Skills, SkillOption{Name: fmt.Sprintf("docs-%02d", i), Description: "Document instructions"})
 	}
 	typeText(m, "/skill:")
-	for i := 0; i < 11; i++ {
+	for range 11 {
 		press(m, tea.KeyDown)
 	}
-	if m.completion != 11 || len(strings.Split(m.completionView(), "\n")) != 5 || !strings.Contains(ansi.Strip(m.completionView()), "→ skill:docs-11") {
+	if m.composer.completion != 11 || len(strings.Split(m.completionView(), "\n")) != 5 || !strings.Contains(ansi.Strip(m.completionView()), "❯ skill:docs-11") {
 		t.Fatal("completion window did not follow the last skill")
 	}
 	assertFrame(t, m)
@@ -76,7 +76,7 @@ func TestSkillRenderingCollapsesInstructionsAndKeepsArguments(t *testing.T) {
 		t.Fatalf("expanded skill = %q", view)
 	}
 	message.Skill.Arguments = ""
-	m.showAllTools = false
+	m.transcript.showAllTools = false
 	if strings.Contains(ansi.Strip(m.renderMessage(message)), "❯") {
 		t.Fatal("argument-free skill created an empty user row")
 	}

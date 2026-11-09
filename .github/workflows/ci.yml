@@ -3,24 +3,7 @@ name: CI
 concurrency:
   group: >-
     ${{
-      (
-        github.event_name == 'pull_request'
-        || (
-          github.event_name == 'issue_comment'
-          && github.event.issue.pull_request
-          && github.event.comment.user.type != 'Bot'
-          && (
-            github.event.comment.author_association == 'MEMBER'
-            || github.event.comment.author_association == 'OWNER'
-            || github.event.comment.author_association == 'COLLABORATOR'
-          )
-          && (
-            startsWith(github.event.comment.body, '/open-code-review')
-            || startsWith(github.event.comment.body, '@open-code-review')
-          )
-        )
-      )
-      && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+      (github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number))
       || format('noop-{0}', github.run_id)
     }}
   cancel-in-progress: true
@@ -31,10 +14,56 @@ on:
       - main
   pull_request:
     types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
 
 jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: make check-fmt
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        run: make lint
+
+  deadcode:
+    name: Deadcode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run deadcode
+        run: make deadcode
+
   test:
     name: Test (${{ matrix.os }})
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -61,6 +90,23 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+  race:
+    name: Race (ubuntu)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run race tests
+        run: go test -race ./...
+
   coverage:
     name: Coverage
     if: github.event_name == 'pull_request'
@@ -78,8 +124,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests with coverage
-        run: go test -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Run tests with coverage threshold
+        run: make cover-check
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -88,57 +134,3 @@ jobs:
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  code-review:
-    name: OpenCodeReview
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      pull-requests: write
-    if: |
-      github.event_name == 'pull_request'
-      || (
-        github.event_name == 'issue_comment'
-        && github.event.issue.pull_request
-        && github.event.comment.user.type != 'Bot'
-        && (
-          github.event.comment.author_association == 'MEMBER'
-          || github.event.comment.author_association == 'OWNER'
-          || github.event.comment.author_association == 'COLLABORATOR'
-        )
-        && (
-          startsWith(github.event.comment.body, '/open-code-review')
-          || startsWith(github.event.comment.body, '@open-code-review')
-        )
-      )
-    steps:
-      - name: Get PR context
-        id: pr-context
-        if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNumber = context.issue.number;
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber
-            });
-            core.setOutput('base_ref', pullRequest.base.ref);
-            core.setOutput('head_sha', pullRequest.head.sha);
-
-      - name: Run OpenCodeReview
-        uses: alibaba/open-code-review@94450deebadda2cfa65230fa05b4c744f6381923 # v1.11.9
-        env:
-          OCR_NO_UPDATE: '1'
-        with:
-          llm_url: ${{ secrets.OCR_LLM_BASE_URL }}
-          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
-          llm_model: ${{ vars.OCR_LLM_MODEL }}
-          llm_use_anthropic: 'false'
-          llm_reasoning_effort: ${{ vars.OCR_LLM_REASONING_EFFORT }}
-          language: Chinese
-          ocr_version: '1.12.11'
-          base_ref: ${{ steps.pr-context.outputs.base_ref }}
-          head_sha: ${{ steps.pr-context.outputs.head_sha }}

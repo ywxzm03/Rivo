@@ -11,7 +11,7 @@ import (
 func scrollableModel(t *testing.T) *Model {
 	t.Helper()
 	m := testModel(80, 24)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		m.state.Messages = append(m.state.Messages, Message{ID: string(rune('a' + i)), Role: "assistant", Text: "scrollable line"})
 	}
 	m.refreshTranscript()
@@ -33,22 +33,22 @@ func TestJumpToBottomPillUsesClaudeLabelAndOverlay(t *testing.T) {
 	}
 	bounds, ok := m.jumpPillBounds()
 	if !ok || bounds.y != m.viewport.Height-1 {
-		t.Fatalf("pill bounds = %+v, visible=%v, want last viewport row", bounds, ok)
+		t.Fatalf("pill bounds = %+v, visible=%v, want last transcript row", bounds, ok)
 	}
 	assertFrame(t, m)
 }
 
 func TestJumpToBottomEscapeHasPriorityWhileBusy(t *testing.T) {
 	m := scrollableModel(t)
-	cancelled := 0
+	canceled := 0
 	m.busy = true
-	m.handlers.Cancel = func() { cancelled++ }
+	m.handlers.Cancel = func() { canceled++ }
 	press(m, tea.KeyEsc)
 	if !m.viewport.AtBottom() {
 		t.Fatal("Escape should jump to the bottom")
 	}
-	if cancelled != 0 {
-		t.Fatalf("Escape cancelled the operation %d times, want 0", cancelled)
+	if canceled != 0 {
+		t.Fatalf("Escape canceled the operation %d times, want 0", canceled)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestJumpToBottomPillHiddenForCompletionAndSelector(t *testing.T) {
 		t.Fatal("completion UI should hide jump pill")
 	}
 	press(m, tea.KeyEsc)
-	if m.completionHidden == false {
+	if m.composer.completionHidden == false {
 		t.Fatal("Escape should dismiss completion when jump pill is hidden")
 	}
 

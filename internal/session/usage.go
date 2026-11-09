@@ -50,27 +50,14 @@ func (m *SessionManager) UsageTotals() UsageTotals {
 				}
 			}
 		case *UsageEntry:
-			totals.Add(usageFromWire(entry.Usage))
+			totals.Add(cloneUsage(entry.Usage))
 		case *CompactionEntry:
 			if entry.Usage != nil {
-				totals.Add(usageFromWire(*entry.Usage))
+				totals.Add(cloneUsage(*entry.Usage))
 			}
 		}
 	}
 	return totals
-}
-
-func usageFromWire(usage Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        usage.InputTokens,
-		OutputTokens:       usage.OutputTokens,
-		CacheReadTokens:    usage.CacheReadTokens,
-		CacheWriteTokens:   usage.CacheWriteTokens,
-		CacheWrite1HTokens: usage.CacheWrite1HTokens,
-		ReasoningTokens:    usage.ReasoningTokens,
-		TotalTokens:        usage.TotalTokens,
-		Cost:               cloneCost(usage.Cost),
-	}
 }
 
 func cloneCost(cost *llm.Cost) *llm.Cost {

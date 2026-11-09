@@ -83,7 +83,7 @@ func TestStoreDeletesFilesCreatedDuringUserTurn(t *testing.T) {
 
 func TestStoreEvictsOldestSnapshots(t *testing.T) {
 	store := New(t.TempDir(), "session", nil, nil, nil)
-	for i := 0; i < MaxSnapshots+1; i++ {
+	for i := range MaxSnapshots + 1 {
 		if err := store.MakeSnapshot(string(rune('a' + i))); err != nil {
 			t.Fatal(err)
 		}

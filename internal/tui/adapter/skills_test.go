@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 	"github.com/ywxzm03/Rivo/internal/session"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -38,7 +39,7 @@ func newSkillRuntime(t *testing.T, handler http.HandlerFunc) (*Runtime, string, 
 	}
 	path := filepath.Join(agentDir, "skills", "docs & guide", "SKILL.md")
 	writeManualSkill(t, path, "Original instructions")
-	cfg, err := app.Load()
+	cfg, err := provider.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestSkillInvocationExpandsForModelAndRestoresSavedBody(t *testing.T) {
 	var text string
 	for _, message := range messages {
 		if user, ok := message.(llm.UserMessage); ok {
-			text = textContent(user.Content)
+			text = llm.TextOf(user.Content)
 		}
 	}
 	parsed := skillInvocation(text)
@@ -223,7 +224,7 @@ func TestLinkedSkillReloadsIntoCompletionAndInvocation(t *testing.T) {
 		model := tui.New(*done.Snapshot, tui.Handlers{Request: func(req tui.Request) tea.Cmd { request = req; return nil }})
 		model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(input)})
-		if view := ansi.Strip(model.View()); !strings.Contains(view, "→ skill:pdf-tools") {
+		if view := ansi.Strip(model.View()); !strings.Contains(view, "❯ skill:pdf-tools") {
 			t.Fatalf("input %q: completion missing from %q", input, view)
 		}
 		model.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -298,10 +299,10 @@ func TestSkillCommitRetryReusesExpandedInputAfterFileChanges(t *testing.T) {
 	var users int
 	for _, message := range r.app.ContextView().Messages() {
 		if user, ok := message.(llm.UserMessage); ok {
-			if skillInvocation(textContent(user.Content)) != nil {
+			if skillInvocation(llm.TextOf(user.Content)) != nil {
 				users++
 			}
-			if skillInvocation(textContent(user.Content)) != nil && !strings.Contains(textContent(user.Content), "Original instructions") {
+			if skillInvocation(llm.TextOf(user.Content)) != nil && !strings.Contains(llm.TextOf(user.Content), "Original instructions") {
 				t.Fatal("retry replaced the original skill snapshot")
 			}
 		}

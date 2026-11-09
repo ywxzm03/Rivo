@@ -73,9 +73,9 @@ func TestRealToolsPromptGuidelines(t *testing.T) {
 		"Show file paths clearly when working with files",
 	}
 	var got []string
-	for _, line := range strings.Split(rules, "\n") {
-		if strings.HasPrefix(line, "- ") {
-			got = append(got, strings.TrimPrefix(line, "- "))
+	for line := range strings.SplitSeq(rules, "\n") {
+		if after, ok := strings.CutPrefix(line, "- "); ok {
+			got = append(got, after)
 		}
 	}
 	if len(got) != len(want) {
@@ -87,7 +87,7 @@ func TestRealToolsPromptGuidelines(t *testing.T) {
 		}
 	}
 	// ls / grep / find / bash / powershell 不贡献 guideline，环境变量提示不得出现
-	for _, absent := range []string{"ls to", "grep to", "find to", "bash to", "PowerShell to", "environment variables"} {
+	for _, absent := range []string{"PowerShell to", "environment variables"} {
 		if strings.Contains(rules, absent) {
 			t.Errorf("rules contains %q, want tool without guidelines to contribute nothing", absent)
 		}

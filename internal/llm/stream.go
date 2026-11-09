@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 const (
 	EventStart         = "start"
@@ -269,3 +272,166 @@ type AgentEventSink func(AgentEvent) error
 
 // StreamFn 返回由生产者关闭的事件通道；消费者取消后仍需排空通道
 type StreamFn func(ctx context.Context, model Model, c Context, opts Options) (<-chan AssistantMessageEvent, error)
+
+// SendEvent 投递一个可取消的事件：消费者已退出时返回 false
+func SendEvent(ctx context.Context, events chan<- AssistantMessageEvent, event AssistantMessageEvent) bool {
+	select {
+	case events <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// SendTerminal 投递终止事件；终止事件必须送达，不接受取消
+func SendTerminal(events chan<- AssistantMessageEvent, event AssistantMessageEvent) {
+	events <- event
+}
+
+// StopReasonForError 把 ctx 的取消/超时归为 aborted，其余视为真实错误
+func StopReasonForError(ctx context.Context, err error) StopReason {
+	if ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		return StopReasonAborted
+	}
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return StopReasonAborted
+	}
+	return StopReasonError
+}
+
+// CloneMessage 复制消息结构与内容切片，避免消费者读到生产中的消息
+func CloneMessage(message *AssistantMessage) *AssistantMessage {
+	if message == nil {
+		return nil
+	}
+	clone := *message
+	clone.Content = append([]Content(nil), message.Content...)
+	return &clone
+}
+
+// EventPartial 返回事件携带的 partial，无 partial 的事件返回 nil
+func EventPartial(event AssistantMessageEvent) *AssistantMessage {
+	switch event := event.(type) {
+	case AssistantMessageStartEvent:
+		return event.Partial
+	case AssistantMessageTextStartEvent:
+		return event.Partial
+	case AssistantMessageTextDeltaEvent:
+		return event.Partial
+	case AssistantMessageTextEndEvent:
+		return event.Partial
+	case AssistantMessageThinkingStartEvent:
+		return event.Partial
+	case AssistantMessageThinkingDeltaEvent:
+		return event.Partial
+	case AssistantMessageThinkingEndEvent:
+		return event.Partial
+	case AssistantMessageToolCallStartEvent:
+		return event.Partial
+	case AssistantMessageToolCallDeltaEvent:
+		return event.Partial
+	case AssistantMessageToolCallEndEvent:
+		return event.Partial
+	case AssistantMessageDoneEvent:
+		return event.Partial
+	case AssistantMessageErrorEvent:
+		return event.Partial
+	}
+	return nil
+}
+
+// WithPartial 把 partial 挂到事件上；不支持 partial 的事件原样返回
+func WithPartial(event AssistantMessageEvent, partial *AssistantMessage) AssistantMessageEvent {
+	switch event := event.(type) {
+	case AssistantMessageStartEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageTextStartEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageTextDeltaEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageTextEndEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageThinkingStartEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageThinkingDeltaEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageThinkingEndEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageToolCallStartEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageToolCallDeltaEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageToolCallEndEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageDoneEvent:
+		event.Partial = partial
+		return event
+	case AssistantMessageErrorEvent:
+		event.Partial = partial
+		return event
+	default:
+		return event
+	}
+}
+
+// AppendText 追加文本增量；空 slot 初始化为文本，其它类型保持不动
+func AppendText(message *AssistantMessage, index int, delta string) {
+	if index < 0 || index >= len(message.Content) {
+		return
+	}
+	if message.Content[index] == nil {
+		message.Content[index] = TextContent{Text: delta}
+		return
+	}
+	text, ok := message.Content[index].(TextContent)
+	if !ok {
+		return
+	}
+	text.Text += delta
+	message.Content[index] = text
+}
+
+// AppendThinking 追加思考增量；空 slot 初始化为思考，其它类型保持不动
+func AppendThinking(message *AssistantMessage, index int, delta string) {
+	if index < 0 || index >= len(message.Content) {
+		return
+	}
+	if message.Content[index] == nil {
+		message.Content[index] = ThinkingContent{Thinking: delta}
+		return
+	}
+	thinking, ok := message.Content[index].(ThinkingContent)
+	if !ok {
+		return
+	}
+	thinking.Thinking += delta
+	message.Content[index] = thinking
+}
+
+// TextAt 返回指定 slot 的文本，slot 不是文本时返回空串
+func TextAt(message *AssistantMessage, index int) string {
+	if message == nil || index < 0 || index >= len(message.Content) {
+		return ""
+	}
+	text, _ := message.Content[index].(TextContent)
+	return text.Text
+}
+
+// ThinkingAt 返回指定 slot 的思考内容，slot 不是思考时返回空串
+func ThinkingAt(message *AssistantMessage, index int) string {
+	if message == nil || index < 0 || index >= len(message.Content) {
+		return ""
+	}
+	thinking, _ := message.Content[index].(ThinkingContent)
+	return thinking.Thinking
+}

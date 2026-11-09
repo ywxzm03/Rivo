@@ -96,9 +96,6 @@ func ShouldCompact(contextTokens, contextWindow, reserveTokens int) bool {
 	if contextWindow <= 0 {
 		return false
 	}
-	threshold := contextWindow - reserveTokens
-	if threshold < 0 {
-		threshold = 0
-	}
+	threshold := max(contextWindow-reserveTokens, 0)
 	return contextTokens > threshold
 }

@@ -20,11 +20,19 @@ const APIOpenAICompletions = "openai-completions"
 // agentDirEnv 是 agent 配置目录的环境变量覆盖名
 const agentDirEnv = "RIVO_AGENT_DIR"
 
-// Settings 对应 ~/.rivo/agent/settings.json，只消费默认模型相关字段
+// Settings 对应 ~/.rivo/settings.json
 type Settings struct {
 	DefaultProvider      string `json:"defaultProvider"`
 	DefaultModel         string `json:"defaultModel"`
 	DefaultThinkingLevel string `json:"defaultThinkingLevel"`
+	// ReserveTokens 是上下文压缩预留 token；0 表示使用内置默认值
+	ReserveTokens int              `json:"reserveTokens"`
+	Codemode      CodemodeSettings `json:"codemode"`
+}
+
+// CodemodeSettings 保留显式开关，缺省值由装配层解析
+type CodemodeSettings struct {
+	Enabled *bool `json:"enabled"` // nil 表示使用默认开启
 }
 
 // Model 是 models.json 中 provider 下的模型条目
@@ -34,7 +42,9 @@ type Model struct {
 	API           string `json:"api"`
 	ContextWindow int    `json:"contextWindow"`
 	MaxTokens     int    `json:"maxTokens"`
-	Reasoning     bool   `json:"reasoning"`
+	// ReserveTokens 是上下文压缩预留 token；0 表示使用 settings 的全局默认
+	ReserveTokens int  `json:"reserveTokens"`
+	Reasoning     bool `json:"reasoning"`
 	// SupportsImages 影响 read 工具是否把图片降级为文字说明
 	SupportsImages bool `json:"supportsImages"`
 	// Input 包含 image 时表示模型接受图片
@@ -83,6 +93,7 @@ type ModelOverride struct {
 	Cost             *CostOverride      `json:"cost"`
 	ContextWindow    *int               `json:"contextWindow"`
 	MaxTokens        *int               `json:"maxTokens"`
+	ReserveTokens    *int               `json:"reserveTokens"`
 	ThinkingLevelMap map[string]*string `json:"thinkingLevelMap"`
 	SamplingParams   map[string]any     `json:"samplingParams"`
 }
@@ -120,7 +131,7 @@ func (p Provider) HasAPI() bool {
 	return p.apiSet || (p.API != "" && !p.apiDefaulted)
 }
 
-// ModelsFile 对应 ~/.rivo/agent/models.json，解析时保持文件顺序
+// ModelsFile 对应 ~/.rivo/models.json，解析时保持文件顺序
 type ModelsFile struct {
 	Providers []NamedProvider
 }
@@ -131,7 +142,7 @@ type NamedProvider struct {
 	Provider Provider
 }
 
-// Dir 返回 agent 配置目录 ~/.rivo/agent；设置 RIVO_AGENT_DIR 时使用其值
+// Dir 返回配置目录 ~/.rivo；设置 RIVO_AGENT_DIR 时使用其值
 func Dir() (string, error) {
 	if dir := strings.TrimSpace(os.Getenv(agentDirEnv)); dir != "" {
 		return dir, nil
@@ -140,7 +151,7 @@ func Dir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("config: failed to get user home directory: %w", err)
 	}
-	return filepath.Join(home, ".rivo", "agent"), nil
+	return filepath.Join(home, ".rivo"), nil
 }
 
 // LoadSettings 读取 settings.json，文件不存在返回零值配置

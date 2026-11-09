@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ywxzm03/Rivo/internal/app"
 	"github.com/ywxzm03/Rivo/internal/filehistory"
 	"github.com/ywxzm03/Rivo/internal/llm"
+	"github.com/ywxzm03/Rivo/internal/provider"
 )
 
 func TestFileRestoreSummaryIncludesFailures(t *testing.T) {
@@ -21,7 +21,7 @@ func TestFileRestoreSummaryIncludesFailures(t *testing.T) {
 }
 
 func TestRuntimeWarningEventProjectsNotice(t *testing.T) {
-	runtime := New(app.Config{}, "/project", "main")
+	runtime := New(provider.Config{}, "/project", "main")
 	if err := runtime.handleEvent(llm.WarningEvent{Message: "snapshot unavailable"}); err != nil {
 		t.Fatal(err)
 	}

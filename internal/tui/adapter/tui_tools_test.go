@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ywxzm03/Rivo/internal/compaction"
+	"github.com/ywxzm03/Rivo/internal/ctxview"
 	"github.com/ywxzm03/Rivo/internal/llm"
 	"github.com/ywxzm03/Rivo/internal/tui"
 )
@@ -36,7 +36,7 @@ func TestLiveThinkingUsesContentIndexes(t *testing.T) {
 	if !ok || converted.ToolGroup == nil {
 		t.Fatalf("converted = %+v", converted)
 	}
-	if len(converted.ToolGroup.Thinking) != 2 || converted.ToolGroup.Thinking[1].Text != "second" || !converted.ToolGroup.Thinking[1].Active {
+	if len(converted.ToolGroup.Thinking) != 2 || converted.ToolGroup.Thinking[1].Text != "second" {
 		t.Fatalf("thinking blocks = %+v", converted.ToolGroup.Thinking)
 	}
 }
@@ -48,7 +48,7 @@ func TestCompletedThinkingSnapshotIsProjectedWithoutStreamEvent(t *testing.T) {
 	if !ok || converted.ToolGroup == nil || len(converted.ToolGroup.Thinking) != 1 {
 		t.Fatalf("converted = %+v", converted)
 	}
-	if converted.ToolGroup.Thinking[0].Text != "final reasoning" || converted.ToolGroup.Thinking[0].Active {
+	if converted.ToolGroup.Thinking[0].Text != "final reasoning" {
 		t.Fatalf("thinking = %+v", converted.ToolGroup.Thinking)
 	}
 }
@@ -71,7 +71,7 @@ func TestCallsOnlyAssistantSnapshotWritesToolGroup(t *testing.T) {
 func TestEmptyAssistantStartShowsWorkingGroup(t *testing.T) {
 	runtime := &Runtime{sequence: 1}
 	converted, ok := runtime.liveAssistantLocked(llm.AssistantMessage{}, "assistant-1", nil)
-	if !ok || converted.ToolGroup == nil || !converted.ToolGroup.Active {
+	if !ok || converted.ToolGroup == nil {
 		t.Fatalf("converted = %+v", converted)
 	}
 	if len(runtime.messages) != 1 || runtime.messages[0].ToolGroup == nil {
@@ -97,7 +97,7 @@ func TestConsecutiveAssistantThinkingUpdatesReuseToolGroupAnchor(t *testing.T) {
 func TestAgentEndDividerIsBeforeFinalTextProjection(t *testing.T) {
 	runtime := &Runtime{turnStarted: time.Now().Add(-2 * time.Second)}
 	runtime.messages = []tui.Message{
-		{ID: "work", Role: "assistant", ToolGroup: &tui.ToolGroupView{ID: "group", Sealed: true}},
+		{ID: "work", Role: "assistant", ToolGroup: &tui.ToolGroupView{ID: "group"}},
 		{ID: "text", Role: "assistant", Text: "finished"},
 	}
 	runtime.addDividerLocked()
@@ -138,7 +138,7 @@ func TestHistoryProjectionMergesConsecutiveToolTurns(t *testing.T) {
 func TestHistoryProjectionMarksUnfinishedToolsInterrupted(t *testing.T) {
 	runtime := &Runtime{}
 	projected := runtime.projectContext(testContext([]llm.Message{
-		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "cancelled", Name: "bash", Arguments: map[string]any{"command": "sleep 1"}}}},
+		llm.AssistantMessage{Content: []llm.Content{llm.ToolCall{ID: "canceled", Name: "bash", Arguments: map[string]any{"command": "sleep 1"}}}},
 	}))
 	if len(projected) != 1 || projected[0].ToolGroup == nil || projected[0].ToolGroup.Calls[0].Status != tui.ToolInterrupted {
 		t.Fatalf("projected = %+v", projected)
@@ -147,12 +147,12 @@ func TestHistoryProjectionMarksUnfinishedToolsInterrupted(t *testing.T) {
 
 func TestHistoryProjectionHidesCompactionEntry(t *testing.T) {
 	runtime := &Runtime{}
-	view := compaction.ContextView{Entries: []compaction.ContextEntry{
-		{SourceID: "summary", Kind: compaction.ContextCompaction, Messages: []llm.Message{
+	view := ctxview.ContextView{Entries: []ctxview.ContextEntry{
+		{SourceID: "summary", Kind: ctxview.ContextCompaction, Messages: []llm.Message{
 			llm.SystemMessage{Sections: map[string]string{"preamble": "internal system snapshot"}},
-			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: compaction.WrappedSummary("internal summary")}}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: ctxview.WrappedSummary("internal summary")}}},
 		}},
-		{SourceID: "kept", Kind: compaction.ContextMessage, Messages: []llm.Message{
+		{SourceID: "kept", Kind: ctxview.ContextMessage, Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "kept message"}}},
 		}},
 	}}
@@ -165,10 +165,10 @@ func TestHistoryProjectionHidesCompactionEntry(t *testing.T) {
 	}
 }
 
-func testContext(messages []llm.Message) compaction.ContextView {
-	var view compaction.ContextView
+func testContext(messages []llm.Message) ctxview.ContextView {
+	var view ctxview.ContextView
 	for i, message := range messages {
-		view.Entries = append(view.Entries, compaction.ContextEntry{SourceID: fmt.Sprintf("test-%d", i), Kind: compaction.ContextMessage, Messages: []llm.Message{message}})
+		view.Entries = append(view.Entries, ctxview.ContextEntry{SourceID: fmt.Sprintf("test-%d", i), Kind: ctxview.ContextMessage, Messages: []llm.Message{message}})
 	}
 	return view
 }

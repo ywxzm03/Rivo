@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,8 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sahilm/fuzzy"
-
-	"github.com/ywxzm03/Rivo/internal/filehistory"
 )
 
 type choice struct {
@@ -24,22 +23,54 @@ type choice struct {
 
 // selector 在输入坞内展示，不创建覆盖消息区的全屏 overlay
 type selector struct {
-	kind, title       string
+	kind              RequestKind
+	title             string
 	treeRestoreTarget string
 	input             textinput.Model
 	items, filtered   []choice
 	selected          int
 }
 
-func (m *Model) openSelector(kind, query string) tea.Cmd {
+// openSelector 打开选择器；/resume 先异步加载会话列表，列表到达后再展示
+func (m *Model) openSelector(kind RequestKind, query string) tea.Cmd {
+	if kind == RequestResume && m.handlers.Sessions != nil {
+		if m.busy {
+			m.notice("An operation is running. Press Escape to interrupt.")
+			return nil
+		}
+		m.resumeQuery = query
+		if m.resumePending {
+			// 已有一次加载在途，只更新过滤词，避免重复扫描会话目录
+			return nil
+		}
+		m.resumePending = true
+		m.resumeGeneration++
+		generation := m.resumeGeneration
+		load := m.handlers.Sessions()
+		return func() tea.Msg {
+			msg := load()
+			if sessions, ok := msg.(SessionsMsg); ok {
+				sessions.Generation = generation
+				return sessions
+			}
+			return msg
+		}
+	}
+	m.resumePending = false
+	return m.openSelectorNow(kind, query)
+}
+
+// openSelectorNow 用当前快照里的候选直接打开选择器
+func (m *Model) openSelectorNow(kind RequestKind, query string) tea.Cmd {
 	if m.busy {
-		if kind == "tree" {
+		if kind == RequestTree {
 			m.notice("Wait for the current operation to finish before opening the tree.")
 		} else {
 			m.notice("An operation is running. Press Escape to interrupt.")
 		}
 		return nil
 	}
+	m.invalidateHistoryInput()
 	s := &selector{kind: kind}
 	switch kind {
 	case "model":
@@ -68,13 +99,13 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 			s.items = append(s.items, choice{value: model.Key(), label: label, detail: "Model Name: " + model.Name, current: model.Key() == m.state.ModelKey})
 		}
 	case "thinking":
-		s.title = "Thinking Level"
+		s.title = "Reasoning Effort"
 		for _, level := range m.currentModel().Levels {
 			s.items = append(s.items, choice{value: level, label: level, description: thinkingDescription(level), current: level == m.state.Thinking})
 		}
 	case "resume":
 		s.title = "Resume session"
-		for _, session := range m.state.Sessions {
+		for _, session := range m.sessions {
 			s.items = append(s.items, choice{value: session.Path, label: session.Summary, description: session.Modified, detail: session.Path})
 		}
 	case "tree":
@@ -97,25 +128,25 @@ func (m *Model) openSelector(kind, query string) tea.Cmd {
 			}
 		}
 	}
-	m.selector = s
+	m.composer.selector = s
 	m.editor.Blur()
 	m.layout()
 	return s.input.Focus()
 }
 
 func (m *Model) openTreeRestoreSelector(target string) tea.Cmd {
-	s := &selector{kind: "tree_restore", title: "Restore conversation tree", treeRestoreTarget: target}
+	s := &selector{kind: RequestTreeRestore, title: "Restore conversation tree", treeRestoreTarget: target}
 	s.items = []choice{
-		{value: string(filehistory.RestoreContext), label: "Restore conversation", detail: "Move the conversation tree only"},
-		{value: string(filehistory.RestoreCode), label: "Restore code", detail: "Restore tracked Write/Edit changes only"},
-		{value: string(filehistory.RestoreCodeAndContext), label: "Restore code and conversation", detail: "Restore tracked code, then move the conversation tree"},
+		{value: string(RestoreContext), label: "Restore conversation", detail: "Move the conversation tree only"},
+		{value: string(RestoreCode), label: "Restore code", detail: "Restore tracked Write/Edit changes only"},
+		{value: string(RestoreCodeAndContext), label: "Restore code and conversation", detail: "Restore tracked code, then move the conversation tree"},
 	}
 	s.input = textinput.New()
 	s.input.Prompt = "> "
 	s.input.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
 	s.input.PromptStyle = s.input.TextStyle
 	s.filter()
-	m.selector = s
+	m.composer.selector = s
 	m.editor.Blur()
 	m.layout()
 	return s.input.Focus()
@@ -158,34 +189,116 @@ func (s *selector) filter() {
 	s.selected = 0
 }
 
+// height 只由候选总数决定，与当前滚动位置无关，避免选中项下移时面板跳动
 func (s *selector) height(budget int) int {
 	budget = max(1, budget)
 	base := s.baseHeight(budget)
-	rows := len(s.filtered)
-	if rows == 0 {
-		rows = 1
+	rows := min(10, max(1, len(s.filtered)))
+	total := base + rows
+	// 列表被截断时固定预留一行溢出提示，滚到底部也占着这一行
+	if len(s.filtered) > rows {
+		total++
 	}
-	return min(budget, base+min(10, rows))
+	return min(budget, total)
+}
+
+// window 返回可视窗口的行数与是否被截断；截断时窗口外始终还有候选
+func (s *selector) window(budget int) (count int, truncated bool) {
+	room := max(0, s.height(budget)-s.baseHeight(budget))
+	count = min(len(s.filtered), min(10, room))
+	truncated = len(s.filtered) > count
+	// 截断时留一行给溢出提示
+	if truncated && count > 0 && count == room {
+		count--
+	}
+	return count, truncated
+}
+
+// numbered 表示是否给每行加序号：tree 保持原有的缩进树形，不参与编号
+func (s *selector) numbered() bool {
+	return s.kind != RequestTree
+}
+
+// rowLine 画一行候选：序号、游标位、正文与当前项勾
+// 当前项用绿字加勾；被选中时正文仍为绿色，游标仍是紫色箭头
+// 游标位在首行/末行且还有被折叠的候选时改画 ↑ / ↓，提示还有内容
+func (s *selector) rowLine(index, start, end int, numbered bool, width int) string {
+	item := s.filtered[index]
+	cursor := "  "
+	switch {
+	case index == s.selected:
+		cursor = "❯ "
+	case index == start && start > 0:
+		cursor = "↑ "
+	case index == end-1 && end < len(s.filtered):
+		cursor = "↓ "
+	}
+	prefix := ""
+	if numbered {
+		// 序号左对齐：先把 "N." 整体排好，再按最长编号的位数补右侧空格，
+		// 这样 9. 与 12. 的正文列一致，点号也不会和数字分家
+		// 前面留两格，编号不贴左边界
+		width := len(strconv.Itoa(len(s.filtered)))
+		prefix = "  " + fmt.Sprintf("%-*s  ", width+1, strconv.Itoa(index+1)+".")
+	}
+	color := textColor
+	switch {
+	case item.current:
+		color = greenColor
+	case index == s.selected:
+		color = accentColor
+	}
+	label := item.label
+	// provider 与 default 标记保持 muted，不给整行统一着色
+	if s.kind == RequestModel {
+		if n := strings.LastIndex(label, " ["); n >= 0 {
+			label = colored(color, label[:n]) + colored(mutedColor, label[n:])
+		}
+	} else {
+		label = colored(color, label)
+	}
+	line := colored(dimColor, prefix) + colored(accentColor, cursor) + label
+	if item.description != "" {
+		line += "  " + colored(mutedColor, item.description)
+	}
+	if item.current {
+		line += colored(greenColor, " ✓")
+	}
+	return line
+}
+
+// overflowLine 在列表底部提示还有多少候选没显示，上方的剩余量由首行的 ↑ 表达
+// 滚到底部时返回空行，保持面板高度不变
+func (s *selector) overflowLine(width, end int) string {
+	if end >= len(s.filtered) {
+		return ""
+	}
+	noun := "items"
+	switch s.kind {
+	case "model":
+		noun = "models"
+	case "resume":
+		noun = "sessions"
+	case "thinking":
+		noun = "levels"
+	}
+	return colored(mutedColor, fmt.Sprintf("  ... +%d %s", len(s.filtered)-end, noun))
 }
 
 func (s *selector) baseHeight(budget int) int {
 	if budget < 20 {
-		return 6
+		// 紧凑模式只剩边框、标题、输入框、提示行与底部边框
+		return 5
 	}
-	if s.kind == "tree" {
-		return 9
-	}
-	return 12
+	// 固定区：上下边框、标题、输入框与四处空行、提示行；位置与详情行都不再占位
+	return 9
 }
 
 func (s *selector) view(width, budget int) string {
 	height := s.height(budget)
 	compact := budget < 20
 	base := s.baseHeight(budget)
-	count := 0
-	if height > base {
-		count = min(10, min(height-base, len(s.filtered)))
-	}
+	count, truncated := s.window(budget)
 	start, end := 0, 0
 	if count > 0 {
 		start = max(0, min(s.selected-count/2, len(s.filtered)-count))
@@ -203,48 +316,18 @@ func (s *selector) view(width, budget int) string {
 	if !compact {
 		lines = append(lines, "")
 	}
+	numbered := s.numbered()
 	for i := start; i < end; i++ {
-		item := s.filtered[i]
-		cursor, check := "  ", "  "
-		if i == s.selected {
-			cursor = "→ "
-		}
-		if item.current {
-			check = "✓ "
-		}
-		color := textColor
-		if i == s.selected {
-			color = accentColor
-		}
-		label := item.label
-		// provider 与 default 标记保持 muted，不给整行统一着色
-		if s.kind == "model" {
-			if n := strings.LastIndex(label, " ["); n >= 0 {
-				label = colored(color, label[:n]) + colored(mutedColor, label[n:])
-			}
-		} else {
-			label = colored(color, label)
-		}
-		line := colored(accentColor, cursor+check) + label
-		if item.description != "" {
-			line += "  " + colored(mutedColor, item.description)
-		}
-		lines = append(lines, ansi.Truncate(line, width, "…"))
+		lines = append(lines, ansi.Truncate(s.rowLine(i, start, end, numbered, width), width, "…"))
 	}
 	if len(s.filtered) == 0 && height > base {
 		lines = append(lines, colored(mutedColor, "  No matches"))
 	}
-	position := ""
-	if len(s.filtered) > 0 {
-		position = fmt.Sprintf("  (%d/%d)", s.selected+1, len(s.filtered))
+	if truncated {
+		lines = append(lines, s.overflowLine(width, end))
 	}
-	lines = append(lines, colored(mutedColor, position))
-	if !compact && s.kind != "tree" {
-		detail := ""
-		if len(s.filtered) > 0 {
-			detail = s.filtered[s.selected].detail
-		}
-		lines = append(lines, "", colored(mutedColor, ansi.Truncate("  "+detail, width, "…")), "")
+	if !compact {
+		lines = append(lines, "")
 	}
 	lines = append(lines, colored(dimColor, ansi.Truncate("  Enter to select · Escape/Ctrl+C to cancel", width, "…")), rule(width, "", borderColor, false))
 	if len(lines) > height {
@@ -255,33 +338,33 @@ func (s *selector) view(width, budget int) string {
 }
 
 func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
-	s := m.selector
+	s := m.composer.selector
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		m.selector = nil
+		m.composer.selector = nil
 		m.lastCtrlC = time.Time{}
 		m.layout()
 		return m.editor.Focus()
 	case "up", "ctrl+p":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeSelection(-1)
 		} else {
 			s.selected = max(0, s.selected-1)
 		}
 	case "down", "ctrl+n":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeSelection(1)
 		} else {
 			s.selected = min(max(0, len(s.filtered)-1), s.selected+1)
 		}
 	case "left":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeToParent()
 			return nil
 		}
 		return m.updateSelectorInput(msg)
 	case "right":
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			s.moveTreeToFirstChild()
 			return nil
 		}
@@ -295,13 +378,13 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		item := s.filtered[s.selected]
-		if s.kind == "tree" {
+		if s.kind == RequestTree {
 			return m.openTreeRestoreSelector(item.value)
 		}
-		m.selector = nil
+		m.composer.selector = nil
 		m.layout()
-		if s.kind == "tree_restore" {
-			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, filehistory.RestoreMode(item.value)))
+		if s.kind == RequestTreeRestore {
+			return tea.Batch(m.editor.Focus(), m.dispatchTreeRestore(s.treeRestoreTarget, RestoreKind(item.value)))
 		}
 		return tea.Batch(m.editor.Focus(), m.dispatch(s.kind, item.value))
 	default:
@@ -310,7 +393,7 @@ func (m *Model) selectorKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode) tea.Cmd {
+func (m *Model) dispatchTreeRestore(target string, mode RestoreKind) tea.Cmd {
 	if m.busy {
 		m.notice("Wait for the current operation to finish before restoring the tree.")
 		return nil
@@ -321,11 +404,11 @@ func (m *Model) dispatchTreeRestore(target string, mode filehistory.RestoreMode)
 	m.busy, m.status = true, "Working"
 	m.canceling, m.compacting = false, false
 	m.operationID++
-	return tea.Batch(m.spinner.Tick, m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: "tree", Value: target, RestoreMode: mode}))
+	return tea.Batch(m.startSpinner(), m.handlers.Request(Request{ID: m.operationID, AfterID: m.lastMessageID(), Kind: RequestTree, Value: target, RestoreMode: mode}))
 }
 
 func (m *Model) updateSelectorInput(msg tea.KeyMsg) tea.Cmd {
-	s := m.selector
+	s := m.composer.selector
 	before := s.input.Value()
 	var cmd tea.Cmd
 	s.input, cmd = s.input.Update(msg)

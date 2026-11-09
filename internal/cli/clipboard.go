@@ -14,8 +14,7 @@ import (
 	"time"
 
 	textclipboard "github.com/atotto/clipboard"
-	"github.com/ywxzm03/Rivo/internal/llm"
-	"github.com/ywxzm03/Rivo/internal/tool"
+	"github.com/ywxzm03/Rivo/internal/imageutil"
 	"github.com/ywxzm03/Rivo/internal/tui"
 	systemclipboard "golang.design/x/clipboard"
 )
@@ -55,14 +54,14 @@ func readClipboardData() (tui.ClipboardData, error) {
 			if err != nil {
 				return tui.ClipboardData{}, err
 			}
-			return clipboardImages([]llm.ImageContent{image})
+			return clipboardImages([]tui.ImagePart{image})
 		} else if err != nil && !errors.Is(err, systemclipboard.ErrNoData) && !errors.Is(err, systemclipboard.ErrUnsupported) && !errors.Is(err, systemclipboard.ErrUnavailable) {
 			clipboardErr = err
 		}
 	}
 	if png, ok := readWSLClipboardImage(ctx); ok {
 		if image, err := processClipboardImage(png, "image/png"); err == nil {
-			return clipboardImages([]llm.ImageContent{image})
+			return clipboardImages([]tui.ImagePart{image})
 		}
 	}
 	if clipboardErr != nil {
@@ -75,7 +74,7 @@ func readClipboardData() (tui.ClipboardData, error) {
 	return tui.ClipboardData{Text: text}, nil
 }
 
-func clipboardImages(images []llm.ImageContent) (tui.ClipboardData, error) {
+func clipboardImages(images []tui.ImagePart) (tui.ClipboardData, error) {
 	total := 0
 	for _, image := range images {
 		total += len(image.Data)
@@ -86,18 +85,18 @@ func clipboardImages(images []llm.ImageContent) (tui.ClipboardData, error) {
 	return tui.ClipboardData{Images: images}, nil
 }
 
-func readClipboardFiles(ctx context.Context) ([]llm.ImageContent, bool) {
+func readClipboardFiles(ctx context.Context) ([]tui.ImagePart, bool) {
 	paths, err := systemclipboard.ReadFiles(ctx)
 	if err != nil || len(paths) == 0 {
 		return nil, false
 	}
-	var images []llm.ImageContent
+	var images []tui.ImagePart
 	for _, path := range paths {
 		data, ok := readClipboardFile(path)
 		if !ok {
 			continue
 		}
-		mimeType := tool.SniffImage(data)
+		mimeType := imageutil.Sniff(data)
 		if mimeType == "" {
 			continue
 		}
@@ -129,12 +128,12 @@ func readClipboardFile(path string) ([]byte, bool) {
 	return data, true
 }
 
-func processClipboardImage(data []byte, mimeType string) (llm.ImageContent, error) {
-	result, err := tool.ProcessImage(data, mimeType)
+func processClipboardImage(data []byte, mimeType string) (tui.ImagePart, error) {
+	result, err := imageutil.Process(data, mimeType)
 	if err != nil {
-		return llm.ImageContent{}, err
+		return tui.ImagePart{}, err
 	}
-	return llm.ImageContent{Data: result.Data, MIMEType: result.MIMEType}, nil
+	return tui.ImagePart{Data: result.Data, MIMEType: result.MIMEType}, nil
 }
 
 func readWSLClipboardImage(ctx context.Context) ([]byte, bool) {
