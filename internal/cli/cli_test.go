@@ -63,16 +63,16 @@ func TestRun(t *testing.T) {
 			wantStdout: "",
 		},
 		{
-			name:       "version is not implemented",
+			name:       "long version",
 			args:       []string{"--version"},
-			wantCode:   2,
-			wantStderr: "Rivo: unsupported argument \"--version\"\nRun 'Rivo --help' for usage.\n",
+			wantCode:   0,
+			wantStdout: "Rivo " + cli.Version + "\n",
 		},
 		{
-			name:       "short version is not implemented",
+			name:       "short version",
 			args:       []string{"-v"},
-			wantCode:   2,
-			wantStderr: "Rivo: unsupported argument \"-v\"\nRun 'Rivo --help' for usage.\n",
+			wantCode:   0,
+			wantStdout: "Rivo " + cli.Version + "\n",
 		},
 	}
 
@@ -98,6 +98,25 @@ func TestRun(t *testing.T) {
 				t.Errorf("Run() stderr = %q, want %q", got, tt.wantStderr)
 			}
 		})
+	}
+}
+
+func TestRunVersionUsesInjectedVersion(t *testing.T) {
+	useTestHome(t)
+	old := cli.Version
+	cli.Version = "1.2.3"
+	t.Cleanup(func() { cli.Version = old })
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Run([]string{"--version"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, want 0", code)
+	}
+	if got := stdout.String(); got != "Rivo 1.2.3\n" {
+		t.Errorf("Run() stdout = %q, want %q", got, "Rivo 1.2.3\n")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("Run() stderr = %q, want empty", stderr.String())
 	}
 }
 

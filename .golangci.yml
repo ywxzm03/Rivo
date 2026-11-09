@@ -3,14 +3,14 @@ version: "2"
 linters:
   default: none
   enable:
-    - govet          # 编译器视角的可疑代码，含 printf 格式串、锁拷贝
-    - ineffassign    # 赋值后从未被读取的变量
-    - misspell       # 英文拼写错误
-    - staticcheck    # 静态分析全集
-    - unused         # 未使用的常量、字段、函数
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unused
   settings:
     misspell:
-      locale: US     # 统一美式拼写
+      locale: US
   exclusions:
     generated: lax
     presets:
@@ -19,25 +19,21 @@ linters:
       - legacy
       - std-error-handling
     rules:
-      # cancelled 是 OpenAI Responses API 的协议状态值，不能改成 canceled
       - linters: [misspell]
         path: internal/llm/api/openai/responses/convert_test.go
         text: cancelled
       - linters: [misspell]
         path: internal/llm/api/openai/responses/stream_abort_test.go
         text: cancelled
-      # cancelled 是 codemode 持久化契约中的状态值
       - linters: [misspell]
         path: internal/tool/codemode/types.go
         text: cancelled
       - linters: [misspell]
         path: internal/tui/model.go
         text: cancelled
-      # Cancelling 是用户可见的界面文案，英式拼写是产品选择
       - linters: [misspell]
         path: internal/tui/editor.go
         text: Cancelling
-      # Colour 是 chroma 库 StyleEntry 的字段名，改不了
       - linters: [misspell]
         path: internal/tui/toolrow_diff.go
         text: Colour

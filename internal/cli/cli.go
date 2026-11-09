@@ -19,6 +19,9 @@ import (
 	"github.com/ywxzm03/Rivo/internal/session"
 )
 
+// Version 是构建时注入的版本号，未注入时为 dev
+var Version = "dev"
+
 var helpText = `Rivo - AI coding assistant
 
 Usage:
@@ -26,6 +29,7 @@ Usage:
 
 Options:
   -h, --help              Show this help
+  -v, --version           Show version
       --cost <path>       Print cost totals for a JSONL session and exit
       --continue          Continue the most recent session
       --resume            Alias of --continue
@@ -271,10 +275,14 @@ func runREPL(stdin io.Reader, stdout, stderr io.Writer, run func(context.Context
 }
 
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// 1.先扫描 --help：一旦出现即优先展示帮助，不校验其余参数
+	// 1.先扫描 --help / --version：一旦出现即优先输出，不校验其余参数
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--help" || args[i] == "-h" {
 			fmt.Fprint(stdout, helpText)
+			return 0
+		}
+		if args[i] == "--version" || args[i] == "-v" {
+			fmt.Fprintf(stdout, "Rivo %s\n", Version)
 			return 0
 		}
 		switch args[i] {
